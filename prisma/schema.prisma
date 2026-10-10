@@ -36,6 +36,32 @@ model Task {
   updatedAt   DateTime @updatedAt
 }
 
+model Event {
+  id          String   @id @default(uuid())
+  aggregateId String   @map("aggregate_id")
+  aggregateType String @map("aggregate_type")
+  eventType   String   @map("event_type")
+  payload     Json
+  version     Int
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([aggregateId, version])
+  @@map("events")
+}
+
+model TaskRead {
+  id         String   @id @default(uuid())
+  projectId  String   @map("project_id")
+  title      String
+  status     String   @default("PENDING")
+  assigneeId String?  @map("assignee_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@index([projectId, createdAt])
+  @@map("tasks_read")
+}
+
 enum TaskStatus {
   PENDING
   IN_PROGRESS

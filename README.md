@@ -1,118 +1,189 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# TaskFlow
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+[![CI](https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml)
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+API REST para gestão de tarefas, desenvolvida em **NestJS + TypeScript**, com **observabilidade completa** (OpenTelemetry + Jaeger + Prometheus + Grafana) e **CI automatizado** com GitHub Actions.
 
-## Description
+---
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## 🎯 Sobre o projeto
 
-## Project setup
+O TaskFlow é um projeto de estudo que simula uma aplicação backend real, cobrindo:
 
-```bash
-$ npm install
-```
+- **API REST** com NestJS e Prisma
+- **Banco de dados** PostgreSQL
+- **Observabilidade** com OpenTelemetry (traces e métricas)
+- **CI/CD** com GitHub Actions
+- **Infra local** com Docker Compose
 
-## Compile and run the project
+O objetivo é servir como **laboratório prático** para estudar arquitetura, resiliência e observabilidade em aplicações modernas.
 
-```bash
-# development
-$ npm run start
+---
 
-# watch mode
-$ npm run start:dev
+## 🏗️ Arquitetura
+┌─────────────────┐
+│ App NestJS │ ← instrumentada com OpenTelemetry
+│ (TaskFlow) │
+└────────┬────────┘
+│
+│ OTel SDK (auto-instrumentação)
+│
+┌────┴────┐
+│ │
+▼ ▼
+┌────────┐ ┌──────────────┐
+│ Jaeger │ │ Prometheus │ ← raspa a porta 9464
+│(traces)│ │ (métricas) │
+└────────┘ └──────┬───────┘
+│
+▼
+┌─────────┐
+│ Grafana │ ← dashboard com p50/p95/p99
+└─────────┘
 
-# production mode
-$ npm run start:prod
-```
 
-## Run tests
+**Fluxo:**
+1. Requisição HTTP chega no NestJS
+2. A auto-instrumentação do OTel cria um **span**
+3. O trace é enviado para o **Jaeger** (porta 4318)
+4. As métricas são expostas em `/metrics` (porta 9464)
+5. O **Prometheus** raspa esse endpoint a cada 5s
+6. O **Grafana** consulta o Prometheus e monta o dashboard
 
-```bash
-# unit tests
-$ npm run test
+---
 
-# e2e tests
-$ npm run test:e2e
+## 🧰 Stack
 
-# test coverage
-$ npm run test:cov
-```
+| Camada | Ferramenta | Versão |
+|--------|-----------|--------|
+| Runtime | Node.js | 24 |
+| Framework | NestJS | 12 |
+| ORM | Prisma | 7 |
+| Banco | PostgreSQL | 16 |
+| Observabilidade | OpenTelemetry SDK | latest |
+| Traces | Jaeger | latest |
+| Métricas | Prometheus | latest |
+| Dashboards | Grafana | latest |
+| Containerização | Docker | 29 |
+| CI | GitHub Actions | — |
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## 🚀 Como rodar
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### Pré-requisitos
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
+- Node.js 24+
+- Docker Desktop
+- PowerShell (Windows) — os scripts são `.ps1`
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### Primeira vez
 
-## Observability
+```powershell
+.\setup.ps1
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+O script:
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+Verifica pré-requisitos (Node, Docker)
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+Cria o .env a partir do .env.example (se não existir)
 
-This project is already instrumented. Create a free account at [observe.nestjs.com](https://observe.nestjs.com), add an application, and paste the generated app key and secret into the `ObserveModule.forRoot()` call in `src/app.module.ts`.
+Instala dependências (npm install)
 
-The free plan needs no payment details and covers 300,000 events a month. You can also browse the [live demo](https://www.observe-demo.nestjs.com/dashboard) first - the whole dashboard over a busy service's data, with nothing to install.
+Sobe os containers (PostgreSQL, Jaeger, Prometheus, Grafana)
 
-## Resources
+Aplica as migrações do Prisma
 
-Check out a few resources that may come in handy when working with NestJS:
+Desenvolvimento
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observe](https://observe.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+.\dev.ps1
 
-## Support
+Sobe a aplicação em modo watch. Acesse http://localhost:3000.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+Parar tudo
 
-## Stay in touch
+.\stop.ps1
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+Para os containers Docker.
 
-## License
+🔍 Serviços disponíveis
+Serviço	URL	Credenciais
+App	http://localhost:3000	—
+Jaeger (traces)	http://localhost:16686	—
+Prometheus (métricas)	http://localhost:9090	—
+Grafana (dashboards)	http://localhost:3001	admin / Teste@123
+Métricas raw	http://localhost:9464/metrics	—
+Dashboard no Grafana
+Após rodar o .\dev.ps1, acesse o Grafana em http://localhost:3001 e importe o dashboard TaskFlow - Observabilidade (JSON está em dashboards/).
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Para gerar tráfego e popular os gráficos:
+
+1..100 | ForEach-Object { curl.exe -s http://localhost:3000 | Out-Null }
+
+🧪 Testes
+
+# Rodar todos os testes
+npm test
+
+# Verificação de tipos
+npx tsc --noEmit
+
+# Lint
+npm run lint
+
+# Build
+npm run build
+
+🔄 CI (Integração Contínua)
+Cada push ou pull request para main dispara a pipeline de CI, que roda:
+
+Checkout do código
+
+Setup do Node.js 24
+
+npm ci (instala dependências)
+
+npx prisma generate (gera o Prisma Client)
+
+npx tsc --noEmit (verifica tipos)
+
+npm run lint (analisa código)
+
+npm test (roda testes)
+
+npm run build (compila a aplicação)
+
+Status: https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml/badge.svg
+
+📁 Estrutura
+
+🔄 CI (Integração Contínua)
+Cada push ou pull request para main dispara a pipeline de CI, que roda:
+
+Checkout do código
+
+Setup do Node.js 24
+
+npm ci (instala dependências)
+
+npx prisma generate (gera o Prisma Client)
+
+npx tsc --noEmit (verifica tipos)
+
+npm run lint (analisa código)
+
+npm test (roda testes)
+
+npm run build (compila a aplicação)
+
+Status: https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml/badge.svg
+
+📚 Documentação de estudo
+Este projeto é parte de uma trilha de estudos para nível Pleno/Sênior. Os módulos estudados estão documentados em:
+
+MODULO_1.md — Observabilidade Avançada
+
+MODULO_3.md — CI/CD na Prática
+
+📝 Licença
+UNLICENSED — Projeto pessoal de estudo.
