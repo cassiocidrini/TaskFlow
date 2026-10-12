@@ -38,3 +38,12 @@ jobs:
 
       - name: Build da aplicação
         run: npm run build
+
+      - name: Rodar testes unitários
+        run: npm run test:unit
+
+      - name: Rodar testes de integração
+        run: npm run test:integration
+
+      - name: Rodar testes E2E
+        run: npm run test:e2e
