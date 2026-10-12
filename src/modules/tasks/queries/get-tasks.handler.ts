@@ -1,6 +1,6 @@
 import { IQueryHandler, QueryHandler } from '@nestjs/cqrs';
 import { GetTasksQuery } from './get-tasks.query';
-import { PrismaService } from '../../prisma/prisma.service';
+import { PrismaService } from '../../../prisma/prisma.service';
 
 @QueryHandler(GetTasksQuery)
 export class GetTasksHandler implements IQueryHandler<GetTasksQuery> {

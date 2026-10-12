@@ -1,6 +1,6 @@
 import { EventsHandler, IEventHandler } from '@nestjs/cqrs';
 import { TaskCreatedEvent } from './task.events';
-import { PrismaService } from '../../prisma/prisma.service';
+import { PrismaService } from '../../../prisma/prisma.service';
 
 @EventsHandler(TaskCreatedEvent)
 export class TaskCreatedHandler implements IEventHandler<TaskCreatedEvent> {

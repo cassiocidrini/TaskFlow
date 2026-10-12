@@ -4,7 +4,7 @@ import { TasksController } from './tasks.controller';
 import { CreateTaskHandler } from './commands/create-task.handler';
 import { GetTasksHandler } from './queries/get-tasks.handler';
 import { TaskCreatedHandler } from './events/task-created.handler';
-import { EventStoreService } from '../events/event-store.service';
+import { EventStoreService } from '../../events/event-store.service';
 
 const CommandHandlers = [CreateTaskHandler];
 const QueryHandlers = [GetTasksHandler];

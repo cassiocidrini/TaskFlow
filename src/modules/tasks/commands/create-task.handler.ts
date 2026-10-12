@@ -1,7 +1,7 @@
 import { CommandHandler, ICommandHandler, EventBus } from '@nestjs/cqrs';
 import { randomUUID } from 'crypto';
 import { CreateTaskCommand } from './create-task.command';
-import { EventStoreService } from '../../events/event-store.service';
+import { EventStoreService } from '../../../events/event-store.service';
 import { TaskCreatedEvent } from '../events/task.events';
 
 @CommandHandler(CreateTaskCommand)
