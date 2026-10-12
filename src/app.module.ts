@@ -8,20 +8,29 @@ import { PrismaModule } from './prisma/prisma.module';
 import { TasksModule } from './modules/tasks/tasks.module';
 import { AuthModule } from './modules/auth/auth.module';
 
+// Em testes, não registra o throttle (evita 429 nos E2E)
+const throttleDisabled = process.env.DISABLE_THROTTLE === 'true';
+
 @Module({
   imports: [
     PrismaModule,
     CqrsModule.forRoot(),
-    AuthModule,
     TasksModule,
-    ThrottlerModule.forRoot([
-      { ttl: 60_000, limit: 100 },
-    ]),
+    AuthModule,
+    ...(throttleDisabled
+      ? []
+      : [
+          ThrottlerModule.forRoot([
+            { ttl: 60_000, limit: 100 },
+          ]),
+        ]),
   ],
   controllers: [AppController],
   providers: [
     AppService,
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    ...(throttleDisabled
+      ? []
+      : [{ provide: APP_GUARD, useClass: ThrottlerGuard }]),
   ],
 })
 export class AppModule {}
