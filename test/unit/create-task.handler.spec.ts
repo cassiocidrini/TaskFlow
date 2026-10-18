@@ -1,3 +1,11 @@
+/**
+ * `CreateTaskHandler` — o nascimento de um agregado event-sourced.
+ *
+ * Protege a ORDEM, que aqui é regra de negócio: `assertOwner → append → publish`. Autorização antes de qualquer
+ * efeito (o Event Store é append-only: um evento indevido nunca mais sai — OWASP A01) e publicação só depois de
+ * persistir. Também prova: zero efeitos quando o projeto não é do usuário, evento GRAVADO = evento PUBLICADO
+ * (eram montados separadamente e divergiam) e a prioridade/prazo atravessando o fluxo.
+ */
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { EventBus } from '@nestjs/cqrs';

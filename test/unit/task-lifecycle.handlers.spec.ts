@@ -1,3 +1,10 @@
+/**
+ * Handlers de ciclo de vida (uma linha cada).
+ *
+ * Técnica: um runner FALSO que aplica a mutação num agregado REAL. O teste prova só o que é responsabilidade do
+ * handler — chamar o método de domínio certo com o valor certo — sem repetir os testes do runner. Um teste deve
+ * ter UMA razão para quebrar.
+ */
 import {
   AssignTaskHandler,
   ChangeTaskStatusHandler,

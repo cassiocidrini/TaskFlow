@@ -3,6 +3,17 @@ import { EventsHandler, IEventHandler } from '@nestjs/cqrs';
 import { TaskCreatedEvent } from './task.events';
 import { PrismaService } from '../../../prisma/prisma.service';
 
+/**
+ * Projeção: insere a nova tarefa no Read Model `tasks_read` quando um `TaskCreated` é publicado (Observer).
+ *
+ * Roda DEPOIS da resposta HTTP (o `publish` do EventBus é fire-and-forget) — a origem da consistência eventual
+ * da listagem.
+ *
+ * **Idempotência:** eventos são entregues *at-least-once* (retry, replay, brokers como SQS). A segunda entrega
+ * do mesmo evento precisa ser inofensiva. `createMany({ skipDuplicates: true })` gera exatamente
+ * `INSERT … ON CONFLICT DO NOTHING` — atômico, sem race entre entregas simultâneas (o `upsert` do Prisma pode
+ * virar SELECT + INSERT). Provado contra o Postgres real em `test/integration/projections.spec.ts`.
+ */
 @EventsHandler(TaskCreatedEvent)
 export class TaskCreatedHandler implements IEventHandler<TaskCreatedEvent> {
   private readonly logger = new Logger(TaskCreatedHandler.name);

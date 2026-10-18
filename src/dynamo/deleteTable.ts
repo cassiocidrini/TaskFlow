@@ -1,3 +1,7 @@
+/**
+ * `npm run dynamo:delete` — remove a `TaskFlowTable` do LocalStack (laboratório do Módulo 04).
+ * Idempotente: tabela inexistente não é erro. Útil para recriar o modelo do zero após mudar chaves ou índices.
+ */
 import { DeleteTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { TABLE_NAME } from './client';
 

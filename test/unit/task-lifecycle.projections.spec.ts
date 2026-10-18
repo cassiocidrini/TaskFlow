@@ -1,3 +1,9 @@
+/**
+ * Projeções dos eventos de ciclo de vida (`UPDATE … SET`).
+ *
+ * Protege: cada evento atualiza a coluna certa, reaplicar o mesmo evento produz o mesmo UPDATE (idempotência
+ * natural), linha ausente vira WARN e não queda (evento fora de ordem) e falha de banco é logada e relançada.
+ */
 import { Logger } from '@nestjs/common';
 import {
   TaskAssignedProjection,

@@ -1,3 +1,11 @@
+/**
+ * @deprecated **Script obsoleto e quebrado — use `npm run events:list` (`src/events/list-events.ts`).**
+ *
+ * Duplicata antiga do listador do Event Store. Não funciona no Prisma 7: o `PrismaClient` exige um
+ * *driver adapter* (`@prisma/adapter-pg`) ou uma URL de conexão, e aqui ele é criado sem nenhum dos dois.
+ * Não é importado por nenhum módulo da aplicação. Mantido apenas até a limpeza de `src/` (scripts de
+ * estudo → `scripts/`), registrada como próximo passo na análise do projeto.
+ */
 import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 

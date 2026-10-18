@@ -1,3 +1,7 @@
+/**
+ * Depuração por bisseção do autocannon 8 (Módulo 10) — versão final, com log do que é enviado e recebido.
+ * Candidato a remoção na limpeza de `test/load/` (é a origem do único warning de lint do projeto).
+ */
 const autocannon = require('autocannon');
 
 // Verificar versao instalada

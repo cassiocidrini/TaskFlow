@@ -1,3 +1,8 @@
+/**
+ * autocannon — primeira versão do smoke test (Módulo 10), substituída pelo `k6-smoke.js`.
+ *
+ * Mantida como registro: o autocannon reporta `p97_5`, e não `p95`, e não tem thresholds nativos.
+ */
 const autocannon = require('autocannon');
 
 async function main() {

@@ -14,7 +14,17 @@ const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<TaskDomainEvent['type']>(
   'TaskCompleted',
 ]);
 
-/** Implementação do TaskRepository sobre o Event Store (Postgres). */
+/**
+ * Implementação do {@link TaskRepository} sobre o Event Store (Postgres).
+ *
+ * É ao mesmo tempo um **Repository** (para o domínio, "carregar e salvar tarefas") e um **Adapter**
+ * (Hexagonal: converte essas operações em "ler o stream de eventos e reidratar" / "gravar eventos pendentes").
+ * O domínio depende só do contrato em `domain/`; esta classe é a única que sabe que existe um Event Store.
+ *
+ * - `load`: lê o stream do agregado e o reconstrói com `TaskAggregate.fromHistory` (replay).
+ * - `save`: grava os eventos pendentes num ÚNICO `INSERT` atômico (`appendMany`), com
+ *   `expectedVersion = task.version` — a concorrência otimista que transforma uma corrida em 409.
+ */
 @Injectable()
 export class EventSourcedTaskRepository extends TaskRepository {
   constructor(private readonly eventStore: EventStoreService) {

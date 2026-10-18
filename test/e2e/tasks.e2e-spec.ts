@@ -1,3 +1,14 @@
+/**
+ * Tarefas via HTTP com DOIS usuários — o dono e um intruso.
+ *
+ * É aqui que as peças provam que ENCAIXAM (guard esquecido, módulo não importado, migração × código):
+ * - Segurança: 401 sem token · 400 UUID inválido · intruso recebe 404 E ZERO eventos são gravados ·
+ *   anti-IDOR entre dois projetos do MESMO dono (o caso mais sutil: o `assertOwner` passaria).
+ * - CQRS: a tarefa aparece no Read Model — via `eventually()`, porque a projeção roda depois da resposta.
+ * - Paginação "sem repetição nem buracos" e ciclo de vida completo, com 409 em tarefa concluída.
+ *
+ * Testes com consistência eventual: rode 3 vezes antes de confiar.
+ */
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import {

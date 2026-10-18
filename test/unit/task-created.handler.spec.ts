@@ -1,3 +1,12 @@
+/**
+ * Projeção `TaskCreated` → `tasks_read`.
+ *
+ * Prova a INTENÇÃO de idempotência (`skipDuplicates: true`). O EFEITO — o Postgres de fato ignorando a duplicata —
+ * só se prova contra o banco real: ver `test/integration/projections.spec.ts`. Também protege o log + relançamento
+ * em caso de falha (o `publish` é fire-and-forget: sem log, a falha seria invisível).
+ *
+ * `jest.restoreAllMocks()` no `afterEach`: sem ele, o `spyOn` do Logger vazaria para outros testes do mesmo worker.
+ */
 import { Test, TestingModule } from '@nestjs/testing';
 import { Logger } from '@nestjs/common';
 import { TaskCreatedHandler } from '../../src/modules/tasks/events/task-created.handler';

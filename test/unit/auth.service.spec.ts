@@ -1,3 +1,13 @@
+/**
+ * `AuthService` — cadastro e login.
+ *
+ * Protege propriedades de SEGURANÇA, não só o caminho feliz: a senha nunca é salva em texto plano, e-mail
+ * duplicado não cria usuário, nenhum token é emitido com senha errada e a MESMA mensagem para "usuário não
+ * existe" e "senha errada" (anti-enumeração, OWASP A07).
+ *
+ * `jest.mock('bcrypt')`: o bcrypt é lento POR DESIGN (~60–100 ms); mockado, a suíte roda em milissegundos.
+ * O hashing real é exercitado nos testes E2E.
+ */
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';

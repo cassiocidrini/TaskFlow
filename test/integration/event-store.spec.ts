@@ -1,3 +1,14 @@
+/**
+ * Event Store contra PostgreSQL REAL (Testcontainers).
+ *
+ * Mock prova intenção; integração prova EFEITO. Atomicidade e concorrência só existem no banco:
+ * - 10 `append` SIMULTÂNEOS na mesma versão → exatamente 1 sucesso e 9 `ConcurrencyConflictError` (a race
+ *   condition real, fechada pelo `UNIQUE (aggregate_id, version)`);
+ * - `appendMany` com uma versão em conflito → NENHUM evento do lote é gravado (um INSERT, tudo ou nada);
+ * - replay reconstruindo o estado a partir dos eventos.
+ *
+ * `Promise.allSettled` (e não `all`): espera TODAS as tentativas e confere que falharam com o erro CERTO.
+ */
 import { PrismaClient } from '@prisma/client';
 import {
   ConcurrencyConflictError,

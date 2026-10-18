@@ -1,3 +1,7 @@
+/**
+ * Depuração por bisseção do autocannon 8 (Módulo 10) — passo 2: body ESTÁTICO (funcionou).
+ * Isolar uma variável por vez antes de concluir a causa. Candidato a remoção na limpeza de `test/load/`.
+ */
 const autocannon = require('autocannon');
 
 async function main() {

@@ -1,3 +1,9 @@
+/**
+ * Depuração por bisseção do autocannon 8 (Módulo 10) — passo 3: body dinâmico via `setupRequest`.
+ *
+ * Registro do MÉTODO: `Invoke-RestMethod` funcionou → body estático funcionou → body dinâmico falhou. O problema
+ * estava na ferramenta, não na API. Candidato a remoção na limpeza de `test/load/` → `labs/`.
+ */
 const autocannon = require('autocannon');
 
 async function main() {

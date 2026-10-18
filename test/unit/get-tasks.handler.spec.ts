@@ -1,3 +1,9 @@
+/**
+ * `GetTasksHandler` — leitura do Read Model com paginação por cursor.
+ *
+ * Protege: autorização antes de ler (uma leitura alheia também é A01), o truque `take: limit + 1` (saber se há
+ * próxima página sem `COUNT(*)`), a ordenação estável com `id` como desempate e que o item extra NÃO vaza na resposta.
+ */
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { GetTasksHandler } from '../../src/modules/tasks/queries/get-tasks.handler';

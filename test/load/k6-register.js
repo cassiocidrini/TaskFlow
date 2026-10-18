@@ -1,3 +1,13 @@
+/**
+ * k6 — load test de `POST /auth/register` com SLO (Módulo 10). NÃO é teste do Jest.
+ *
+ * Endpoint CPU-bound (bcrypt no thread pool de 4 threads): é onde aparece o joelho da curva.
+ * Os `thresholds` são SLOs executáveis: se violados, o k6 sai com código ≠ 0 e falharia um pipeline.
+ *
+ * Pré-requisito: `DISABLE_THROTTLE=true` (senão o teste mede o rate limit: 100% de 429).
+ * Cada execução cria usuários REAIS no banco; e-mails únicos por VU/iteração evitam 409.
+ * Resultados do módulo: `k6 run --vus 20 --duration 60s test/load/k6-register.js`.
+ */
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 

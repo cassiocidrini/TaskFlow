@@ -1,3 +1,15 @@
+/**
+ * `npm run dynamo:queries` — os padrões de acesso AP1–AP3 sobre a chave principal (laboratório do Módulo 04).
+ *
+ * | AP  | Pergunta                         | Operação                                                    |
+ * |-----|----------------------------------|-------------------------------------------------------------|
+ * | AP1 | Tarefas do projeto, recentes 1º  | `Query` PK=`PROJECT#…` + `begins_with(SK,'TASK#')`, desc    |
+ * | AP2 | Projetos do usuário              | `Query` PK=`USER#…` + `begins_with(SK,'PROJECT#')`          |
+ * | AP3 | Uma tarefa específica            | `GetItem` com PK + SK exatos — a operação mais barata       |
+ *
+ * Nenhuma usa `Scan` (ler a tabela inteira): é a regra de ouro do query-first design. Limitação: lê só a
+ * primeira página — com dados reais, seria preciso iterar pelo `LastEvaluatedKey` (paginação por cursor).
+ */
 import { QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { dynamo, TABLE_NAME } from './client';
 import { keys } from './model';

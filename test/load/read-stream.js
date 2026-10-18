@@ -1,3 +1,9 @@
+/**
+ * Experimento: leitura com STREAM de 100 MB (Módulo 11) — a solução.
+ *
+ * Chunks de ~64 KB: memória constante (~0,46 MB medidos) e Event Loop livre entre os chunks. ~2× mais lento
+ * que o síncrono para um arquivo só — é a troca de velocidade por escalabilidade.
+ */
 const fs = require('fs');
 const path = require('path');
 

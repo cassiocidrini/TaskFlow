@@ -1,3 +1,9 @@
+/**
+ * autocannon — load test do cadastro, antes da migração para o k6 (Módulo 10).
+ *
+ * Pegadinha do autocannon 8: o `setupRequest` precisa MODIFICAR e devolver o próprio `req`; devolver um objeto
+ * novo (spread) quebrava o body silenciosamente.
+ */
 const autocannon = require('autocannon');
 
 async function main() {

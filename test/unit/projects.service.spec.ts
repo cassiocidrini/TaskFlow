@@ -1,3 +1,10 @@
+/**
+ * `ProjectsService` — a fechadura da autorização por projeto (OWASP A01).
+ *
+ * O teste mais importante NÃO é "lança 404": um mock devolvendo `null` passaria mesmo se alguém apagasse o filtro.
+ * É "a query filtra por `id` E `ownerId`" — testar o que o código PEDE ao banco, não só o que ele devolve.
+ * Também congela o `select` sem `ownerId` (API3) e a mesma mensagem para "inexistente" e "alheio" (anti-enumeração).
+ */
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { ProjectsService } from '../../src/modules/projects/projects.service';

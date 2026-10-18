@@ -21,8 +21,13 @@ import {
   CompleteTaskHandler,
 } from './commands/task-lifecycle.handlers';
 
+/** Lado de ESCRITA (CQRS): cada handler recebe um comando e grava eventos. */
 const CommandHandlers = [CreateTaskHandler, AssignTaskHandler, ChangeTaskStatusHandler, CompleteTaskHandler];
+
+/** Lado de LEITURA (CQRS): listagem pelo Read Model e histórico pelo Event Store. */
 const QueryHandlers = [GetTasksHandler, GetTaskHistoryHandler];
+
+/** Projeções (Observer): mantêm o Read Model `tasks_read` sincronizado com os eventos. */
 const EventHandlers = [
   TaskCreatedHandler,
   TaskAssignedProjection,
@@ -30,13 +35,24 @@ const EventHandlers = [
   TaskCompletedProjection,
 ];
 
+/**
+ * Módulo de tarefas — o único que aplica **CQRS + Event Sourcing** no projeto.
+ *
+ * O grafo de dependências comunica a arquitetura:
+ * - `ProjectsModule` é importado para o `assertOwner` (autorização por projeto, OWASP A01);
+ * - **Repository Pattern:** quem pede `TaskRepository` (o contrato, em `domain/`) recebe o
+ *   `EventSourcedTaskRepository` (a implementação, em `infrastructure/`). Trocar o armazenamento de eventos
+ *   seria trocar UMA linha aqui;
+ * - `TaskCommandRunner` é o roteiro compartilhado dos comandos de ciclo de vida.
+ *
+ * Atenção ao registrar um handler novo: o `tsc` não detecta um provider faltando — o erro de injeção só
+ * aparece no BOOT da aplicação. Por isso os smoke tests de boot e os testes E2E.
+ */
 @Module({
-  // ProjectsModule fornece o ProjectsService (assertOwner) aos handlers
   imports: [CqrsModule, ProjectsModule],
   controllers: [TasksController],
   providers: [
     EventStoreService,
-    // Repository Pattern: quem pede TaskRepository (contrato) recebe a implementação event-sourced
     { provide: TaskRepository, useClass: EventSourcedTaskRepository },
     TaskCommandRunner,
     ...CommandHandlers,
