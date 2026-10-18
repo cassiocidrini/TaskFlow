@@ -6,44 +6,65 @@ on:
   pull_request:
     branches: [main, master]
 
+# Menor privilégio: o CI só precisa LER o código (OWASP A08 — integridade do pipeline)
+permissions:
+  contents: read
+
+# Novo push no mesmo PR cancela o run anterior (não gasta minutos validando código obsoleto)
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Três jobs PARALELOS. Cada teste roda UMA vez. Todos obrigatórios na Branch Protection:
+# nenhum merge sem tudo verde.
 jobs:
-  build-and-test:
-    name: Build & Test
+  quality:
+    name: Tipos, lint, unitários e build
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout do código
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 24
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-            node-version: '24'
-            cache: 'npm'
-
-      - name: Instalar dependências
-        run: npm ci
-
-      - name: Gerar Prisma Client
-        run: npx prisma generate
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate
 
       - name: Verificar tipos (tsc)
         run: npx tsc --noEmit
-
-      - name: Rodar lint
+      - name: Lint
         run: npm run lint
-
-      - name: Rodar testes
-        run: npm test -- --passWithNoTests
-
-      - name: Build da aplicação
+      - name: Testes unitários
+        run: npm run test:unit
+      - name: Build
         run: npm run build
 
-      - name: Rodar testes unitários
-        run: npm run test:unit
+  integration:
+    name: Testes de integração (Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate
 
-      - name: Rodar testes de integração
+      - name: Testes de integração (Postgres real)
         run: npm run test:integration
 
-      - name: Rodar testes E2E
+  e2e:
+    name: Testes E2E (Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate
+
+      - name: Testes E2E (HTTP + Postgres real)
         run: npm run test:e2e

@@ -1,81 +1,22 @@
-import { INestApplication, ValidationPipe } from '@nestjs/common';
-import { Test, TestingModule } from '@nestjs/testing';
-import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
-import { PrismaPg } from '@prisma/adapter-pg';
-import { PrismaClient } from '@prisma/client';
-import { execSync } from 'child_process';
+import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
-import helmet from 'helmet';
+import { E2EContext, resetDatabase, startE2EApp } from './support/e2e-app';
 
 describe('Auth (e2e)', () => {
+  let ctx: E2EContext;
   let app: INestApplication;
-  let container: StartedPostgreSqlContainer;
-  let prisma: PrismaClient;
 
-beforeAll(async () => {
-  console.log('[1] Subindo container Postgres...');
-  container = await new PostgreSqlContainer('postgres:16-alpine')
-    .withDatabase('test_db')
-    .withUsername('test')
-    .withPassword('test')
-    .start();
-  console.log('[1] OK - container pronto:', container.getConnectionUri());
-
-  const connectionString = container.getConnectionUri();
-  process.env.DATABASE_URL = connectionString;
-  process.env.JWT_SECRET = 'e2e-test-secret-com-no-minimo-32-caracteres';
-  process.env.JWT_EXPIRES_IN = '1h';
-
-  console.log('[2] Criando Prisma Client...');
-  const adapter = new PrismaPg({ connectionString });
-  prisma = new PrismaClient({ adapter });
-  console.log('[2] OK');
-
-  console.log('[3] Rodando migrações...');
-  execSync('npx prisma migrate deploy', {
-    env: { ...process.env, DATABASE_URL: connectionString },
-    stdio: 'pipe',
-  });
-  console.log('[3] OK');
-
-  console.log('[4] Criando aplicação NestJS...');
-  // Carregamento TARDIO de propósito: o ConfigModule valida o ambiente no momento em que o
-  // AppModule é carregado. Um import estático no topo rodaria ANTES deste beforeAll,
-  // sem o DATABASE_URL do container (e, localmente, apontaria para o banco de dev!).
-  // Usamos require (e não import()) porque, com module "nodenext", import() exige extensão .js.
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { AppModule } = require('../../src/app.module') as typeof import('../../src/app.module');
-  const moduleRef: TestingModule = await Test.createTestingModule({
-    imports: [AppModule],
-  })
-    .compile();
-  app = moduleRef.createNestApplication();
-  console.log('[4] OK');
-
-  console.log('[5] Configurando pipes...');
-  app.use(helmet());
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true,
-      forbidNonWhitelisted: true,
-      transform: true,
-    }),
-  );
-  console.log('[5] OK');
-
-  console.log('[6] Inicializando app...');
-  await app.init();
-  console.log('[6] OK - app pronto!');
-}, 180_000);
+  beforeAll(async () => {
+    ctx = await startE2EApp(); // Postgres real + migrações + app com a configuração de produção
+    app = ctx.app;
+  }, 180_000);
 
   afterAll(async () => {
-    if (app) await app.close();
-    if (prisma) await prisma.$disconnect();
-    if (container) await container.stop();
+    await ctx?.close();
   });
 
   beforeEach(async () => {
-    await prisma.user.deleteMany();
+    await resetDatabase(ctx.prisma);
   });
 
   // ============================================================

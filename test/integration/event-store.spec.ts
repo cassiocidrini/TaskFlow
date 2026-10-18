@@ -1,15 +1,13 @@
-import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
-import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '@prisma/client';
-import { execSync } from 'child_process';
 import {
   ConcurrencyConflictError,
   DomainEvent,
   EventStoreService,
 } from '../../src/events/event-store.service';
+import { startTestDatabase, TestDatabase } from './support/test-database';
 
 describe('EventStoreService (integração)', () => {
-  let container: StartedPostgreSqlContainer;
+  let db: TestDatabase;
   let prisma: PrismaClient;
   let eventStore: EventStoreService;
 
@@ -22,31 +20,14 @@ describe('EventStoreService (integração)', () => {
   });
 
   beforeAll(async () => {
-    // 1. Sobe um container Postgres real
-    container = await new PostgreSqlContainer('postgres:16-alpine')
-      .withDatabase('test_db')
-      .withUsername('test')
-      .withPassword('test')
-      .start();
-
-    // 2. Cria o Prisma Client apontando para o container
-    const connectionString = container.getConnectionUri();
-    const adapter = new PrismaPg({ connectionString });
-    prisma = new PrismaClient({ adapter });
-
-    // 3. Roda as migrações do Prisma (inclui o UNIQUE (aggregate_id, version))
-    execSync('npx prisma migrate deploy', {
-      env: { ...process.env, DATABASE_URL: connectionString },
-      stdio: 'inherit',
-    });
-
-    // 4. Instancia o EventStoreService
+    // Postgres real + migrações (inclui o UNIQUE (aggregate_id, version))
+    db = await startTestDatabase();
+    prisma = db.prisma;
     eventStore = new EventStoreService(prisma as never);
   }, 120_000);
 
   afterAll(async () => {
-    await prisma.$disconnect();
-    await container.stop();
+    await db?.stop();
   });
 
   beforeEach(async () => {
