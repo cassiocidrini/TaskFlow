@@ -82,3 +82,7 @@ terraform/*.tfstate.*
 terraform/*.tfvars
 terraform/plan.out
 terraform/crash.log
+
+# Artefatos gerados pelos labs de Node internals (test/load/generate-file.js e copy-stream.js)
+# Versionamos o script que gera, nunca o arquivo gerado (~100 MB cada)
+test/load/*.txt
