@@ -32,21 +32,34 @@ export class EventStoreService {
    *         (garantido pelo UNIQUE (aggregate_id, version) no banco — sem janela de corrida).
    */
   async append(event: DomainEvent, expectedVersion: number): Promise<number> {
+    return this.appendMany([event], expectedVersion);
+  }
+
+  /**
+   * Grava N eventos do MESMO agregado nas versões expectedVersion+1 … expectedVersion+N.
+   *
+   * ATÔMICO: um único INSERT com N linhas — se qualquer versão já existir, o Postgres
+   * desfaz o comando inteiro. Nunca deixa um agregado "meio salvo".
+   *
+   * @returns a nova versão do agregado (expectedVersion se a lista estiver vazia).
+   */
+  async appendMany(events: readonly DomainEvent[], expectedVersion: number): Promise<number> {
     if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
       throw new Error(`expectedVersion inválida: ${expectedVersion}`);
     }
-
-    const version = expectedVersion + 1;
+    if (events.length === 0) {
+      return expectedVersion;
+    }
 
     try {
-      await this.prisma.event.create({
-        data: {
+      await this.prisma.event.createMany({
+        data: events.map((event, index) => ({
           aggregateId: event.aggregateId,
           aggregateType: event.aggregateType,
           eventType: event.eventType,
           payload: event.payload as Prisma.InputJsonObject,
-          version,
-        },
+          version: expectedVersion + 1 + index,
+        })),
       });
     } catch (error) {
       // P2002 = violação de unique constraint → alguém gravou essa versão antes de nós
@@ -56,7 +69,7 @@ export class EventStoreService {
       throw error;
     }
 
-    return version;
+    return expectedVersion + events.length;
   }
 
   async loadEvents(aggregateId: string) {
