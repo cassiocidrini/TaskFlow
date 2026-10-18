@@ -32,7 +32,7 @@ async function main() {
 
       return req;
     },
-    onResponse: (client, statusCode, resBytes, responseTime) => {
+    onResponse: (_client, statusCode, _resBytes, responseTime) => {
       responses.push(statusCode);
       console.log(`  [resp] status=${statusCode} time=${responseTime}ms`);
     },

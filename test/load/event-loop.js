@@ -6,7 +6,7 @@ setTimeout(() => {
 }, 0);
 
 // Microtask (Promise)
-Promise.resolve().then(() => {
+void Promise.resolve().then(() => {
   console.log('3. Promise');
 });
 

@@ -28,7 +28,7 @@ async function main() {
       req.body = body;
       return req;
     },
-    onResponse: (statusCode, body, res, context) => {
+    onResponse: (statusCode, body, _res, _context) => {
       console.log(`  [resp] status=${statusCode} | body=${body.toString().substring(0, 200)}`);
     },
   });
