@@ -219,6 +219,8 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 - **Logs:** ainda sem logger estruturado em JSON nem `correlationId` ponta a ponta.
 - **Dockerfile:** usa `node:20` (o projeto exige 24) e não roda como usuário não-root. Dashboards do Grafana ainda não são provisionados por arquivo.
 - **Rate limit em memória:** não é compartilhado entre réplicas (em produção, usaria Redis).
+- **Terraform sem lock do state:** o backend S3 não tem `use_lockfile`; dois `apply` simultâneos poderiam corromper o state.
+- **Strategy de prioridade incompleto:** a estratégia é instanciada no handler (não injetada) e a `DeadlinePriorityStrategy` não é usada.
 
 ---
 
@@ -253,22 +255,24 @@ terraform/                              # IaC (S3, SQS, SNS, IAM)
 
 ## 📚 Trilha de estudos
 
-Este repositório é o laboratório de uma trilha de engenharia backend. Cada módulo deixou código neste projeto:
+Este repositório é o laboratório de uma trilha de engenharia backend. Cada módulo documenta conceitos, como
+reproduzir, **problemas reais encontrados** e onde o resultado vive no código. Índice completo em
+[`docs/modules/`](docs/modules/README.md).
 
 | Módulo | Tema | No projeto |
 |:-:|---|---|
-| 1 | Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana) | `tracing.ts`, `docker-compose.yml` |
-| 2 | Orquestração com Kubernetes | 🔜 planejado para um ambiente Linux dedicado |
-| 3 | CI/CD com GitHub Actions | `.github/workflows/ci.yml` |
-| 4 | Modelagem NoSQL (DynamoDB, single-table, GSI) | `src/dynamo/` |
-| 5 | Event Sourcing, CQRS e arquitetura | `src/modules/tasks/`, `src/events/` |
-| 6 | Segurança (OWASP Top 10) | `auth/`, `app.setup.ts`, autorização por projeto |
-| 7 | Testes (unitários, integração, E2E) | `test/` |
-| 8 | Engenharia assistida por IA | [`AGENTS.md`](AGENTS.md) |
-| 9 | Infraestrutura como Código (Terraform) | `terraform/` |
-| 10 | Performance e load testing (k6) | `test/load/` |
-| 11 | Node.js internals (event loop, thread pool, streams, leaks) | `test/load/` |
-| 12 | Design patterns | ver [Padrões de projeto aplicados](#padrões-de-projeto-aplicados) |
+| [01](docs/modules/01-observabilidade.md) | Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana) | `tracing.ts`, `docker-compose.yml` |
+| 02 | Orquestração com Kubernetes | 🔜 planejado para um ambiente Linux dedicado |
+| [03](docs/modules/03-ci-cd-github-actions.md) | CI/CD com GitHub Actions | `.github/workflows/ci.yml` |
+| [04](docs/modules/04-modelagem-nosql-dynamodb.md) | Modelagem NoSQL (DynamoDB, single-table, GSI) | `src/dynamo/` |
+| [05](docs/modules/05-event-sourcing-cqrs.md) | Event Sourcing, CQRS e arquitetura | `src/modules/tasks/`, `src/events/` |
+| [06](docs/modules/06-seguranca-owasp.md) | Segurança (OWASP Top 10) | `auth/`, `app.setup.ts`, autorização por projeto |
+| [07](docs/modules/07-testes.md) | Testes (unitários, integração, E2E) | `test/` |
+| [08](docs/modules/08-ia-no-desenvolvimento.md) | Engenharia assistida por IA | [`AGENTS.md`](AGENTS.md) |
+| [09](docs/modules/09-infraestrutura-como-codigo.md) | Infraestrutura como Código (Terraform) | `terraform/` |
+| [10](docs/modules/10-performance-load-testing.md) | Performance e load testing (k6) | `test/load/` |
+| [11](docs/modules/11-nodejs-internals.md) | Node.js internals (event loop, thread pool, streams, leaks) | `test/load/` |
+| [12](docs/modules/12-design-patterns.md) | Design patterns | ver [Padrões de projeto aplicados](#padrões-de-projeto-aplicados) |
 
 ---
 
