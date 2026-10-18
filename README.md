@@ -2,188 +2,213 @@
 
 [![CI](https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml)
 
-API REST para gestão de tarefas, desenvolvida em **NestJS + TypeScript**, com **observabilidade completa** (OpenTelemetry + Jaeger + Prometheus + Grafana) e **CI automatizado** com GitHub Actions.
+API REST de alta performance para gestão de tarefas, desenvolvida em **NestJS + TypeScript**, com arquitetura **CQRS + Event Sourcing**, **Observabilidade Completa**, **Segurança OWASP** e **Infraestrutura como Código (Terraform)**.
+
+Este projeto é o resultado de uma trilha avançada de estudos focada em **Engenharia de Software Sênior**, simulando padrões e práticas adotados em ambientes corporativos de alta criticidade.
 
 ---
 
-## 🎯 Sobre o projeto
+## 🏆 Destaques de Engenharia
 
-O TaskFlow é um projeto de estudo que simula uma aplicação backend real, cobrindo:
-
-- **API REST** com NestJS e Prisma
-- **Banco de dados** PostgreSQL
-- **Observabilidade** com OpenTelemetry (traces e métricas)
-- **CI/CD** com GitHub Actions
-- **Infra local** com Docker Compose
-
-O objetivo é servir como **laboratório prático** para estudar arquitetura, resiliência e observabilidade em aplicações modernas.
+- **Arquitetura Avançada:** CQRS (Command Query Responsibility Segregation) com Event Sourcing (fonte da verdade baseada em eventos imutáveis).
+- **Design Patterns:** Aplicação de *Strategy*, *Factory*, *Observer* e *Repository*.
+- **Observabilidade:** OpenTelemetry, Jaeger (traces), Prometheus (métricas) e Grafana (dashboards p50/p95/p99).
+- **Qualidade e Testes:** Pirâmide de testes com Jest (Unitários), Testcontainers (Integração com PostgreSQL real) e Supertest (E2E).
+- **Segurança:** OWASP Top 10 (Helmet, CORS, Rate Limit, JWT, bcrypt, ValidationPipe).
+- **Infraestrutura como Código:** Provisionamento local via Docker Compose e AWS (S3, SQS, SNS, IAM) via **Terraform** com backend remoto.
+- **Performance:** Load testing com k6 e análise de gargalos (Thread Pool, Event Loop, Memory Leaks).
 
 ---
 
 ## 🏗️ Arquitetura
-┌─────────────────┐
-│ App NestJS │ ← instrumentada com OpenTelemetry
-│ (TaskFlow) │
-└────────┬────────┘
-│
-│ OTel SDK (auto-instrumentação)
-│
-┌────┴────┐
-│ │
-▼ ▼
-┌────────┐ ┌──────────────┐
-│ Jaeger │ │ Prometheus │ ← raspa a porta 9464
-│(traces)│ │ (métricas) │
-└────────┘ └──────┬───────┘
-│
-▼
-┌─────────┐
-│ Grafana │ ← dashboard com p50/p95/p99
-└─────────┘
 
+O sistema usa uma combinação de **Layered Architecture** com **CQRS** e **Event Sourcing**.
 
-**Fluxo:**
-1. Requisição HTTP chega no NestJS
-2. A auto-instrumentação do OTel cria um **span**
-3. O trace é enviado para o **Jaeger** (porta 4318)
-4. As métricas são expostas em `/metrics` (porta 9464)
-5. O **Prometheus** raspa esse endpoint a cada 5s
-6. O **Grafana** consulta o Prometheus e monta o dashboard
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                         HTTP (REST)                         │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                    ┌──────┴──────┐
+                    │ Controller  │
+                    └──────┬──────┘
+                           │
+              ┌────────────┴────────────┐
+              ▼                         ▼
+       ┌─────────────┐           ┌─────────────┐
+       │  CommandBus │           │  QueryBus   │
+       └──────┬──────┘           └──────┬──────┘
+              │                         │
+              ▼                         ▼
+       ┌─────────────┐           ┌─────────────┐
+       │  Command    │           │   Query     │
+       │  Handler    │           │   Handler   │
+       └──────┬──────┘           └──────┬──────┘
+              │                         │
+              ▼                         │
+       ┌─────────────┐                  │
+       │ Event Store │                  │
+       │ (Postgres)  │                  │
+       └──────┬──────┘                  │
+              │ publica                 │
+              ▼                         │
+       ┌─────────────┐                  │
+       │   Event     │  ─── projeta ───▶│
+       │   Handler   │                  │
+       └─────────────┘                  │
+                                        ▼
+                              ┌──────────────────┐
+                              │   Read Model     │
+                              │   (tasks_read)   │
+                              └──────────────────┘
+```
+
+**Fluxo de Observabilidade:**
+
+1. Requisição HTTP chega no NestJS.
+2. OTel SDK cria um span e envia para o Jaeger.
+3. Métricas são expostas em `/metrics` e raspadas pelo Prometheus.
+4. Grafana exibe dashboards em tempo real.
 
 ---
 
-## 🧰 Stack
+## 🧰 Stack Técnica
 
-| Camada | Ferramenta | Versão |
-|--------|-----------|--------|
-| Runtime | Node.js | 24 |
-| Framework | NestJS | 12 |
-| ORM | Prisma | 7 |
-| Banco | PostgreSQL | 16 |
-| Observabilidade | OpenTelemetry SDK | latest |
-| Traces | Jaeger | latest |
-| Métricas | Prometheus | latest |
-| Dashboards | Grafana | latest |
-| Containerização | Docker | 29 |
-| CI | GitHub Actions | — |
+| Categoria | Tecnologia |
+|---|---|
+| Runtime & Framework | Node.js 24, NestJS 12 |
+| Linguagem | TypeScript (strict) |
+| Banco de Dados (Write) | PostgreSQL 16, Prisma 7 |
+| Banco de Dados (NoSQL) | DynamoDB (via LocalStack) |
+| Mensageria | SQS, SNS (via LocalStack) |
+| Observabilidade | OpenTelemetry, Jaeger, Prometheus, Grafana |
+| Segurança | Helmet, CORS, JWT, bcrypt, class-validator |
+| Testes | Jest, Testcontainers, Supertest, k6 |
+| Infraestrutura | Docker, Docker Compose, Terraform |
+| CI/CD | GitHub Actions |
 
 ---
 
-## 🚀 Como rodar
+## 🚀 Como rodar o projeto
 
 ### Pré-requisitos
 
 - Node.js 24+
-- Docker Desktop
+- Docker Desktop (com WSL 2 ativado)
+- Terraform (opcional, para o módulo de IaC)
 - PowerShell (Windows) — os scripts são `.ps1`
 
-### Primeira vez
+### Primeira execução
 
 ```powershell
 .\setup.ps1
+```
 
-O script:
+O script instala dependências, sobe os containers (PostgreSQL, Jaeger, Prometheus, Grafana, LocalStack), gera o Prisma Client e aplica as migrações.
 
-Verifica pré-requisitos (Node, Docker)
+### Desenvolvimento
 
-Cria o .env a partir do .env.example (se não existir)
-
-Instala dependências (npm install)
-
-Sobe os containers (PostgreSQL, Jaeger, Prometheus, Grafana)
-
-Aplica as migrações do Prisma
-
-Desenvolvimento
-
+```powershell
 .\dev.ps1
+```
 
-Sobe a aplicação em modo watch. Acesse http://localhost:3000.
+Acesse: <http://localhost:3000>
 
-Parar tudo
+### Parar tudo
 
+```powershell
 .\stop.ps1
+```
 
-Para os containers Docker.
+---
 
-🔍 Serviços disponíveis
-Serviço	URL	Credenciais
-App	http://localhost:3000	—
-Jaeger (traces)	http://localhost:16686	—
-Prometheus (métricas)	http://localhost:9090	—
-Grafana (dashboards)	http://localhost:3001	admin / Teste@123
-Métricas raw	http://localhost:9464/metrics	—
-Dashboard no Grafana
-Após rodar o .\dev.ps1, acesse o Grafana em http://localhost:3001 e importe o dashboard TaskFlow - Observabilidade (JSON está em dashboards/).
+## 🔍 Serviços disponíveis (Local)
 
-Para gerar tráfego e popular os gráficos:
+| Serviço | URL | Credenciais |
+|---|---|---|
+| App (API) | http://localhost:3000 | — |
+| Jaeger (Traces) | http://localhost:16686 | — |
+| Prometheus | http://localhost:9090 | — |
+| Grafana | http://localhost:3001 | admin / Teste@123 |
+| LocalStack (AWS) | http://localhost:4566 | test / test |
 
-1..100 | ForEach-Object { curl.exe -s http://localhost:3000 | Out-Null }
+Para visualizar os dashboards, importe o JSON da pasta `dashboards/` no Grafana.
 
-🧪 Testes
+---
 
-# Rodar todos os testes
-npm test
+## 🧪 Testes e Qualidade
 
-# Verificação de tipos
+O projeto utiliza a pirâmide de testes completa:
+
+```bash
+# Testes Unitários (rápidos, com mocks)
+npm run test:unit
+
+# Testes de Integração (usam Testcontainers com PostgreSQL real)
+npm run test:integration
+
+# Testes End-to-End (HTTP com supertest)
+npm run test:e2e
+
+# Verificação de Tipos
 npx tsc --noEmit
 
-# Lint
+# Linter
 npm run lint
+```
 
-# Build
-npm run build
+---
 
-🔄 CI (Integração Contínua)
-Cada push ou pull request para main dispara a pipeline de CI, que roda:
+## 🔄 CI/CD Pipeline
 
-Checkout do código
+Cada `push` ou `pull_request` na branch `main` dispara o GitHub Actions, que executa em paralelo:
 
-Setup do Node.js 24
+- **Build & Test:** `npm ci` → `prisma generate` → `tsc --noEmit` → `npm run lint` → `npm run test` → `npm run build`.
 
-npm ci (instala dependências)
+Se qualquer etapa falhar, o merge é bloqueado (Branch Protection configurada).
 
-npx prisma generate (gera o Prisma Client)
+---
 
-npx tsc --noEmit (verifica tipos)
+## 📁 Estrutura de Pastas
 
-npm run lint (analisa código)
+```text
+├── src/
+│   ├── common/          # Decorators, filters, interceptors
+│   ├── events/          # Event Store compartilhado
+│   ├── modules/         # Módulos de negócio
+│   │   ├── auth/        # Autenticação (JWT + bcrypt)
+│   │   └── tasks/       # CQRS (commands, queries, events, strategies)
+│   └── prisma/          # Prisma Service e Module
+├── test/
+│   ├── unit/            # Testes unitários
+│   ├── integration/     # Testes com Testcontainers
+│   └── e2e/             # Testes HTTP com supertest
+├── terraform/           # IaC (S3, SQS, SNS, IAM)
+├── docker-compose.yml   # Infra local (Postgres, Jaeger, Prometheus, Grafana, LocalStack)
+├── AGENTS.md            # Contexto para IAs (Claude, Cursor, Copilot)
+└── CLAUDE.md            # Atalho para o AGENTS.md
+```
 
-npm test (roda testes)
+---
 
-npm run build (compila a aplicação)
+## 📚 Documentação da Trilha de Estudos
 
-Status: https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml/badge.svg
+Este repositório contém a documentação prática de uma trilha de 12 módulos de especialização backend.
 
-📁 Estrutura
+- Módulo 1 — Observabilidade (OTel, Jaeger, Prometheus, Grafana)
+- Módulo 3 — CI/CD com GitHub Actions
+- Módulo 4 — Modelagem NoSQL com DynamoDB
+- Módulo 5 — Event Sourcing, CQRS e Arquitetura
+- Módulo 6 — Segurança e OWASP Top 10
+- Módulo 7 — Testes de Verdade (Unit, Integration, E2E)
+- Módulo 8 — Uso de IA no Desenvolvimento (AI-Assisted Engineering)
+- Módulo 9 — Infraestrutura como Código com Terraform
+- Módulo 10 — Performance e Load Testing com k6
+- Módulo 11 — Node.js Internals (Event Loop, Threads, Streams, Leaks)
+- Módulo 12 — Design Patterns (Strategy, Factory, Observer, Repository, Decorator)
 
-🔄 CI (Integração Contínua)
-Cada push ou pull request para main dispara a pipeline de CI, que roda:
+---
 
-Checkout do código
+## 📝 Licença
 
-Setup do Node.js 24
-
-npm ci (instala dependências)
-
-npx prisma generate (gera o Prisma Client)
-
-npx tsc --noEmit (verifica tipos)
-
-npm run lint (analisa código)
-
-npm test (roda testes)
-
-npm run build (compila a aplicação)
-
-Status: https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml/badge.svg
-
-📚 Documentação de estudo
-Este projeto é parte de uma trilha de estudos para nível Pleno/Sênior. Os módulos estudados estão documentados em:
-
-MODULO_1.md — Observabilidade Avançada
-
-MODULO_3.md — CI/CD na Prática
-
-📝 Licença
-UNLICENSED — Projeto pessoal de estudo.
+Este projeto está sob a licença **UNLICENSED**. Desenvolvido para fins de estudo e portfólio.
