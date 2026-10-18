@@ -1,20 +1,21 @@
 import './env';
 import './tracing';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common'; 
-import { AppModule } from './app.module';
+import { Logger, ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import helmet from 'helmet';
+import { AppModule } from './app.module';
+import type { Env } from './config/env.schema';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const config = app.get<ConfigService<Env, true>>(ConfigService);
+  const logger = new Logger('Bootstrap');
 
   app.use(helmet());
 
   app.enableCors({
-  origin: [
-      'http://localhost:3001',  // frontend local
-      'https://taskflow.app',   // produção
-    ],
+    origin: config.get('CORS_ORIGINS', { infer: true }),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
@@ -22,17 +23,19 @@ async function bootstrap() {
 
   app.useGlobalPipes(
     new ValidationPipe({
-      whitelist: true,              // remove atributos não declarados no DTO
-      forbidNonWhitelisted: true,   // lança erro se vier atributo extra
-      transform: true,              // converte tipos automaticamente
+      whitelist: true, // remove atributos não declarados no DTO
+      forbidNonWhitelisted: true, // lança erro se vier atributo extra
+      transform: true, // converte tipos automaticamente
       transformOptions: { enableImplicitConversion: true },
     }),
   );
 
-  await app.listen(3000);
-  console.log('[App] TaskFlow rodando em http://localhost:3000');
+  const port = config.get('PORT', { infer: true });
+  await app.listen(port);
+  logger.log(`TaskFlow rodando em http://localhost:${port}`);
 }
-bootstrap().catch((err) => {
-  console.error('[App] Erro fatal:', err);
+
+bootstrap().catch((err: unknown) => {
+  new Logger('Bootstrap').error('Erro fatal na inicialização', err instanceof Error ? err.stack : err);
   process.exit(1);
 });
