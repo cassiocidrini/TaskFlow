@@ -17,7 +17,12 @@ export class TasksController {
     @Body() body: CreateTaskDto,              // ← usa o DTO
   ) {
     const taskId = await this.commandBus.execute(
-      new CreateTaskCommand(projectId, body.title, body.assigneeId),
+      new CreateTaskCommand(
+        projectId, 
+        body.title, 
+        body.assigneeId, 
+        body.dueDate ? new Date(body.dueDate) : undefined // Converte string para Date
+      ),
     );
     return { taskId };
   }

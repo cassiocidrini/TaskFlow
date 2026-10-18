@@ -1,12 +1,16 @@
-import { IsString, IsOptional, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { IsString, IsOptional, IsUUID, MaxLength, MinLength, IsDateString } from 'class-validator';
 
 export class CreateTaskDto {
-  @IsString({ message: 'O título deve ser um texto' })
-  @MinLength(3, { message: 'O título deve ter ao menos 3 caracteres' })
-  @MaxLength(200, { message: 'O título deve ter no máximo 200 caracteres' })
+  @IsString()
+  @MinLength(3)
+  @MaxLength(200)
   title!: string;
 
   @IsOptional()
-  @IsUUID('4', { message: 'O assigneeId deve ser um UUID válido' })
+  @IsUUID('4')
   assigneeId?: string;
+
+  @IsOptional()
+  @IsDateString() // Valida se é uma data em formato ISO
+  dueDate?: string;
 }
