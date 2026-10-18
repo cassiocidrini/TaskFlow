@@ -1,3 +1,8 @@
+/**
+ * k6 — smoke test de `GET /` (Módulo 10). NÃO é teste do Jest.
+ *
+ * Mede o custo mínimo do pipeline HTTP (sem banco, sem auth). Rodar: `k6 run test/load/k6-smoke.js`.
+ */
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 

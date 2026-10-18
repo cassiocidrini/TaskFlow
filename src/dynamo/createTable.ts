@@ -1,3 +1,15 @@
+/**
+ * `npm run dynamo:create` — cria a `TaskFlowTable` (PK + SK + GSI1) no LocalStack. Laboratório do Módulo 04.
+ *
+ * - **Idempotente:** se a tabela já existe, termina sem erro. A checagem trata SÓ o `ResourceNotFoundException`;
+ *   qualquer outro erro (rede, credencial) sobe, em vez de ser engolido por um `catch {}` genérico.
+ * - **`PAY_PER_REQUEST`:** cobrança por requisição, sem planejar capacidade (RCU/WCU).
+ * - **`AttributeDefinitions` lista só os atributos usados em CHAVES:** o resto do item é livre (schemaless).
+ * - **`Projection: ALL` no GSI:** índice maior e mais caro, mas a query já devolve o item completo, sem um
+ *   segundo `GetItem` (`KEYS_ONLY` seria o oposto).
+ *
+ * Nota: na AWS, um GSI pode ser adicionado depois com `UpdateTable`; este script define índices só na criação.
+ */
 import {
   CreateTableCommand,
   DescribeTableCommand,

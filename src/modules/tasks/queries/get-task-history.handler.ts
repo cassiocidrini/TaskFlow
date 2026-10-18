@@ -7,6 +7,7 @@ import { toDomainEvent } from '../infrastructure/event-sourced-task.repository';
 import type { TaskDomainEvent, TaskPriority, TaskStatus } from '../events/task.events';
 import { GetTaskHistoryQuery } from './get-task-history.query';
 
+/** Um evento da linha do tempo, como gravado no Event Store. Contrato público: `TaskHistoryEntryDto`. */
 export interface TaskHistoryEntry {
   version: number;
   type: TaskDomainEvent['type'];
@@ -14,6 +15,7 @@ export interface TaskHistoryEntry {
   occurredAt: Date;
 }
 
+/** Histórico + estado atual. Contrato público (Swagger): `TaskHistoryDto`. */
 export interface TaskHistory {
   taskId: string;
   /** Estado atual RECONSTRUÍDO a partir dos eventos abaixo (não lido do Read Model) */

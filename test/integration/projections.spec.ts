@@ -1,3 +1,12 @@
+/**
+ * Projeções do `tasks_read` contra PostgreSQL REAL.
+ *
+ * Prova o que os testes unitários só afirmam: entrega duplicada → 1 linha; 5 entregas SIMULTÂNEAS → 1 linha e
+ * zero erros (`ON CONFLICT DO NOTHING` é atômico); replay completo → mesmo estado final; e o enum do Postgres
+ * recusando um status inválido mesmo via SQL direto (o banco como última linha de defesa).
+ *
+ * Brokers reais (SQS, Kafka) garantem entrega "at-least-once": idempotência não é opcional.
+ */
 import { Logger } from '@nestjs/common';
 import { TaskCreatedHandler } from '../../src/modules/tasks/events/task-created.handler';
 import {

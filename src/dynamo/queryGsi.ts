@@ -1,3 +1,9 @@
+/**
+ * `npm run dynamo:query-gsi` — AP4: tarefas atribuídas a um usuário, via GSI1 (laboratório do Módulo 04).
+ *
+ * Mesmos itens da tabela, agrupados por OUTRA chave (`GSI1PK = USER#<assignee>`). Sem o GSI, a única forma de
+ * responder seria um `Scan` filtrado — ler a tabela inteira para devolver poucos itens.
+ */
 import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { dynamo, TABLE_NAME } from './client';
 import { gsiKeys } from './model';

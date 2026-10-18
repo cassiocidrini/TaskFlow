@@ -8,6 +8,15 @@ import { randomUUID } from 'crypto';
 import request from 'supertest';
 import { configureApp } from '../../../src/app.setup';
 
+/*
+ * Infraestrutura compartilhada dos testes E2E.
+ *
+ * Existe para que cada suíte E2E tenha ~10 linhas de setup em vez de ~70 — e, principalmente, para que as
+ * armadilhas (ordem de carregamento do AppModule, limpeza respeitando FKs, consistência eventual) sejam
+ * resolvidas UMA vez, num lugar comentado. Setup de teste copiado diverge na primeira mudança, como código.
+ */
+
+/** O que cada suíte E2E recebe: a app pronta, um Prisma para inspecionar o banco e um `close` que limpa tudo. */
 export interface E2EContext {
   app: INestApplication;
   /** Prisma "de fora" da app: para preparar/inspecionar o banco nos testes */
@@ -69,6 +78,7 @@ export async function resetDatabase(prisma: PrismaClient): Promise<void> {
   );
 }
 
+/** Usuário de teste já autenticado — os E2E de tarefas usam dois (dono e intruso) para provar a autorização. */
 export interface TestUser {
   userId: string;
   email: string;

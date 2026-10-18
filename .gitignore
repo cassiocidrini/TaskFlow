@@ -57,7 +57,12 @@ pids
 
 # Ferramentas de IA (geradas pelo prisma skills sync)
 .agents/
-.claude/
+# .claude/ fica ignorado, EXCETO a skill de documentação do projeto (versionada de propósito).
+# Em camadas porque o Git não reinclui arquivos dentro de um diretório ignorado por inteiro.
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/taskflow-docs/
 .cursor/
 .devin/
 

@@ -1,3 +1,12 @@
+/**
+ * `npm run dynamo:seed` — popula a `TaskFlowTable` com 2 usuários, 3 projetos e 6 tarefas (laboratório do Módulo 04).
+ *
+ * Mostra o Single-Table Design na prática: entidades diferentes na MESMA tabela, distinguidas pelos prefixos das
+ * chaves e por um atributo `entityType`. Uma tarefa gravada com `GSI1PK`/`GSI1SK` entra automaticamente no GSI1 —
+ * basta preencher os atributos; o DynamoDB mantém o índice.
+ *
+ * `PutItem` sobrescreve o item com a mesma chave, então rodar o seed de novo não duplica dados (idempotente).
+ */
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import { dynamo, TABLE_NAME } from './client';
 import { keys, gsiKeys } from './model';

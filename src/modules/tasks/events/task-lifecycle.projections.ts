@@ -35,6 +35,7 @@ async function project(
   }
 }
 
+/** `TaskAssigned` → atualiza `assignee_id`. O último evento aplicado vence, como no agregado. */
 @EventsHandler(TaskAssignedEvent)
 export class TaskAssignedProjection implements IEventHandler<TaskAssignedEvent> {
   private readonly logger = new Logger(TaskAssignedProjection.name);
@@ -46,6 +47,10 @@ export class TaskAssignedProjection implements IEventHandler<TaskAssignedEvent> 
   }
 }
 
+/**
+ * `TaskStatusChanged` → grava o status de DESTINO (`to`). O `from` fica só no Event Store: o Read Model guarda
+ * o "agora"; quem quiser a trajetória consulta o histórico.
+ */
 @EventsHandler(TaskStatusChangedEvent)
 export class TaskStatusChangedProjection implements IEventHandler<TaskStatusChangedEvent> {
   private readonly logger = new Logger(TaskStatusChangedProjection.name);
@@ -57,6 +62,10 @@ export class TaskStatusChangedProjection implements IEventHandler<TaskStatusChan
   }
 }
 
+/**
+ * `TaskCompleted` → `status = DONE` + `completed_at`. A data chega como string ISO (o evento é uma mensagem
+ * serializada) e só vira `Date` aqui, na borda com o banco.
+ */
 @EventsHandler(TaskCompletedEvent)
 export class TaskCompletedProjection implements IEventHandler<TaskCompletedEvent> {
   private readonly logger = new Logger(TaskCompletedProjection.name);

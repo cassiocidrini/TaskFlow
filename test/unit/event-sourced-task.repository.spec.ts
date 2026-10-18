@@ -1,3 +1,13 @@
+/**
+ * `EventSourcedTaskRepository` — o adaptador entre o domínio e o Event Store (Repository + Adapter).
+ *
+ * Protege: a reidratação do agregado, a falha ALTA diante de um tipo de evento desconhecido no stream (melhor do
+ * que um agregado silenciosamente inconsistente), o `save` com `expectedVersion = task.version` (concorrência
+ * otimista) e o no-op quando não há eventos pendentes.
+ *
+ * Instanciado com `new` (sem `Test.createTestingModule`): a dependência entra pelo construtor e o container do
+ * Nest só seria peso.
+ */
 import { EventSourcedTaskRepository } from '../../src/modules/tasks/infrastructure/event-sourced-task.repository';
 import { ConcurrencyConflictError, EventStoreService } from '../../src/events/event-store.service';
 import { TaskAggregate } from '../../src/modules/tasks/domain/task.aggregate';

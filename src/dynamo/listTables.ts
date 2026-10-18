@@ -1,3 +1,7 @@
+/**
+ * `npm run dynamo:list` — lista as tabelas do LocalStack (laboratório do Módulo 04).
+ * Usa o SDK porque o LocalStack não expõe um endpoint HTTP de listagem (`/_localstack/dynamodb/tables` não existe).
+ */
 import { ListTablesCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 
 const client = new DynamoDBClient({

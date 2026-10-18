@@ -5,6 +5,16 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { ProjectsService } from '../../projects/projects.service';
 import type { CursorPage } from '../../../common/dto/pagination.dto';
 
+/**
+ * Lado de LEITURA do CQRS: lista as tarefas a partir do Read Model `tasks_read`.
+ *
+ * Por que não reconstruir cada tarefa a partir dos eventos? Porque listar N tarefas exigiria ler e aplicar
+ * TODOS os eventos de cada uma. O Read Model é uma projeção desnormalizada, já no formato da resposta:
+ * uma única consulta indexada (`@@index([projectId, createdAt])`), sem JOINs nem recomputação.
+ *
+ * O preço é a **consistência eventual**: uma tarefa recém-criada aparece aqui só depois que a projeção roda
+ * (normalmente milissegundos). Para ler o estado exato de UMA tarefa, o histórico consulta o Event Store.
+ */
 @QueryHandler(GetTasksQuery)
 export class GetTasksHandler implements IQueryHandler<GetTasksQuery> {
   constructor(

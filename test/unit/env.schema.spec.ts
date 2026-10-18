@@ -1,3 +1,11 @@
+/**
+ * Schema de ambiente (`zod`) — congela as regras de segurança da configuração.
+ *
+ * Protege: o fail-fast (configuração inválida impede o boot, listando TODOS os erros de uma vez), o segredo
+ * JWT com ≥ 32 caracteres, a URL obrigatoriamente PostgreSQL e as conversões de tipo (env vars sempre chegam
+ * como string). Se alguém afrouxar uma regra, o PR fica vermelho — mudar o comportamento exige mudar o teste,
+ * conscientemente (OWASP A05).
+ */
 import { validateEnv } from '../../src/config/env.schema';
 
 describe('validateEnv', () => {

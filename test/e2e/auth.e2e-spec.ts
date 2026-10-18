@@ -1,3 +1,9 @@
+/**
+ * Autenticação via HTTP, com a MESMA configuração da produção (`configureApp`) e PostgreSQL real.
+ *
+ * Protege: 201/409 no cadastro, 400 para entrada inválida e para campo extra (mass assignment), login emitindo
+ * um JWT de 3 partes e as variações de 401 (sem token, token falso, header malformado).
+ */
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { E2EContext, resetDatabase, startE2EApp } from './support/e2e-app';

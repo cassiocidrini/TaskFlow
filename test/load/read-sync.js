@@ -1,3 +1,9 @@
+/**
+ * Experimento: leitura SÍNCRONA de 100 MB (Módulo 11) — o anti-padrão.
+ *
+ * `readFileSync` bloqueia o Event Loop durante toda a leitura e consome memória proporcional ao arquivo.
+ * Mais rápido para UM arquivo (~74 ms), mas com 10 downloads de 500 MB precisaria de ~5 GB.
+ */
 const fs = require('fs');
 const path = require('path');
 

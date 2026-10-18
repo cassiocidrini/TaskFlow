@@ -1,3 +1,9 @@
+/**
+ * Experimento: cópia de arquivo com `.pipe()` (Módulo 11) — backpressure automático.
+ *
+ * Se a escrita for mais lenta que a leitura, o `.pipe()` PAUSA a leitura até o destino esvaziar.
+ * Em código de produção, prefira `stream.pipeline()`: além do backpressure, propaga erros e fecha os streams.
+ */
 const fs = require('fs');
 const path = require('path');
 

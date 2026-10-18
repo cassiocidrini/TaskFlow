@@ -1,3 +1,13 @@
+/**
+ * `TaskCommandRunner` — o roteiro único (Template Method) de todo comando de ciclo de vida.
+ *
+ * Cada um dos 5 passos (autorizar → carregar → regra → salvar → publicar) tem um teste que QUEBRA se o passo for
+ * removido ou mudar de ordem. Destaques: o anti-IDOR (tarefa de outro projeto = o mesmo 404, e a mutação nem é
+ * chamada), `TaskInvariantError` traduzido para 409 sem salvar nada, e bugs (ex.: `TypeError`) NÃO mascarados
+ * como "conflito".
+ *
+ * Agregado novo a cada teste (`freshTask()`): ele é mutável — compartilhá-lo deixaria um teste contaminar o outro.
+ */
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { EventBus } from '@nestjs/cqrs';
 import { TaskCommandRunner } from '../../src/modules/tasks/commands/task-command.runner';

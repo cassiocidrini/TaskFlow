@@ -1,3 +1,15 @@
+/**
+ * Script de inspeção do Event Store: `npm run events:list`.
+ *
+ * Imprime TODOS os eventos gravados — útil para estudar o Event Sourcing "por dentro" (ver as versões
+ * crescendo por agregado e os payloads exatos). É uma ferramenta de desenvolvimento, não código da API.
+ *
+ * Roda fora do NestJS, por isso cria o próprio `PrismaClient` com o driver adapter (obrigatório no Prisma 7)
+ * e lê o `.env` diretamente. Lê a tabela inteira de uma vez: aceitável para estudo; com milhões de eventos,
+ * seria preciso paginar ou usar um cursor/stream para não estourar a memória (Módulo 11).
+ *
+ * Existe uma cópia antiga e quebrada em `modules/tasks/events/list-events.ts` (marcada como `@deprecated`).
+ */
 import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '@prisma/client';

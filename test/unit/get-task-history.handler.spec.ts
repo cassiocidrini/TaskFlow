@@ -1,3 +1,10 @@
+/**
+ * `GetTaskHistoryHandler` — o histórico de eventos (auditoria).
+ *
+ * Protege: a linha do tempo em ordem e, principalmente, que o estado atual é RECONSTRUÍDO a partir dos eventos
+ * (o mock do Read Model nem existe neste teste). Também: posse verificada antes de ler o Event Store e o mesmo
+ * 404 para tarefa de outro projeto (o histórico revela quem fez o quê — é dado sensível).
+ */
 import { NotFoundException } from '@nestjs/common';
 import { GetTaskHistoryHandler } from '../../src/modules/tasks/queries/get-task-history.handler';
 import { GetTaskHistoryQuery } from '../../src/modules/tasks/queries/get-task-history.query';

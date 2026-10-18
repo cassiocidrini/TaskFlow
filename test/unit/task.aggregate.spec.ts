@@ -1,3 +1,13 @@
+/**
+ * Agregado `TaskAggregate` — o coração do Event Sourcing, testado SEM NENHUM MOCK.
+ *
+ * Protege: o replay (`fromHistory` chega ao estado certo aplicando os eventos em ordem), as invariantes
+ * (tarefa `DONE` é imutável → `TaskInvariantError`), a idempotência dos comandos (repetir o mesmo valor não
+ * gera evento) e a semântica de `version` (só o PERSISTIDO — é o `expectedVersion` do próximo save).
+ *
+ * Por que sem mocks: o agregado é código puro (sem Nest, Prisma ou relógio). Entram eventos, saem eventos —
+ * o teste roda em milissegundos e quebra só se a REGRA mudar.
+ */
 import { TaskAggregate, TaskInvariantError } from '../../src/modules/tasks/domain/task.aggregate';
 import type { TaskDomainEvent } from '../../src/modules/tasks/events/task.events';
 
