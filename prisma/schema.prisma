@@ -64,10 +64,12 @@ model TaskRead {
   id         String   @id @default(uuid())
   projectId  String   @map("project_id")
   title      String
-  status     String   @default("PENDING")
+  // Enum (e não String): o banco recusa valores fora de PENDING | IN_PROGRESS | DONE
+  status     TaskStatus   @default(PENDING)
   // Default só para preencher linhas antigas na migração; o handler sempre grava explicitamente
   priority   TaskPriority @default(MEDIUM)
   dueDate    DateTime?    @map("due_date")
+  completedAt DateTime?   @map("completed_at")
   assigneeId String?  @map("assignee_id")
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")

@@ -35,9 +35,69 @@ export class TaskCreatedEvent implements TaskCreatedData {
   }
 }
 
-export class TaskCompletedEvent {
-  constructor(
-    public readonly taskId: string,
-    public readonly completedAt: string,
-  ) {}
+// ============================================================
+// Eventos do ciclo de vida da tarefa
+// ============================================================
+
+/** Status "abertos" — DONE só se alcança via TaskCompleted (que é terminal). */
+export type OpenTaskStatus = 'PENDING' | 'IN_PROGRESS';
+export type TaskStatus = OpenTaskStatus | 'DONE';
+
+export interface TaskAssignedData {
+  taskId: string;
+  assigneeId: string;
 }
+
+export interface TaskStatusChangedData {
+  taskId: string;
+  from: OpenTaskStatus;
+  to: OpenTaskStatus;
+}
+
+export interface TaskCompletedData {
+  taskId: string;
+  /** ISO 8601 */
+  completedAt: string;
+}
+
+export class TaskAssignedEvent implements TaskAssignedData {
+  readonly taskId: string;
+  readonly assigneeId: string;
+
+  constructor(data: TaskAssignedData) {
+    this.taskId = data.taskId;
+    this.assigneeId = data.assigneeId;
+  }
+}
+
+export class TaskStatusChangedEvent implements TaskStatusChangedData {
+  readonly taskId: string;
+  readonly from: OpenTaskStatus;
+  readonly to: OpenTaskStatus;
+
+  constructor(data: TaskStatusChangedData) {
+    this.taskId = data.taskId;
+    this.from = data.from;
+    this.to = data.to;
+  }
+}
+
+export class TaskCompletedEvent implements TaskCompletedData {
+  readonly taskId: string;
+  readonly completedAt: string;
+
+  constructor(data: TaskCompletedData) {
+    this.taskId = data.taskId;
+    this.completedAt = data.completedAt;
+  }
+}
+
+/**
+ * União discriminada de TODOS os eventos da tarefa, no formato em que vivem no Event Store
+ * (event_type + payload). O campo `type` permite ao TypeScript estreitar o `data` em cada `case`.
+ */
+export type TaskDomainEvent =
+  | { type: 'TaskCreated'; data: TaskCreatedData }
+  | { type: 'TaskAssigned'; data: TaskAssignedData }
+  | { type: 'TaskStatusChanged'; data: TaskStatusChangedData }
+  | { type: 'TaskCompleted'; data: TaskCompletedData };

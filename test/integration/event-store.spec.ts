@@ -144,6 +144,50 @@ describe('EventStoreService (integração)', () => {
   });
 
   // ============================================================
+  // appendMany — vários eventos de um comando, tudo ou nada
+  // ============================================================
+  describe('appendMany', () => {
+    it('deve gravar N eventos em versões consecutivas e retornar a versão final', async () => {
+      await eventStore.append(evento('task-1', 'TaskCreated'), 0);
+
+      const novaVersao = await eventStore.appendMany(
+        [evento('task-1', 'TaskAssigned'), evento('task-1', 'TaskStatusChanged'), evento('task-1', 'TaskCompleted')],
+        1,
+      );
+
+      const events = await eventStore.loadEvents('task-1');
+      expect(novaVersao).toBe(4);
+      expect(events.map((e) => [e.version, e.eventType])).toEqual([
+        [1, 'TaskCreated'],
+        [2, 'TaskAssigned'],
+        [3, 'TaskStatusChanged'],
+        [4, 'TaskCompleted'],
+      ]);
+    });
+
+    it('deve ser ATÔMICO: se uma versão conflitar, NENHUM evento do lote é gravado', async () => {
+      await eventStore.append(evento('task-1', 'TaskCreated'), 0);
+      await eventStore.append(evento('task-1', 'TaskAssigned'), 1); // ocupa a versão 2
+
+      // Lote desatualizado: tentaria gravar v2 (conflito) e v3 (livre)
+      await expect(
+        eventStore.appendMany([evento('task-1', 'TaskStatusChanged'), evento('task-1', 'TaskCompleted')], 1),
+      ).rejects.toThrow(ConcurrencyConflictError);
+
+      // A v3 NÃO pode ter entrado sozinha — o agregado não fica "meio salvo"
+      const events = await eventStore.loadEvents('task-1');
+      expect(events.map((e) => e.version)).toEqual([1, 2]);
+    });
+
+    it('deve ser no-op com lista vazia (retorna a mesma versão, sem tocar no banco)', async () => {
+      await eventStore.append(evento('task-1', 'TaskCreated'), 0);
+
+      await expect(eventStore.appendMany([], 1)).resolves.toBe(1);
+      expect(await eventStore.loadEvents('task-1')).toHaveLength(1);
+    });
+  });
+
+  // ============================================================
   // loadEvents
   // ============================================================
   describe('loadEvents', () => {

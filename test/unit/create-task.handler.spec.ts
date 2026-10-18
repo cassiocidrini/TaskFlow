@@ -162,7 +162,8 @@ describe('CreateTaskHandler', () => {
 
       const [stored] = eventStore.append.mock.calls[0];
       const published = eventBus.publish.mock.calls[0][0] as TaskCreatedEvent;
-      expect({ ...published }).toEqual(stored.payload);
+      // toEqual compara só as propriedades (ignora o prototype da classe), então não precisa de spread
+      expect(published).toEqual(stored.payload);
     });
   });
 

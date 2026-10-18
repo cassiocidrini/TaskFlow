@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { Logger } from '@nestjs/common';
 import { TaskCreatedHandler } from '../../src/modules/tasks/events/task-created.handler';
-import { TaskCreatedEvent } from '../../src/modules/tasks/events/task.events';
+import { TaskCreatedEvent, type TaskCreatedData } from '../../src/modules/tasks/events/task.events';
 import { PrismaService } from '../../src/prisma/prisma.service';
 
 describe('TaskCreatedHandler (projeção para tasks_read)', () => {
@@ -9,13 +9,15 @@ describe('TaskCreatedHandler (projeção para tasks_read)', () => {
   let prisma: { taskRead: { createMany: jest.Mock } };
   let loggerError: jest.SpyInstance;
 
-  const event = new TaskCreatedEvent({
+  // Dados "planos" separados da instância: dá para derivar variações com spread sem perder tipagem
+  const eventData: TaskCreatedData = {
     taskId: 'task-1',
     projectId: 'p1',
     title: 'Minha tarefa',
     priority: 'HIGH',
     assigneeId: 'u1',
-  });
+  };
+  const event = new TaskCreatedEvent(eventData);
 
   beforeEach(async () => {
     prisma = { taskRead: { createMany: jest.fn().mockResolvedValue({ count: 1 }) } };
@@ -53,7 +55,7 @@ describe('TaskCreatedHandler (projeção para tasks_read)', () => {
   });
 
   it('deve converter o dueDate ISO do evento em Date para a coluna due_date', async () => {
-    const comPrazo = new TaskCreatedEvent({ ...event, dueDate: '2026-12-31T23:59:59.000Z' });
+    const comPrazo = new TaskCreatedEvent({ ...eventData, dueDate: '2026-12-31T23:59:59.000Z' });
 
     await handler.handle(comPrazo);
 
