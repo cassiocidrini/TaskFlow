@@ -48,6 +48,7 @@ describe('CreateTaskHandler', () => {
         projectId: 'p1',
         title: 'Minha tarefa',
         assigneeId: 'u1',
+        priority: 'MEDIUM',
       },
     });
   });

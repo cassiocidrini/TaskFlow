@@ -18,7 +18,7 @@ export class CreateTaskHandler implements ICommandHandler<CreateTaskCommand> {
   async execute(command: CreateTaskCommand): Promise<string> {
     const taskId = randomUUID();
     
-    // Usando a estratégia para calcular a prioridade
+    // Calcula a prioridade usando a estratégia injetada
     const priority = this.priorityStrategy.calculate(command.title, command.dueDate);
 
     await this.eventStore.append({
@@ -29,11 +29,13 @@ export class CreateTaskHandler implements ICommandHandler<CreateTaskCommand> {
         taskId,
         projectId: command.projectId,
         title: command.title,
-        priority, // <-- Gravando a prioridade no evento
+        assigneeId: command.assigneeId, // <-- Recuperamos isso
+        priority,                       // <-- Mantemos a prioridade
       },
     });
 
-    this.eventBus.publish(new TaskCreatedEvent(taskId, command.title, priority));
+    // Corrigimos a ordem dos argumentos: taskId, projectId, title
+    this.eventBus.publish(new TaskCreatedEvent(taskId, command.projectId, command.title, command.assigneeId));
     return taskId;
   }
 }
