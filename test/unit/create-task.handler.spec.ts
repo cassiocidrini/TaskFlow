@@ -57,7 +57,7 @@ describe('CreateTaskHandler', () => {
         assigneeId: 'u1',
         priority: 'MEDIUM',
       },
-    });
+    }, 0); // versão esperada 0: agregado novo
   });
 
   it('deve publicar um TaskCreatedEvent no EventBus', async () => {
@@ -134,6 +134,36 @@ describe('CreateTaskHandler', () => {
     const appendCall = eventStore.append.mock.calls[0][0];
     expect(appendCall.payload.assigneeId).toBeUndefined();
     expect(taskId).toBeDefined();
+  });
+
+  // ============================================================
+  // Prioridade e prazo atravessando o fluxo (antes eram descartados)
+  // ============================================================
+  describe('priority e dueDate', () => {
+    const dueDate = new Date('2026-12-31T23:59:59.000Z');
+
+    it('deve gravar o dueDate (ISO) no payload do Event Store', async () => {
+      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa', undefined, dueDate));
+
+      const [stored] = eventStore.append.mock.calls[0];
+      expect(stored.payload.dueDate).toBe('2026-12-31T23:59:59.000Z');
+    });
+
+    it('deve publicar priority e dueDate no TaskCreatedEvent (chegam ao Read Model)', async () => {
+      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Corrigir bug urgente', undefined, dueDate));
+
+      const published = eventBus.publish.mock.calls[0][0] as TaskCreatedEvent;
+      expect(published.priority).toBe('HIGH'); // "bug" e "urgente" → KeywordPriorityStrategy
+      expect(published.dueDate).toBe('2026-12-31T23:59:59.000Z');
+    });
+
+    it('evento GRAVADO e evento PUBLICADO devem carregar exatamente os mesmos dados', async () => {
+      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa', 'u1', dueDate));
+
+      const [stored] = eventStore.append.mock.calls[0];
+      const published = eventBus.publish.mock.calls[0][0] as TaskCreatedEvent;
+      expect({ ...published }).toEqual(stored.payload);
+    });
   });
 
   // ============================================================

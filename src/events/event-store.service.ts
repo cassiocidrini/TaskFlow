@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 export interface DomainEvent {
@@ -8,28 +9,54 @@ export interface DomainEvent {
   payload: Record<string, unknown>;
 }
 
+/**
+ * Outra requisição gravou no mesmo agregado depois que este comando o leu.
+ * Estende ConflictException → o Nest responde 409 automaticamente.
+ */
+export class ConcurrencyConflictError extends ConflictException {
+  constructor() {
+    super('O recurso foi modificado por outra requisição. Recarregue e tente novamente.');
+  }
+}
+
 @Injectable()
 export class EventStoreService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async append(event: DomainEvent): Promise<void> {
-    const lastEvent = await this.prisma.event.findFirst({
-      where: { aggregateId: event.aggregateId },
-      orderBy: { version: 'desc' },
-    });
+  /**
+   * Concorrência otimista: grava o evento na versão `expectedVersion + 1`.
+   *
+   * @param expectedVersion versão do agregado que o chamador LEU (0 = agregado novo, sem eventos).
+   * @returns a nova versão do agregado.
+   * @throws ConcurrencyConflictError se outra gravação já ocupou essa versão
+   *         (garantido pelo UNIQUE (aggregate_id, version) no banco — sem janela de corrida).
+   */
+  async append(event: DomainEvent, expectedVersion: number): Promise<number> {
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      throw new Error(`expectedVersion inválida: ${expectedVersion}`);
+    }
 
-    const nextVersion = (lastEvent?.version ?? 0) + 1;
+    const version = expectedVersion + 1;
 
-    await this.prisma.event.create({
-      data: {
-        aggregateId: event.aggregateId,
-        aggregateType: event.aggregateType,
-        eventType: event.eventType,
-        // Prisma espera "InputJsonValue" — fazemos o cast explícito
-        payload: event.payload as object,
-        version: nextVersion,
-      },
-    });
+    try {
+      await this.prisma.event.create({
+        data: {
+          aggregateId: event.aggregateId,
+          aggregateType: event.aggregateType,
+          eventType: event.eventType,
+          payload: event.payload as Prisma.InputJsonObject,
+          version,
+        },
+      });
+    } catch (error) {
+      // P2002 = violação de unique constraint → alguém gravou essa versão antes de nós
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConcurrencyConflictError();
+      }
+      throw error;
+    }
+
+    return version;
   }
 
   async loadEvents(aggregateId: string) {

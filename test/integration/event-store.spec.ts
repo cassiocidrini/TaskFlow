@@ -2,12 +2,24 @@ import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '@prisma/client';
 import { execSync } from 'child_process';
-import { EventStoreService } from '../../src/events/event-store.service';
+import {
+  ConcurrencyConflictError,
+  DomainEvent,
+  EventStoreService,
+} from '../../src/events/event-store.service';
 
 describe('EventStoreService (integração)', () => {
   let container: StartedPostgreSqlContainer;
   let prisma: PrismaClient;
   let eventStore: EventStoreService;
+
+  // Fábrica de eventos para reduzir ruído nos testes
+  const evento = (aggregateId: string, eventType: string, payload: Record<string, unknown> = {}): DomainEvent => ({
+    aggregateId,
+    aggregateType: 'Task',
+    eventType,
+    payload,
+  });
 
   beforeAll(async () => {
     // 1. Sobe um container Postgres real
@@ -22,7 +34,7 @@ describe('EventStoreService (integração)', () => {
     const adapter = new PrismaPg({ connectionString });
     prisma = new PrismaClient({ adapter });
 
-    // 3. Roda as migrações do Prisma
+    // 3. Roda as migrações do Prisma (inclui o UNIQUE (aggregate_id, version))
     execSync('npx prisma migrate deploy', {
       env: { ...process.env, DATABASE_URL: connectionString },
       stdio: 'inherit',
@@ -45,102 +57,89 @@ describe('EventStoreService (integração)', () => {
   // append
   // ============================================================
   describe('append', () => {
-    it('deve persistir um evento com versão inicial 1', async () => {
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskCreated',
-        payload: { title: 'Minha tarefa' },
-      });
+    it('deve persistir o primeiro evento na versão 1 e retornar a nova versão', async () => {
+      const novaVersao = await eventStore.append(evento('task-1', 'TaskCreated', { title: 'Minha tarefa' }), 0);
 
       const events = await prisma.event.findMany();
+      expect(novaVersao).toBe(1);
       expect(events).toHaveLength(1);
       expect(events[0].version).toBe(1);
       expect(events[0].eventType).toBe('TaskCreated');
       expect(events[0].aggregateId).toBe('task-1');
     });
 
-    it('deve incrementar a versão ao adicionar múltiplos eventos do mesmo agregado', async () => {
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskCreated',
-        payload: { title: 'Tarefa' },
-      });
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskUpdated',
-        payload: { title: 'Tarefa atualizada' },
-      });
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskCompleted',
-        payload: { completedAt: '2026-10-12T00:00:00Z' },
-      });
+    it('deve gravar eventos sequenciais quando cada append informa a versão correta', async () => {
+      await eventStore.append(evento('task-1', 'TaskCreated'), 0);
+      await eventStore.append(evento('task-1', 'TaskUpdated'), 1);
+      await eventStore.append(evento('task-1', 'TaskCompleted'), 2);
 
-      const events = await prisma.event.findMany({
-        where: { aggregateId: 'task-1' },
-        orderBy: { version: 'asc' },
-      });
-
-      expect(events).toHaveLength(3);
-      expect(events[0].version).toBe(1);
-      expect(events[1].version).toBe(2);
-      expect(events[2].version).toBe(3);
+      const events = await eventStore.loadEvents('task-1');
+      expect(events.map((e) => e.version)).toEqual([1, 2, 3]);
     });
 
     it('deve versionar agregados independentes separadamente', async () => {
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskCreated',
-        payload: {},
-      });
-      await eventStore.append({
-        aggregateId: 'task-2',
-        aggregateType: 'Task',
-        eventType: 'TaskCreated',
-        payload: {},
-      });
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskUpdated',
-        payload: {},
-      });
+      await eventStore.append(evento('task-1', 'TaskCreated'), 0);
+      await eventStore.append(evento('task-2', 'TaskCreated'), 0);
+      await eventStore.append(evento('task-1', 'TaskUpdated'), 1);
 
-      const task1Events = await prisma.event.findMany({
-        where: { aggregateId: 'task-1' },
-        orderBy: { version: 'asc' },
-      });
-      const task2Events = await prisma.event.findMany({
-        where: { aggregateId: 'task-2' },
-        orderBy: { version: 'asc' },
-      });
-
-      expect(task1Events.map((e) => e.version)).toEqual([1, 2]);
-      expect(task2Events.map((e) => e.version)).toEqual([1]);
+      const task1 = await eventStore.loadEvents('task-1');
+      const task2 = await eventStore.loadEvents('task-2');
+      expect(task1.map((e) => e.version)).toEqual([1, 2]);
+      expect(task2.map((e) => e.version)).toEqual([1]);
     });
 
     it('deve persistir o payload JSON corretamente', async () => {
-      const payload = {
-        title: 'Minha tarefa',
-        assigneeId: 'u1',
-        priority: 5,
-        tags: ['urgente', 'bug'],
-      };
+      const payload = { title: 'Minha tarefa', assigneeId: 'u1', priority: 5, tags: ['urgente', 'bug'] };
 
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskCreated',
-        payload,
-      });
+      await eventStore.append(evento('task-1', 'TaskCreated', payload), 0);
 
       const event = await prisma.event.findFirst({ where: { aggregateId: 'task-1' } });
       expect(event!.payload).toEqual(payload);
+    });
+
+    it('deve rejeitar expectedVersion negativa ou fracionária', async () => {
+      await expect(eventStore.append(evento('task-1', 'TaskCreated'), -1)).rejects.toThrow('expectedVersion inválida');
+      await expect(eventStore.append(evento('task-1', 'TaskCreated'), 1.5)).rejects.toThrow('expectedVersion inválida');
+    });
+  });
+
+  // ============================================================
+  // Concorrência otimista — o motivo deste bloco existir
+  // ============================================================
+  describe('concorrência otimista', () => {
+    it('deve lançar ConcurrencyConflictError quando a versão esperada já foi ultrapassada', async () => {
+      await eventStore.append(evento('task-1', 'TaskCreated'), 0);
+      await eventStore.append(evento('task-1', 'TaskUpdated'), 1);
+
+      // Um comando que leu o agregado na versão 1 (desatualizado) tenta gravar
+      await expect(eventStore.append(evento('task-1', 'TaskCompleted'), 1)).rejects.toThrow(
+        ConcurrencyConflictError,
+      );
+
+      // E nada foi corrompido: continuam exatamente 2 eventos, versões 1 e 2
+      const events = await eventStore.loadEvents('task-1');
+      expect(events.map((e) => e.version)).toEqual([1, 2]);
+    });
+
+    it('deve aceitar EXATAMENTE UM de N appends simultâneos na mesma versão (race condition real)', async () => {
+      await eventStore.append(evento('task-1', 'TaskCreated'), 0);
+
+      // 10 "requisições" leram o agregado na versão 1 e gravam AO MESMO TEMPO
+      const tentativas = Array.from({ length: 10 }, (_, i) =>
+        eventStore.append(evento('task-1', 'TaskUpdated', { tentativa: i }), 1),
+      );
+      const resultados = await Promise.allSettled(tentativas);
+
+      const sucessos = resultados.filter((r) => r.status === 'fulfilled');
+      const conflitos = resultados.filter(
+        (r) => r.status === 'rejected' && r.reason instanceof ConcurrencyConflictError,
+      );
+
+      expect(sucessos).toHaveLength(1); // só um vence
+      expect(conflitos).toHaveLength(9); // todos os outros recebem 409 — nenhum erro "estranho"
+
+      const events = await eventStore.loadEvents('task-1');
+      expect(events.map((e) => e.version)).toEqual([1, 2]); // sem versões duplicadas
     });
   });
 
@@ -149,18 +148,8 @@ describe('EventStoreService (integração)', () => {
   // ============================================================
   describe('loadEvents', () => {
     it('deve carregar os eventos em ordem cronológica (versão asc)', async () => {
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskCreated',
-        payload: {},
-      });
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskUpdated',
-        payload: {},
-      });
+      await eventStore.append(evento('task-1', 'TaskCreated'), 0);
+      await eventStore.append(evento('task-1', 'TaskUpdated'), 1);
 
       const events = await eventStore.loadEvents('task-1');
 
@@ -175,18 +164,8 @@ describe('EventStoreService (integração)', () => {
     });
 
     it('deve filtrar apenas os eventos do agregado correto', async () => {
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskCreated',
-        payload: {},
-      });
-      await eventStore.append({
-        aggregateId: 'task-2',
-        aggregateType: 'Task',
-        eventType: 'TaskCreated',
-        payload: {},
-      });
+      await eventStore.append(evento('task-1', 'TaskCreated'), 0);
+      await eventStore.append(evento('task-2', 'TaskCreated'), 0);
 
       const events = await eventStore.loadEvents('task-1');
       expect(events).toHaveLength(1);
@@ -199,27 +178,10 @@ describe('EventStoreService (integração)', () => {
   // ============================================================
   describe('replay (reconstrução de estado)', () => {
     it('deve reconstruir o estado atual a partir dos eventos', async () => {
-      // 1. Append de eventos
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskCreated',
-        payload: { title: 'Tarefa original' },
-      });
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskUpdated',
-        payload: { title: 'Tarefa atualizada' },
-      });
-      await eventStore.append({
-        aggregateId: 'task-1',
-        aggregateType: 'Task',
-        eventType: 'TaskCompleted',
-        payload: { completedAt: '2026-10-12T00:00:00Z' },
-      });
+      await eventStore.append(evento('task-1', 'TaskCreated', { title: 'Tarefa original' }), 0);
+      await eventStore.append(evento('task-1', 'TaskUpdated', { title: 'Tarefa atualizada' }), 1);
+      await eventStore.append(evento('task-1', 'TaskCompleted', { completedAt: '2026-10-12T00:00:00Z' }), 2);
 
-      // 2. Replay: reconstrói o estado aplicando os eventos em ordem
       const events = await eventStore.loadEvents('task-1');
 
       let state: { title?: string; completed?: boolean } = {};
@@ -234,11 +196,7 @@ describe('EventStoreService (integração)', () => {
         }
       }
 
-      // 3. Estado final reconstruído
-      expect(state).toEqual({
-        title: 'Tarefa atualizada',
-        completed: true,
-      });
+      expect(state).toEqual({ title: 'Tarefa atualizada', completed: true });
     });
   });
 });

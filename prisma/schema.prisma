@@ -53,7 +53,10 @@ model Event {
   version     Int
   createdAt   DateTime @default(now()) @map("created_at")
 
-  @@index([aggregateId, version])
+  // Concorrência otimista garantida PELO BANCO: duas gravações com a mesma
+  // versão no mesmo agregado → a segunda falha (P2002). Substitui o @@index
+  // anterior: o índice único atende as mesmas consultas (WHERE aggregate_id ORDER BY version).
+  @@unique([aggregateId, version])
   @@map("events")
 }
 
@@ -62,12 +65,21 @@ model TaskRead {
   projectId  String   @map("project_id")
   title      String
   status     String   @default("PENDING")
+  // Default só para preencher linhas antigas na migração; o handler sempre grava explicitamente
+  priority   TaskPriority @default(MEDIUM)
+  dueDate    DateTime?    @map("due_date")
   assigneeId String?  @map("assignee_id")
   createdAt  DateTime @default(now()) @map("created_at")
   updatedAt  DateTime @updatedAt @map("updated_at")
 
   @@index([projectId, createdAt])
   @@map("tasks_read")
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
 }
 
 enum TaskStatus {
