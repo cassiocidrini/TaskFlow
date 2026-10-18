@@ -1,0 +1,13 @@
+# Quebra de linha padronizada no REPOSITÓRIO, independente da configuração de cada máquina
+# (core.autocrlf). Evita diffs "fantasmas" e scripts quebrados no Linux (Docker, CI).
+* text=auto eol=lf
+
+# Scripts do Windows mantêm CRLF (convenção do PowerShell/cmd)
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binários: nunca converter
+*.png binary
+*.jpg binary
+*.pdf binary

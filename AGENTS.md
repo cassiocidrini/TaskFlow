@@ -1,259 +1,181 @@
 # AGENTS.md
 
-> Arquivo de contexto **neutro** para agentes de IA (Claude Code, Cursor, Codex, GitHub Copilot, etc.).
-> Leia este arquivo antes de sugerir qualquer código, comando ou decisão arquitetural.
-> Trate-o como código: versionado, revisado e atualizado junto com o projeto.
->
-> Este arquivo é a **fonte da verdade** para contexto de IA. O `CLAUDE.md` é um espelho para compatibilidade com o Claude Code.
+> Contexto **neutro** para agentes de IA (Claude Code, Cursor, Codex, Copilot) e para pessoas novas no projeto.
+> Leia antes de sugerir qualquer código, comando ou decisão arquitetural.
+> É a **fonte da verdade** de contexto de IA (`CLAUDE.md` só aponta para cá). Trate como código:
+> **se o código mudar e este arquivo não, ele passa a mentir** — atualize no mesmo PR.
 
-## 📋 Visão Geral do Projeto
+## 📋 Visão geral
 
-- **Nome:** TaskFlow
-- **Propósito:** API REST para gestão de tarefas e projetos (projeto de estudo da trilha "Do Pleno ao Excelente")
-- **Status:** Em desenvolvimento
-- **Domínio:** Gestão de tarefas (users, projects, tasks)
+- **TaskFlow:** API de gestão de tarefas com **CQRS + Event Sourcing** (projeto de estudo e portfólio).
+- **Domínio:** `User` → possui `Project`s → que contêm `Task`s. Tarefas são **event-sourced**; usuários e projetos são CRUD simples (de propósito: ES só onde o histórico importa).
 
-### Stack Técnica
-
-| Camada | Tecnologia | Versão |
-|---|---|---|
-| **Runtime** | Node.js | 24 |
-| **Linguagem** | TypeScript | 6.x (strict) |
-| **Framework** | NestJS | 12 |
-| **ORM** | Prisma | 7.10 |
-| **Banco Relacional** | PostgreSQL | 16 |
-| **Banco NoSQL** | DynamoDB (via LocalStack) | — |
-| **Observabilidade** | OpenTelemetry + Jaeger + Prometheus + Grafana | — |
-| **Testes** | Jest + Testcontainers + supertest + k6 (load) | — |
-| **CI/CD** | GitHub Actions | — |
-| **IaC** | Terraform (AWS: S3, SQS, SNS, IAM via LocalStack) | — |
-| **Containerização** | Docker + Docker Compose | — |
+| Camada | Tecnologia |
+|---|---|
+| Runtime / linguagem | Node.js 24 · TypeScript 6 (`strict`, `module: nodenext`) |
+| Framework | NestJS 12 · `@nestjs/cqrs` · `@nestjs/config` · `@nestjs/swagger` |
+| Dados | PostgreSQL 16 · Prisma 7 (driver adapter `@prisma/adapter-pg`) |
+| Validação | `zod` (ambiente) · `class-validator` (DTOs) |
+| Testes | Jest · Testcontainers · supertest · k6 (carga) |
+| Observabilidade | OpenTelemetry → Jaeger + Prometheus · Grafana |
+| Infra | Docker Compose · Terraform (LocalStack) · GitHub Actions |
 
 ---
 
-## 🚀 Comandos Mais Usados
-
-### Desenvolvimento
-
-```powershell
-.\setup.ps1        # Setup completo (instala deps, sobe containers, migra)
-.\dev.ps1          # Inicia em modo watch
-.\stop.ps1         # Para containers
-```
-
-### Desenvolvimento
+## 🚀 Comandos
 
 ```bash
-npm run test:unit          # Unitários (rápidos, ~2s)
-npm run test:integration   # Integração com Testcontainers (~70s, exige Docker)
-npm run test:e2e           # E2E HTTP (~15s)
-k6 run test/load/k6-smoke.js   # Load test simples
+# Desenvolvimento
+docker compose up -d postgres jaeger    # mínimo para a app (Windows: .\setup.ps1 / .\dev.ps1 / .\stop.ps1)
+npm run start:dev                       # http://localhost:3000 · Swagger em /docs
+
+# Qualidade — rodar SEMPRE antes de commitar
+npx tsc --noEmit && npm run lint && npm run test:unit
+
+# Testes com Docker (Testcontainers)
+npm run test:integration                # ~1 min
+npm run test:e2e                        # ~1,5 min
+npm test                                # as 3 suítes em sequência
+
+# Banco
+npx prisma migrate dev --create-only --name <nome>   # gera o SQL SEM aplicar → REVISE → npx prisma migrate dev
+npx prisma generate                                  # OBRIGATÓRIO após migrar (Prisma 7 não regenera sozinho)
 ```
 
-> ⚠️ **NUNCA** rodar `npx jest` direto. Sempre via npm scripts (necessário flag `--experimental-vm-modules`).
-
-### Banco de Dados e Infraestrutura
-
-```bash
-npx prisma generate                        # Regerar Prisma Client
-npx prisma migrate dev --name <nome>       # Nova migração
-npx prisma studio                          # UI para explorar o banco
-
-# Terraform (na pasta /terraform)
-terraform init -reconfigure
-terraform apply -auto-approve
-```
-
-### Qualidade
-
-```bash
-npx tsc --noEmit           # Verificar tipos
-npm run lint               # ESLint (oxlint)
-npm run build              # Compilar para dist/
-```
+> ⚠️ **Nunca** rodar `npx jest` direto: os scripts passam `--experimental-vm-modules` e `--runInBand`.
 
 ---
 
-## 🏗️ Arquitetura e Design Patterns
+## 🏗️ Arquitetura
 
-### Estilo Arquitetural
-
-**Layered + CQRS + Event Sourcing**
-
-- **Layered:** separação em `domain`, `application` e `infrastructure`.
-- **CQRS:** commands (escrita) separados de queries (leitura).
-- **Event Sourcing:** eventos persistidos na tabela `events` (fonte da verdade).
-
-### Padrões de Projeto Aplicados (Design Patterns)
-
-- **Strategy:** Usado para calcular a prioridade de uma tarefa (`KeywordPriorityStrategy`, `DeadlinePriorityStrategy`). O `CreateTaskHandler` injeta a estratégia e a utiliza.
-- **Factory:** Usado para instanciar clientes HTTP de bancos diferentes (ex: `BankClientFactory`).
-- **Observer:** Usado pelo `EventBus` do NestJS CQRS para notificar handlers que atualizam o Read Model.
-- **Repository:** O `PrismaService` isola o acesso ao banco. A lógica de negócio não sabe se usamos Prisma, TypeORM ou SQL puro.
-- **Decorator:** Usado pelo NestJS para adicionar comportamentos (ex: `@UseGuards(JwtAuthGuard)`, `@Throttle`).
-
-### Node.js Internals (Regras Críticas)
-
-- **NUNCA** usar `fs.readFileSync` para arquivos grandes. Use Streams (`fs.createReadStream` + `.pipe()`) para evitar estourar a memória (Memory Leak).
-- **CPU-Bound:** Se sugerir código que faça cálculos pesados (ex: bcrypt, manipulação de imagens), lembre que o Node.js usa o Thread Pool (libuv). Operações síncronas bloqueiam o Event Loop.
-- **Garbage Collector:** Evite variáveis globais que acumulam dados (como caches sem TTL). Use `lru-cache` se precisar de cache em memória.
-
-### Estrutura de Pastas Principal
+### Fluxo de escrita de uma tarefa (comando)
 
 ```text
-src/
-├── common/                    # Decorators, filters, interceptors
-├── events/                    # Event Store compartilhado
-├── modules/
-│   ├── auth/                  # Autenticação (JWT + bcrypt)
-│   └── tasks/                 # CQRS
-│       ├── commands/          # Escrita
-│       ├── queries/           # Leitura
-│       ├── events/            # Eventos de domínio
-│       └── strategies/        # Strategy Pattern (prioridade)
-├── prisma/                    # PrismaService
-├── env.ts                     # Carrega .env (importar ANTES de tudo)
-└── tracing.ts                 # OpenTelemetry (importar ANTES de tudo)
-
-test/
-├── unit/                      # Testes unitários
-├── integration/               # Testes com Testcontainers
-├── e2e/                       # Testes HTTP
-└── load/                      # Scripts do k6 (NÃO são testes do Jest)
-
-terraform/                     # Infraestrutura como Código (AWS/LocalStack)
+Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.run(target, mutate)
+   1. ProjectsService.assertOwner(projectId, userId)       → 404 se o projeto não for do usuário
+   2. TaskRepository.load(taskId)                          → reidrata o agregado dos eventos
+      tarefa de OUTRO projeto                              → o MESMO 404 (anti-IDOR)
+   3. mutate(task) → regra de domínio                      → TaskInvariantError vira 409
+   4. TaskRepository.save(task) → appendMany atômico       → ConcurrencyConflictError (409)
+   5. EventBus.publish(eventos gravados)                   → projeções atualizam tasks_read
 ```
 
-### Ordem CRÍTICA dos imports no `main.ts`
+- **Leitura:** listagens vêm do Read Model `tasks_read` (eventualmente consistente, paginado por cursor). O histórico (`GET …/history`) lê direto do Event Store.
+- **Exceção:** `CreateTaskHandler` é anterior ao runner e faz o roteiro manualmente (`assertOwner` → `append(…, 0)` → `publish`).
+
+### Onde fica cada coisa (`src/`)
+
+| Caminho | Responsabilidade | Regra |
+|---|---|---|
+| `config/env.schema.ts` | Schema `zod` de TODAS as variáveis de ambiente | Variável nova entra aqui; ler via `ConfigService<Env, true>` |
+| `app.setup.ts` | Helmet, CORS, `ValidationPipe`, Swagger | Usado pelo `main.ts` **e** pelo E2E — não duplicar config HTTP |
+| `events/event-store.service.ts` | `append`/`appendMany` com `expectedVersion`, `loadEvents` | Único ponto de escrita no Event Store |
+| `modules/tasks/domain/` | `TaskAggregate`, contrato `TaskRepository` | **Zero imports** de Nest, Prisma ou infra |
+| `modules/tasks/infrastructure/` | `EventSourcedTaskRepository`, `toDomainEvent` | Único cast de leitura do Event Store vive aqui |
+| `modules/tasks/commands/` | Commands, handlers, `TaskCommandRunner` | Handler de ciclo de vida = 1 linha via runner |
+| `modules/tasks/events/` | Eventos de domínio + projeções (`@EventsHandler`) | Projeções **idempotentes** |
+| `modules/projects/` | CRUD de projetos + `assertOwner` | Ponto único de autorização por projeto |
+| `common/dto/pagination.dto.ts` | Paginação por cursor (`limit ≤ 100`) | Reusar em toda listagem |
+| `dynamo/`, `test/load/` | Scripts de estudo (Módulos 4, 10, 11) | Não são código de produção |
+
+### Padrões aplicados (e onde)
+
+CQRS (`commands/` × `queries/`) · Event Sourcing (`TaskAggregate` + Event Store) · **Repository** (`TaskRepository` → `EventSourcedTaskRepository`) · Template Method funcional (`TaskCommandRunner`) · Strategy (`task-priority.strategy.ts`) · Observer (`EventBus` → projeções).
+**Não existe** Factory no código — não referencie nem gere uma sem pedido explícito.
+
+### Ordem crítica no `main.ts`
 
 ```typescript
-import './env';         // 1º: carrega .env
-import './tracing';     // 2º: inicializa OpenTelemetry
-import { NestFactory } from '@nestjs/core';
+import './env';      // 1º: carrega .env
+import './tracing';  // 2º: OpenTelemetry ANTES de http/express/pg serem carregados
 ```
 
-Se trocar a ordem, o OTel não captura as primeiras requisições.
+---
+
+## 🧩 Receitas
+
+### Adicionar um evento novo ao ciclo de vida da tarefa (5 lugares)
+
+1. `events/task.events.ts`: interface `XData` + classe `XEvent` (construtor com **objeto nomeado**) + entrada na união `TaskDomainEvent`.
+2. `domain/task.aggregate.ts`: método de comando (valida invariantes → `raise`) + `case` no `apply()`.
+3. `commands/task-command.runner.ts`: `case` no `toBusEvent()`.
+4. `infrastructure/event-sourced-task.repository.ts`: tipo em `KNOWN_EVENT_TYPES`.
+5. `events/task-lifecycle.projections.ts`: projeção idempotente (+ registrar no `tasks.module.ts`).
+
+Os `switch` são exaustivos (`never`): esquecer o passo 2 ou 3 **não compila**. Os passos 4 e 5 só falham em runtime → cubra com teste.
+
+### Adicionar um comando de ciclo de vida
+
+Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runner.run(target, (task) => task.metodo(valor))` → rota no `TasksController` com `UUID_V4` nos params e `userId` vindo de `@CurrentUser()`.
+
+### Criar/alterar uma migração
+
+1. `npx prisma migrate dev --create-only --name <nome>` e **leia o SQL**.
+2. Mudança de **tipo** de coluna: o Prisma gera `DROP COLUMN` + `ADD COLUMN` (**perde dados**). Reescreva com `ALTER COLUMN … TYPE … USING …` (exemplo: `prisma/migrations/*_read_model_status_enum_completed_at`).
+3. Coluna `NOT NULL` nova em tabela com dados: default ou *expand → backfill → contract*.
+4. Índice em tabela grande: `CREATE INDEX CONCURRENTLY` (migração separada, fora de transação).
+5. `npx prisma migrate dev` → `npx prisma generate`. Migração já aplicada em ambiente compartilhado é **imutável**.
 
 ---
 
-## 📐 Convenções de Código
+## ⚠️ NÃO FAÇA
 
-### Nomenclatura e Imports
+**Segurança**
+- ❌ Ler `userId`/`ownerId` do body — sempre do JWT (`@CurrentUser()`).
+- ❌ Rota de tarefa/projeto sem `JwtAuthGuard` (vai na **classe** do controller) ou sem `assertOwner`.
+- ❌ Responder `403` para recurso de outro usuário — use `404` (anti-enumeration).
+- ❌ Ler `process.env` fora de `env.schema.ts`/`tracing.ts`; usar `!` para silenciar variável ausente.
+- ❌ Concatenar entrada do usuário em SQL; `origin: '*'` no CORS; logar senhas/tokens; expor `password`.
+- ❌ Mensagens diferentes para "usuário não existe" e "senha errada".
 
-- **Arquivos:** kebab-case (`create-task.handler.ts`).
-- **Classes:** PascalCase (`CreateTaskHandler`).
-- **Tabelas (Prisma):** `@@map("snake_case")`.
-- **Imports:** nativos → externos → internos → relativos (sem `.js` no final).
+**Event Sourcing**
+- ❌ Alterar estado do agregado fora do `apply()`.
+- ❌ Publicar no `EventBus` antes de gravar no Event Store (ordem: `assertOwner → save → publish`).
+- ❌ `append` sem o `expectedVersion` lido do agregado.
+- ❌ Editar ou apagar linhas da tabela `events` (append-only; corrigir = novo evento).
+- ❌ Projeção não idempotente (usar `createMany({ skipDuplicates })` / `updateMany`).
+- ❌ Construtor de evento/command com vários parâmetros posicionais do mesmo tipo (já corrompeu o histórico uma vez: o banco de dev tem uma tarefa com título `"HIGH"`, prioridade passada na posição do título).
 
-### Padrões de Código
+**Código e testes**
+- ❌ `any` sem justificativa; `console.log` em código de produção (use `Logger` do Nest).
+- ❌ Regra de negócio em controller.
+- ❌ Importar `AppModule` estaticamente no topo de teste E2E — use `startE2EApp()` (`test/e2e/support/e2e-app.ts`).
+- ❌ `sleep` fixo para esperar projeção em teste — use `eventually()`.
+- ❌ `testTimeout` dentro de `projects` no `jest.config.ts` (é ignorado) — ver `test/setup-slow-suites.ts`.
 
-- **Async/Await:** sempre (não usar `.then()`).
-- **Tipos:** `unknown` em vez de `any` sempre que possível.
-- **Validação:** `class-validator` + DTOs com `whitelist: true` e `forbidNonWhitelisted: true`.
-- **Logs:** estruturados em JSON com `correlationId` (padrão `<entidade>.<acao>`, ex: `task.created`).
-
----
-
-## ⚠️ NÃO FAÇA (Regras Críticas)
-
-### Segurança (OWASP Top 10)
-
-- ❌ Nunca commitar o arquivo `.env`.
-- ❌ Nunca concatenar strings em queries SQL.
-- ❌ Nunca usar `origin: '*'` em CORS.
-- ❌ Nunca logar senhas, tokens ou dados sensíveis.
-- ❌ Nunca expor `password` em respostas de API.
-- ❌ Nunca retornar mensagens diferentes para "usuário não existe" e "senha errada".
-- ❌ Nunca desabilitar o `ThrottlerGuard` em produção (só em testes via `DISABLE_THROTTLE=true`).
-
-### Código e Arquitetura
-
-- ❌ Nunca usar `fs.readFileSync` para arquivos grandes (usar Streams).
-- ❌ Nunca usar `any` sem justificativa.
-- ❌ Nunca usar `console.log` em produção (usar logger estruturado).
-- ❌ Nunca colocar regras de negócio nos Controllers (delegar para Handlers/Services).
-- ❌ Nunca commitar código sem rodar `npx tsc --noEmit` e `npm run lint`.
-
-### Processo
-
-- ❌ Nunca fazer push direto em `main` (usar PR).
-- ❌ Nunca fazer merge com CI vermelho.
+**Processo**
+- ❌ Push direto na `main` ou merge com CI vermelho (3 jobs obrigatórios).
 
 ---
 
-## ✅ FAÇA SEMPRE
+## 🧪 Testes
 
-- ✅ Rodar testes antes de commitar.
-- ✅ Escrever testes unitários com Jest e de integração com Testcontainers.
-- ✅ Usar `ON CONFLICT DO NOTHING` em operações idempotentes.
-- ✅ Usar `CREATE INDEX CONCURRENTLY` em tabelas grandes.
-- ✅ Usar `correlationId` nos logs.
-- ✅ Se precisar de variáveis de ambiente no NestJS, usar `JwtModule.registerAsync` ou `ConfigModule`.
+| Suíte | Onde | Como |
+|---|---|---|
+| Unitários | `test/unit/` | Mocks; agregado testado **sem** mocks; timeout 5 s (lento = bug) |
+| Integração | `test/integration/` | `startTestDatabase()` → Postgres real; contratos com o banco (constraints, `ON CONFLICT`) |
+| E2E | `test/e2e/` | `startE2EApp()`, `registerAndLogin()`, `resetDatabase()`, `eventually()` |
 
----
-
-## 🗄️ Modelagem de Dados (Prisma)
-
-- UUIDs como PK (`@default(uuid())`).
-- `@@index` em campos usados em `WHERE` / `ORDER BY`.
-- Event Store na tabela `events` (append-only, versionado).
-- Read Model na tabela `tasks_read` (projeção desnormalizada).
+- Suítes com Testcontainers rodam em fila (`--runInBand`): paralelismo esgota a RAM da máquina de dev.
+- Teste novo de banco/consistência eventual: rode **3 vezes** antes de confiar.
+- `ts-jest` só transpila: `npx tsc --noEmit` pega erros de tipo que os testes não pegam.
 
 ---
 
-## 🧪 Estratégia de Testes e Performance
+## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-### Pirâmide
-
-- **Unitários:** Jest + mocks.
-- **Integração:** Jest + Testcontainers (PostgreSQL real).
-- **E2E:** Jest + supertest (HTTP real).
-
-### Regras de Load Testing (k6)
-
-- Use k6 para testes de carga (Módulo 10).
-- Métricas essenciais: p95, throughput (req/s) e taxa de erro.
-- Cuidado com o `UV_THREADPOOL_SIZE` ao testar endpoints CPU-bound (como bcrypt).
-- Defina SLOs (ex: p95 < 500ms, taxa_erro < 1%) nos thresholds do k6.
+Logger estruturado em JSON e `correlationId` · Transactional Outbox / replay de projeções · health check (`/health`) · dashboards do Grafana provisionados · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 
-## 🏗️ Infraestrutura e CI/CD
+## 🎯 Checklist antes de propor código
 
-### GitHub Actions (`.github/workflows/ci.yml`)
+- [ ] Autorização: guard na classe + `assertOwner` + `userId` do JWT?
+- [ ] Entrada validada (DTO com `class-validator`, `UUID_V4` nos params)?
+- [ ] Regra de negócio no agregado/service, não no controller?
+- [ ] Teste unitário — e de integração/E2E se tocou banco ou HTTP?
+- [ ] Migração revisada (sem `DROP COLUMN` acidental) + `prisma generate`?
+- [ ] `npx tsc --noEmit`, `npm run lint` e `npm run test:unit` passando?
+- [ ] README/AGENTS.md atualizados se o comportamento mudou?
 
-Roda em push/PR para `main`: `npm ci` → `prisma generate` → `tsc` → `lint` → `test` → `build`.
-
-### Terraform (`/terraform`)
-
-- Recursos gerenciados: S3 Bucket, SQS Queue, SNS Topic, IAM Role/Policy.
-- Backend remoto configurado no S3 (`use_lockfile = true`).
-- Rodar `terraform plan` antes de `apply`.
-
----
-
-## 📚 Documentação Adicional
-
-- `MODULO_1.md` a `MODULO_12.md` (no repositório).
-- `README.md`: Visão geral do projeto.
-
----
-
-## 🎯 Checklist ao sugerir código
-
-Antes de propor qualquer mudança, verifique:
-
-- [ ] Respeita a arquitetura em camadas?
-- [ ] Usa os padrões de código deste projeto?
-- [ ] Tem tratamento de erro adequado?
-- [ ] Tem testes (unitários/integração)?
-- [ ] Tem validação de input?
-- [ ] Tem log com `correlationId`?
-- [ ] Respeita as regras de segurança (OWASP)?
-- [ ] Não usa `any` desnecessariamente?
-- [ ] Roda `npx tsc --noEmit` sem erros?
-- [ ] Passa no `npm run lint`?
-- [ ] Se for arquivo grande, usou Streams?
-- [ ] Se for infraestrutura, usou Terraform?
-
-**Você é o responsável final pelo código. IA é apoio, não substituto.**
+**Você é responsável pelo código. IA é apoio, não substituto.**
