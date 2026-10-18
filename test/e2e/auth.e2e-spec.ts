@@ -1,4 +1,3 @@
-import { AppModule } from '../../src/app.module';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { PostgreSqlContainer, StartedPostgreSqlContainer } from '@testcontainers/postgresql';
@@ -23,8 +22,8 @@ beforeAll(async () => {
   console.log('[1] OK - container pronto:', container.getConnectionUri());
 
   const connectionString = container.getConnectionUri();
-  process.env.DATABASE_URL = connectionString;   // ← setado ANTES do .compile()
-  process.env.JWT_SECRET = 'test-secret';
+  process.env.DATABASE_URL = connectionString;
+  process.env.JWT_SECRET = 'e2e-test-secret-com-no-minimo-32-caracteres';
   process.env.JWT_EXPIRES_IN = '1h';
 
   console.log('[2] Criando Prisma Client...');
@@ -40,6 +39,12 @@ beforeAll(async () => {
   console.log('[3] OK');
 
   console.log('[4] Criando aplicação NestJS...');
+  // Carregamento TARDIO de propósito: o ConfigModule valida o ambiente no momento em que o
+  // AppModule é carregado. Um import estático no topo rodaria ANTES deste beforeAll,
+  // sem o DATABASE_URL do container (e, localmente, apontaria para o banco de dev!).
+  // Usamos require (e não import()) porque, com module "nodenext", import() exige extensão .js.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { AppModule } = require('../../src/app.module') as typeof import('../../src/app.module');
   const moduleRef: TestingModule = await Test.createTestingModule({
     imports: [AppModule],
   })

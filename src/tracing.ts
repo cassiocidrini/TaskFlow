@@ -4,9 +4,17 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
+import { envSchema } from './config/env.schema';
+
+// O tracing sobe ANTES do Nest (precisa instrumentar http/express/pg primeiro),
+// então ainda não existe ConfigService. Reaproveitamos o MESMO schema para validar
+// só este campo — mesma regra e mesmo default, sem duplicar a lógica.
+const otlpEndpoint = envSchema.shape.OTEL_EXPORTER_OTLP_ENDPOINT.parse(
+  process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+);
 
 const traceExporter = new OTLPTraceExporter({
-  url: 'http://localhost:4318/v1/traces',
+  url: `${otlpEndpoint}/v1/traces`,
 });
 
 const metricExporter = new PrometheusExporter({
