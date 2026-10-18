@@ -1,25 +1,32 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { NotFoundException } from '@nestjs/common';
 import { EventBus } from '@nestjs/cqrs';
 import { CreateTaskHandler } from '../../src/modules/tasks/commands/create-task.handler';
 import { CreateTaskCommand } from '../../src/modules/tasks/commands/create-task.command';
 import { EventStoreService } from '../../src/events/event-store.service';
 import { TaskCreatedEvent } from '../../src/modules/tasks/events/task.events';
+import { ProjectsService } from '../../src/modules/projects/projects.service';
 
 describe('CreateTaskHandler', () => {
   let handler: CreateTaskHandler;
   let eventStore: { append: jest.Mock };
   let eventBus: { publish: jest.Mock };
+  let projects: { assertOwner: jest.Mock };
+
+  const userId = 'user-dono';
 
   beforeEach(async () => {
-    // Arrange: mocks
+    // Arrange: mocks (por padrão, o usuário É dono do projeto)
     eventStore = { append: jest.fn().mockResolvedValue(undefined) };
     eventBus = { publish: jest.fn() };
+    projects = { assertOwner: jest.fn().mockResolvedValue(undefined) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         CreateTaskHandler,
         { provide: EventStoreService, useValue: eventStore },
         { provide: EventBus, useValue: eventBus },
+        { provide: ProjectsService, useValue: projects },
       ],
     }).compile();
 
@@ -32,7 +39,7 @@ describe('CreateTaskHandler', () => {
 
   it('deve persistir um TaskCreated no Event Store', async () => {
     // Arrange
-    const command = new CreateTaskCommand('p1', 'Minha tarefa', 'u1');
+    const command = new CreateTaskCommand(userId, 'p1', 'Minha tarefa', 'u1');
 
     // Act
     const taskId = await handler.execute(command);
@@ -55,7 +62,7 @@ describe('CreateTaskHandler', () => {
 
   it('deve publicar um TaskCreatedEvent no EventBus', async () => {
     // Arrange
-    const command = new CreateTaskCommand('p1', 'Minha tarefa');
+    const command = new CreateTaskCommand(userId, 'p1', 'Minha tarefa');
 
     // Act
     const taskId = await handler.execute(command);
@@ -74,7 +81,7 @@ describe('CreateTaskHandler', () => {
 
   it('deve gerar um taskId (UUID) único', async () => {
     // Arrange
-    const command = new CreateTaskCommand('p1', 'Tarefa');
+    const command = new CreateTaskCommand(userId, 'p1', 'Tarefa');
 
     // Act
     const taskId1 = await handler.execute(command);
@@ -98,7 +105,7 @@ describe('CreateTaskHandler', () => {
     });
 
     // Act
-    await handler.execute(new CreateTaskCommand('p1', 'Tarefa'));
+    await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa'));
 
     // Assert: a ordem correta é append → publish
     expect(ordem).toEqual(['append', 'publish']);
@@ -110,7 +117,7 @@ describe('CreateTaskHandler', () => {
 
     // Act + Assert
     await expect(
-      handler.execute(new CreateTaskCommand('p1', 'Tarefa')),
+      handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa')),
     ).rejects.toThrow('DB fora do ar');
 
     expect(eventBus.publish).not.toHaveBeenCalled();
@@ -118,7 +125,7 @@ describe('CreateTaskHandler', () => {
 
   it('deve aceitar command sem assigneeId', async () => {
     // Arrange
-    const command = new CreateTaskCommand('p1', 'Tarefa sem assignee');
+    const command = new CreateTaskCommand(userId, 'p1', 'Tarefa sem assignee');
 
     // Act
     const taskId = await handler.execute(command);
@@ -127,5 +134,41 @@ describe('CreateTaskHandler', () => {
     const appendCall = eventStore.append.mock.calls[0][0];
     expect(appendCall.payload.assigneeId).toBeUndefined();
     expect(taskId).toBeDefined();
+  });
+
+  // ============================================================
+  // Autorização (OWASP A01)
+  // ============================================================
+  describe('autorização', () => {
+    it('deve verificar a posse do projeto com o userId do command', async () => {
+      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa'));
+
+      expect(projects.assertOwner).toHaveBeenCalledWith('p1', userId);
+    });
+
+    it('deve verificar a posse ANTES de gravar no Event Store (append-only!)', async () => {
+      const ordem: string[] = [];
+      projects.assertOwner.mockImplementation(async () => {
+        ordem.push('assertOwner');
+      });
+      eventStore.append.mockImplementation(async () => {
+        ordem.push('append');
+      });
+
+      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa'));
+
+      expect(ordem).toEqual(['assertOwner', 'append']);
+    });
+
+    it('NÃO deve gravar nem publicar nada se o projeto não for do usuário', async () => {
+      projects.assertOwner.mockRejectedValue(new NotFoundException('Projeto não encontrado'));
+
+      await expect(
+        handler.execute(new CreateTaskCommand('intruso', 'p1', 'Tarefa')),
+      ).rejects.toThrow(NotFoundException);
+
+      expect(eventStore.append).not.toHaveBeenCalled();
+      expect(eventBus.publish).not.toHaveBeenCalled();
+    });
   });
 });

@@ -9,6 +9,7 @@ import { validateEnv, type Env } from './config/env.schema';
 import { PrismaModule } from './prisma/prisma.module';
 import { TasksModule } from './modules/tasks/tasks.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { ProjectsModule } from './modules/projects/projects.module';
 
 @Module({
   imports: [
@@ -20,8 +21,9 @@ import { AuthModule } from './modules/auth/auth.module';
     }),
     PrismaModule,
     CqrsModule.forRoot(),
-    TasksModule,
     AuthModule,
+    ProjectsModule,
+    TasksModule,
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService<Env, true>) => ({

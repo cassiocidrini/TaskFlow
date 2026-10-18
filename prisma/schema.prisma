@@ -12,6 +12,7 @@ model User {
   name      String
   password  String
   tasks     Task[]
+  projects  Project[]
   createdAt DateTime @default(now())
 }
 
@@ -19,8 +20,15 @@ model Project {
   id          String   @id @default(uuid())
   name        String
   description String?
+  // Dono do projeto: base de toda regra de autorização (OWASP A01).
+  // onDelete: Restrict → apagar um usuário com projetos exige decisão explícita.
+  ownerId     String
+  owner       User     @relation(fields: [ownerId], references: [id], onDelete: Restrict)
   tasks       Task[]
   createdAt   DateTime @default(now())
+
+  // Listar "meus projetos" filtra por ownerId
+  @@index([ownerId])
 }
 
 model Task {
