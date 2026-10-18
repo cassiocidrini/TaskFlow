@@ -1,36 +1,19 @@
 import './env';
 import './tracing';
 import { NestFactory } from '@nestjs/core';
-import { Logger, ValidationPipe } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { configureApp } from './app.setup';
 import type { Env } from './config/env.schema';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-  const config = app.get<ConfigService<Env, true>>(ConfigService);
   const logger = new Logger('Bootstrap');
 
-  app.use(helmet());
+  configureApp(app); // Helmet, CORS e ValidationPipe — a mesma configuração usada nos testes E2E
 
-  app.enableCors({
-    origin: config.get('CORS_ORIGINS', { infer: true }),
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
-  });
-
-  app.useGlobalPipes(
-    new ValidationPipe({
-      whitelist: true, // remove atributos não declarados no DTO
-      forbidNonWhitelisted: true, // lança erro se vier atributo extra
-      transform: true, // converte tipos automaticamente
-      transformOptions: { enableImplicitConversion: true },
-    }),
-  );
-
-  const port = config.get('PORT', { infer: true });
+  const port = app.get<ConfigService<Env, true>>(ConfigService).get('PORT', { infer: true });
   await app.listen(port);
   logger.log(`TaskFlow rodando em http://localhost:${port}`);
 }
