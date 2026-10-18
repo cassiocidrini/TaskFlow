@@ -22,21 +22,22 @@ const config: Config = {
       displayName: 'unit',
       testMatch: ['<rootDir>/test/unit/**/*.spec.ts'],
       setupFiles: ['<rootDir>/test/setup.ts'],
-      testTimeout: 5_000,
+      // timeout default do Jest (5 s): unitário lento é bug e deve falhar rápido
     },
     {
       ...baseConfig,
       displayName: 'integration',
       testMatch: ['<rootDir>/test/integration/**/*.spec.ts'],
       setupFiles: ['<rootDir>/test/setup.ts'],
-      testTimeout: 60_000,
+      // `testTimeout` dentro de `projects` é IGNORADO pelo Jest — por isso o setup file (60 s, testes e hooks)
+      setupFilesAfterEnv: ['<rootDir>/test/setup-slow-suites.ts'],
     },
     {
       ...baseConfig,
       displayName: 'e2e',
       testMatch: ['<rootDir>/test/e2e/**/*.e2e-spec.ts'],
       setupFiles: ['<rootDir>/test/setup.ts'],
-      testTimeout: 60_000,
+      setupFilesAfterEnv: ['<rootDir>/test/setup-slow-suites.ts'],
     },
   ],
 };

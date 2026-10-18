@@ -1,214 +1,277 @@
 # TaskFlow
 
 [![CI](https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/cassiocidrini/TaskFlow/actions/workflows/ci.yml)
+![Node](https://img.shields.io/badge/node-24-339933?logo=node.js&logoColor=white)
+![NestJS](https://img.shields.io/badge/NestJS-12-E0234E?logo=nestjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
+![Testes](https://img.shields.io/badge/testes-150-brightgreen)
 
-API REST de alta performance para gestão de tarefas, desenvolvida em **NestJS + TypeScript**, com arquitetura **CQRS + Event Sourcing**, **Observabilidade Completa**, **Segurança OWASP** e **Infraestrutura como Código (Terraform)**.
+API de gestão de tarefas em **NestJS + TypeScript** com **CQRS + Event Sourcing**: o estado de cada tarefa é
+**derivado de eventos imutáveis**, o que dá histórico completo, auditoria e projeções reconstruíveis.
 
-Este projeto é o resultado de uma trilha avançada de estudos focada em **Engenharia de Software Sênior**, simulando padrões e práticas adotados em ambientes corporativos de alta criticidade.
+É o projeto prático de uma trilha de estudos de engenharia backend. Cada decisão abaixo tem um arquivo ou um
+teste que a comprova; o que **não** está implementado aparece em [Limitações conhecidas](#-limitações-conhecidas).
 
 ---
 
-## 🏆 Destaques de Engenharia
+## 🏆 Destaques (com evidência)
 
-- **Arquitetura Avançada:** CQRS (Command Query Responsibility Segregation) com Event Sourcing (fonte da verdade baseada em eventos imutáveis).
-- **Design Patterns:** Aplicação de *Strategy*, *Factory*, *Observer* e *Repository*.
-- **Observabilidade:** OpenTelemetry, Jaeger (traces), Prometheus (métricas) e Grafana (dashboards p50/p95/p99).
-- **Qualidade e Testes:** Pirâmide de testes com Jest (Unitários), Testcontainers (Integração com PostgreSQL real) e Supertest (E2E).
-- **Segurança:** OWASP Top 10 (Helmet, CORS, Rate Limit, JWT, bcrypt, ValidationPipe).
-- **Infraestrutura como Código:** Provisionamento local via Docker Compose e AWS (S3, SQS, SNS, IAM) via **Terraform** com backend remoto.
-- **Performance:** Load testing com k6 e análise de gargalos (Thread Pool, Event Loop, Memory Leaks).
+| Tema | O que foi feito | Onde ver |
+|---|---|---|
+| **Event Sourcing de verdade** | Agregado `Task` reconstruído dos eventos, com invariantes (tarefa concluída é imutável) e histórico consultável pela API | [`task.aggregate.ts`](src/modules/tasks/domain/task.aggregate.ts) · `GET …/tasks/:id/history` |
+| **Concorrência otimista** | `UNIQUE (aggregate_id, version)` + `expectedVersion`: de 10 escritas simultâneas na mesma versão, **exatamente 1 vence** e as outras recebem `409` | [`event-store.spec.ts`](test/integration/event-store.spec.ts) |
+| **Autorização (OWASP A01)** | Toda rota de tarefa exige JWT e posse do projeto; recurso alheio responde `404` (anti-enumeration) e há proteção anti-IDOR em rotas aninhadas | [`tasks.e2e-spec.ts`](test/e2e/tasks.e2e-spec.ts) |
+| **Projeções idempotentes** | `INSERT … ON CONFLICT DO NOTHING` e `UPDATE … SET`: entrega duplicada, 5 entregas simultâneas e replay completo resultam no mesmo estado | [`projections.spec.ts`](test/integration/projections.spec.ts) |
+| **Fail-fast de configuração** | Variáveis de ambiente validadas com `zod` no boot: configuração inválida impede a app de subir | [`env.schema.ts`](src/config/env.schema.ts) |
+| **Testes com infraestrutura real** | 101 unitários · 20 de integração e 29 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
+| **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas p50/p95/p99) | [`tracing.ts`](src/tracing.ts) |
+| **IaC** | Terraform (S3, SQS, SNS, IAM de menor privilégio) com backend remoto, sobre LocalStack | [`terraform/`](terraform/) |
 
 ---
 
 ## 🏗️ Arquitetura
 
-O sistema usa uma combinação de **Layered Architecture** com **CQRS** e **Event Sourcing**.
+```mermaid
+flowchart LR
+    C[Cliente HTTP] -->|JWT| CT[Controller]
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                         HTTP (REST)                         │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │ Controller  │
-                    └──────┬──────┘
-                           │
-              ┌────────────┴────────────┐
-              ▼                         ▼
-       ┌─────────────┐           ┌─────────────┐
-       │  CommandBus │           │  QueryBus   │
-       └──────┬──────┘           └──────┬──────┘
-              │                         │
-              ▼                         ▼
-       ┌─────────────┐           ┌─────────────┐
-       │  Command    │           │   Query     │
-       │  Handler    │           │   Handler   │
-       └──────┬──────┘           └──────┬──────┘
-              │                         │
-              ▼                         │
-       ┌─────────────┐                  │
-       │ Event Store │                  │
-       │ (Postgres)  │                  │
-       └──────┬──────┘                  │
-              │ publica                 │
-              ▼                         │
-       ┌─────────────┐                  │
-       │   Event     │  ─── projeta ───▶│
-       │   Handler   │                  │
-       └─────────────┘                  │
-                                        ▼
-                              ┌──────────────────┐
-                              │   Read Model     │
-                              │   (tasks_read)   │
-                              └──────────────────┘
+    subgraph Escrita [Escrita — Command side]
+        CT -->|Command| CH[Command Handler]
+        CH --> R[TaskCommandRunner<br/>1. assertOwner<br/>2. load agregado<br/>3. regra de domínio<br/>4. save<br/>5. publish]
+        R <-->|fromHistory / appendMany| ES[(Event Store<br/>events)]
+    end
+
+    subgraph Leitura [Leitura — Query side]
+        CT -->|Query| QH[Query Handler]
+        QH --> RM[(Read Model<br/>tasks_read)]
+        QH -->|histórico| ES
+    end
+
+    R -->|EventBus| P[Projeções<br/>idempotentes]
+    P --> RM
 ```
 
-**Fluxo de Observabilidade:**
+- **Escrita:** cada comando carrega o agregado a partir dos eventos, valida a regra de negócio e grava os eventos novos com **concorrência otimista**. Um conflito de versão responde `409`.
+- **Leitura:** listagens vêm do Read Model `tasks_read`, uma projeção desnormalizada e paginada por cursor. O histórico vem direto do Event Store.
+- **Projeções** rodam depois da resposta HTTP (**consistência eventual**) e são idempotentes, o que torna seguro reprocessá-las.
 
-1. Requisição HTTP chega no NestJS.
-2. OTel SDK cria um span e envia para o Jaeger.
-3. Métricas são expostas em `/metrics` e raspadas pelo Prometheus.
-4. Grafana exibe dashboards em tempo real.
+### Event Sourcing na prática
 
----
+`GET /projects/:projectId/tasks/:taskId/history` devolve a linha do tempo completa **e** o estado atual
+reconstruído dos próprios eventos:
 
-## 🧰 Stack Técnica
+```json
+{
+  "current": { "title": "Tarefa do ciclo de vida", "status": "DONE", "version": 4, "...": "..." },
+  "history": [
+    { "version": 1, "type": "TaskCreated",       "occurredAt": "2026-10-18T05:43:16.244Z" },
+    { "version": 2, "type": "TaskAssigned",      "occurredAt": "2026-10-18T05:43:16.278Z" },
+    { "version": 3, "type": "TaskStatusChanged", "data": { "from": "PENDING", "to": "IN_PROGRESS" } },
+    { "version": 4, "type": "TaskCompleted",     "occurredAt": "2026-10-18T05:43:16.306Z" }
+  ]
+}
+```
 
-| Categoria | Tecnologia |
+**Por que isso importa:** durante o desenvolvimento, um bug fez a projeção gravar `priority = MEDIUM` para uma
+tarefa cujo evento dizia `HIGH`. Num CRUD, o valor original estaria perdido. Aqui o histórico continuou
+respondendo `HIGH`, porque **os eventos são a fonte da verdade** e a projeção é descartável e reconstruível.
+
+### Padrões de projeto aplicados
+
+| Padrão | Onde |
 |---|---|
-| Runtime & Framework | Node.js 24, NestJS 12 |
-| Linguagem | TypeScript (strict) |
-| Banco de Dados (Write) | PostgreSQL 16, Prisma 7 |
-| Banco de Dados (NoSQL) | DynamoDB (via LocalStack) |
-| Mensageria | SQS, SNS (via LocalStack) |
-| Observabilidade | OpenTelemetry, Jaeger, Prometheus, Grafana |
-| Segurança | Helmet, CORS, JWT, bcrypt, class-validator |
-| Testes | Jest, Testcontainers, Supertest, k6 |
-| Infraestrutura | Docker, Docker Compose, Terraform |
-| CI/CD | GitHub Actions |
+| **CQRS** | `commands/` × `queries/` em [`modules/tasks`](src/modules/tasks) |
+| **Event Sourcing** | [`event-store.service.ts`](src/events/event-store.service.ts) + [`task.aggregate.ts`](src/modules/tasks/domain/task.aggregate.ts) |
+| **Repository** | [`task.repository.ts`](src/modules/tasks/domain/task.repository.ts) (contrato) → [`event-sourced-task.repository.ts`](src/modules/tasks/infrastructure/event-sourced-task.repository.ts) |
+| **Template Method** (funcional) | [`task-command.runner.ts`](src/modules/tasks/commands/task-command.runner.ts): roteiro fixo, passo variável injetado |
+| **Strategy** | [`task-priority.strategy.ts`](src/modules/tasks/strategies/task-priority.strategy.ts): cálculo de prioridade |
+| **Observer** | `EventBus` do `@nestjs/cqrs` → projeções |
 
 ---
 
-## 🚀 Como rodar o projeto
+## ⚡ Quickstart (≈ 5 min)
 
-### Pré-requisitos
+**Pré-requisitos:** Node.js 24+ e Docker (com Compose v2).
 
-- Node.js 24+
-- Docker Desktop (com WSL 2 ativado)
-- Terraform (opcional, para o módulo de IaC)
-- PowerShell (Windows) — os scripts são `.ps1`
-
-### Primeira execução
-
-```powershell
-.\setup.ps1
+```bash
+git clone https://github.com/cassiocidrini/TaskFlow.git && cd TaskFlow
+cp .env.example .env                 # Windows (PowerShell): copy .env.example .env
+docker compose up -d postgres jaeger
+npm ci
+npx prisma generate
+npx prisma migrate deploy
+npm run start:dev
 ```
 
-O script instala dependências, sobe os containers (PostgreSQL, Jaeger, Prometheus, Grafana, LocalStack), gera o Prisma Client e aplica as migrações.
+Abra **http://localhost:3000/docs**: a documentação interativa (Swagger) é gerada a partir do código.
 
-### Desenvolvimento
+![Swagger da TaskFlow API](docs/images/swagger.png)
 
-```powershell
-.\dev.ps1
+**Fluxo no Swagger:** `POST /auth/register` → `POST /auth/login` → **Authorize** (cole o `accessToken`) →
+`POST /projects` → `POST /projects/{projectId}/tasks`.
+
+<details>
+<summary>Prefere o terminal? Fluxo completo com <code>curl</code> (bash)</summary>
+
+```bash
+API=http://localhost:3000
+curl -s -X POST $API/auth/register -H 'Content-Type: application/json' \
+  -d '{"email":"demo@taskflow.dev","name":"Demo","password":"senha12345"}'
+TOKEN=$(curl -s -X POST $API/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"demo@taskflow.dev","password":"senha12345"}' | jq -r .accessToken)
+AUTH="Authorization: Bearer $TOKEN"
+
+PROJECT=$(curl -s -X POST $API/projects -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name":"Meu projeto"}' | jq -r .id)
+TASK=$(curl -s -X POST $API/projects/$PROJECT/tasks -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"title":"Corrigir bug urgente","dueDate":"2026-12-31T23:59:59Z"}' | jq -r .taskId)
+
+curl -s -X PATCH $API/projects/$PROJECT/tasks/$TASK/status -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"status":"IN_PROGRESS"}'
+curl -s -X POST  $API/projects/$PROJECT/tasks/$TASK/complete -H "$AUTH"
+curl -s $API/projects/$PROJECT/tasks/$TASK/history -H "$AUTH" | jq
 ```
+</details>
 
-Acesse: <http://localhost:3000>
-
-### Parar tudo
-
-```powershell
-.\stop.ps1
-```
-
----
-
-## 🔍 Serviços disponíveis (Local)
+### Serviços locais (`docker compose up -d`)
 
 | Serviço | URL | Credenciais |
 |---|---|---|
-| App (API) | http://localhost:3000 | — |
-| Jaeger (Traces) | http://localhost:16686 | — |
+| API + Swagger | http://localhost:3000/docs | — |
+| Jaeger (traces) | http://localhost:16686 | — |
+| Métricas (exporter OTel) | http://localhost:9464/metrics | — |
 | Prometheus | http://localhost:9090 | — |
-| Grafana | http://localhost:3001 | admin / Teste@123 |
-| LocalStack (AWS) | http://localhost:4566 | test / test |
+| Grafana | http://localhost:3001 | `admin` / `admin` |
+| LocalStack (AWS) | http://localhost:4566 | `test` / `test` |
 
-Para visualizar os dashboards, importe o JSON da pasta `dashboards/` no Grafana.
+> No Windows, os scripts `setup.ps1`, `dev.ps1` e `stop.ps1` automatizam os mesmos passos.
 
 ---
 
-## 🧪 Testes e Qualidade
+## 📡 API
 
-O projeto utiliza a pirâmide de testes completa:
+Todas as rotas, exceto `register` e `login`, exigem `Authorization: Bearer <token>`.
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `POST` | `/auth/register` · `/auth/login` | Cadastro e login (JWT) |
+| `GET` | `/auth/me` | Usuário autenticado |
+| `POST` · `GET` | `/projects` | Criar / listar **meus** projetos |
+| `GET` | `/projects/:projectId` | Detalhe do projeto (404 se não for meu) |
+| `POST` | `/projects/:projectId/tasks` | Criar tarefa (prioridade calculada automaticamente) |
+| `GET` | `/projects/:projectId/tasks?limit=&cursor=` | Listar tarefas, paginação por cursor (máx. 100) |
+| `PATCH` | `/projects/:projectId/tasks/:taskId/assignee` | Atribuir responsável |
+| `PATCH` | `/projects/:projectId/tasks/:taskId/status` | `PENDING` ⇄ `IN_PROGRESS` |
+| `POST` | `/projects/:projectId/tasks/:taskId/complete` | Concluir (terminal: depois disso, `409`) |
+| `GET` | `/projects/:projectId/tasks/:taskId/history` | Linha do tempo de eventos + estado reconstruído |
+
+**Códigos de resposta relevantes:** `400` entrada inválida · `401` sem token · `404` recurso inexistente **ou
+de outro usuário** · `409` regra de negócio violada ou conflito de concorrência · `429` rate limit.
+
+---
+
+## 🧪 Testes
+
+| Suíte | Qtd. | Infraestrutura | O que prova |
+|---|---:|---|---|
+| **Unitários** | 101 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
+| **Integração** | 20 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade do `appendMany`, idempotência das projeções |
+| **E2E** | 29 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico, paginação, consistência eventual |
 
 ```bash
-# Testes Unitários (rápidos, com mocks)
-npm run test:unit
-
-# Testes de Integração (usam Testcontainers com PostgreSQL real)
-npm run test:integration
-
-# Testes End-to-End (HTTP com supertest)
-npm run test:e2e
-
-# Verificação de Tipos
-npx tsc --noEmit
-
-# Linter
-npm run lint
+npm run test:unit          # ~3 s — use o tempo todo
+npm run test:integration   # Docker necessário
+npm run test:e2e           # Docker necessário
+npm test                   # as três, em sequência
+npx tsc --noEmit && npm run lint
 ```
 
+> As suítes com Testcontainers rodam em fila (`--runInBand`): várias instâncias de PostgreSQL em paralelo
+> esgotam a memória de máquinas de desenvolvimento modestas.
+
+### CI
+
+Cada PR para a `main` dispara [3 jobs paralelos](.github/workflows/ci.yml), e todos são obrigatórios para o merge:
+**tipos + lint + unitários + build** · **integração** · **E2E**. O workflow roda com `permissions: contents: read`
+e cancela execuções obsoletas do mesmo PR.
+
 ---
 
-## 🔄 CI/CD Pipeline
+## 🧭 Decisões de design
 
-Cada `push` ou `pull_request` na branch `main` dispara o GitHub Actions, que executa em paralelo:
-
-- **Build & Test:** `npm ci` → `prisma generate` → `tsc --noEmit` → `npm run lint` → `npm run test` → `npm run build`.
-
-Se qualquer etapa falhar, o merge é bloqueado (Branch Protection configurada).
+| Decisão | Alternativa descartada | Por quê |
+|---|---|---|
+| PostgreSQL como Event Store | EventStoreDB, Kafka | Um banco só para operar; `UNIQUE` + transações atômicas bastam para a escala do projeto |
+| Concorrência otimista (`expectedVersion`) | Locks pessimistas | Sem bloqueio na leitura; o conflito é raro e detectado atomicamente pelo banco |
+| `404` para recurso de outro usuário | `403` | `403` confirmaria que o recurso existe (enumeration); mesmo padrão de GitHub e S3 |
+| Paginação por cursor | Offset (`?page=`) | Estável sob inserções concorrentes e sem degradar em páginas profundas |
+| Projetos como CRUD simples | Event Sourcing em tudo | Projeto não tem histórico relevante; ES onde agrega valor, não por padrão |
+| Agregado sem dependências de framework | Regras nos handlers | Regras num único lugar, testáveis em milissegundos sem mocks |
 
 ---
 
-## 📁 Estrutura de Pastas
+## 🚧 Limitações conhecidas
+
+Escolhas conscientes de escopo, com o próximo passo de cada uma:
+
+- **Dual-write entre Event Store e EventBus:** se o processo cair entre gravar e publicar, a projeção não é atualizada. Próximo passo: *Transactional Outbox* + comando de **replay** das projeções.
+- **EventBus em memória:** entrega em ordem dentro de um processo. Com um broker externo (SQS/SNS), as projeções precisariam guardar a versão do agregado para descartar eventos fora de ordem.
+- **Logs:** ainda sem logger estruturado em JSON nem `correlationId` ponta a ponta.
+- **Dockerfile:** usa `node:20` (o projeto exige 24) e não roda como usuário não-root. Dashboards do Grafana ainda não são provisionados por arquivo.
+- **Rate limit em memória:** não é compartilhado entre réplicas (em produção, usaria Redis).
+
+---
+
+## 📁 Estrutura
 
 ```text
-├── src/
-│   ├── common/          # Decorators, filters, interceptors
-│   ├── events/          # Event Store compartilhado
-│   ├── modules/         # Módulos de negócio
-│   │   ├── auth/        # Autenticação (JWT + bcrypt)
-│   │   └── tasks/       # CQRS (commands, queries, events, strategies)
-│   └── prisma/          # Prisma Service e Module
-├── test/
-│   ├── unit/            # Testes unitários
-│   ├── integration/     # Testes com Testcontainers
-│   └── e2e/             # Testes HTTP com supertest
-├── terraform/           # IaC (S3, SQS, SNS, IAM)
-├── docker-compose.yml   # Infra local (Postgres, Jaeger, Prometheus, Grafana, LocalStack)
-├── AGENTS.md            # Contexto para IAs (Claude, Cursor, Copilot)
-└── CLAUDE.md            # Atalho para o AGENTS.md
+src/
+├── config/                 # env.schema.ts — validação do ambiente (zod)
+├── common/dto/             # paginação por cursor
+├── events/                 # EventStoreService (append atômico, concorrência otimista)
+├── modules/
+│   ├── auth/               # JWT + bcrypt, guards, @CurrentUser
+│   ├── projects/           # CRUD de projetos + assertOwner (autorização)
+│   └── tasks/
+│       ├── domain/         # TaskAggregate + contrato TaskRepository (sem framework)
+│       ├── infrastructure/ # EventSourcedTaskRepository
+│       ├── commands/       # comandos + TaskCommandRunner
+│       ├── queries/        # listagem (Read Model) e histórico (Event Store)
+│       ├── events/         # eventos de domínio + projeções
+│       └── strategies/     # Strategy de prioridade
+├── dynamo/                 # scripts de estudo de modelagem DynamoDB (Módulo 4)
+├── app.setup.ts            # Helmet, CORS, ValidationPipe, Swagger (compartilhado com o E2E)
+├── tracing.ts              # OpenTelemetry (carregado antes do Nest)
+└── main.ts
+test/
+├── unit/  ├── integration/  ├── e2e/   # pirâmide de testes
+└── load/                               # k6 e experimentos de Node.js internals
+terraform/                              # IaC (S3, SQS, SNS, IAM)
 ```
 
 ---
 
-## 📚 Documentação da Trilha de Estudos
+## 📚 Trilha de estudos
 
-Este repositório contém a documentação prática de uma trilha de 12 módulos de especialização backend.
+Este repositório é o laboratório de uma trilha de engenharia backend. Cada módulo deixou código neste projeto:
 
-- Módulo 1 — Observabilidade (OTel, Jaeger, Prometheus, Grafana)
-- Módulo 3 — CI/CD com GitHub Actions
-- Módulo 4 — Modelagem NoSQL com DynamoDB
-- Módulo 5 — Event Sourcing, CQRS e Arquitetura
-- Módulo 6 — Segurança e OWASP Top 10
-- Módulo 7 — Testes de Verdade (Unit, Integration, E2E)
-- Módulo 8 — Uso de IA no Desenvolvimento (AI-Assisted Engineering)
-- Módulo 9 — Infraestrutura como Código com Terraform
-- Módulo 10 — Performance e Load Testing com k6
-- Módulo 11 — Node.js Internals (Event Loop, Threads, Streams, Leaks)
-- Módulo 12 — Design Patterns (Strategy, Factory, Observer, Repository, Decorator)
+| Módulo | Tema | No projeto |
+|:-:|---|---|
+| 1 | Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana) | `tracing.ts`, `docker-compose.yml` |
+| 2 | Orquestração com Kubernetes | 🔜 planejado para um ambiente Linux dedicado |
+| 3 | CI/CD com GitHub Actions | `.github/workflows/ci.yml` |
+| 4 | Modelagem NoSQL (DynamoDB, single-table, GSI) | `src/dynamo/` |
+| 5 | Event Sourcing, CQRS e arquitetura | `src/modules/tasks/`, `src/events/` |
+| 6 | Segurança (OWASP Top 10) | `auth/`, `app.setup.ts`, autorização por projeto |
+| 7 | Testes (unitários, integração, E2E) | `test/` |
+| 8 | Engenharia assistida por IA | [`AGENTS.md`](AGENTS.md) |
+| 9 | Infraestrutura como Código (Terraform) | `terraform/` |
+| 10 | Performance e load testing (k6) | `test/load/` |
+| 11 | Node.js internals (event loop, thread pool, streams, leaks) | `test/load/` |
+| 12 | Design patterns | ver [Padrões de projeto aplicados](#padrões-de-projeto-aplicados) |
 
 ---
 
 ## 📝 Licença
 
-Este projeto está sob a licença **UNLICENSED**. Desenvolvido para fins de estudo e portfólio.
+Projeto de estudo e portfólio. Todos os direitos reservados (`UNLICENSED`).
