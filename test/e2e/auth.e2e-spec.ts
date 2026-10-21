@@ -100,7 +100,7 @@ describe('Auth (e2e)', () => {
       const response = await request(app.getHttpServer())
         .post('/auth/login')
         .send({ email: 'teste@test.com', password: 'senha12345' })
-        .expect(201);
+        .expect(200);   // login não cria recurso: 200, não 201
 
       expect(response.body).toHaveProperty('accessToken');
       expect(typeof response.body.accessToken).toBe('string');
