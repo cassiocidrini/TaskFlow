@@ -254,7 +254,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 
 - **Logs estruturados:** o terceiro pilar ainda é texto simples. O próximo passo é um logger JSON (ex.: `nestjs-pino`) com o **trace ID** em cada linha, para pular do log direto ao trace no Jaeger.
 - **Dashboards como código:** o dashboard do Grafana foi importado manualmente. O ideal é provisioná-lo por arquivo (`grafana/provisioning/`), para que suba pronto com o `docker compose up`.
-- **Imagens `:latest`** no `docker-compose.yml`: fixar versões garante que o ambiente de amanhã seja igual ao de hoje.
+- **Jaeger v1:** as imagens do compose têm versão fixa (nunca `:latest`, para o ambiente de amanhã ser igual ao de hoje), mas o `jaegertracing/all-in-one:1.76.0` é a última linha do **v1**, já descontinuado. O próximo passo é migrar para o Jaeger v2 (`jaegertracing/jaeger`), que é construído sobre o OpenTelemetry Collector.
 - **Amostragem (*sampling*):** hoje 100% das requisições geram trace. Em produção com alto volume, amostra-se (ex.: 10%, ou 100% só das que têm erro) para controlar custo.
 
 ---
