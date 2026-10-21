@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 18/10/2026
 >
-> **Onde vive no código:** experimentos em [`test/load/`](../../test/load/) (`event-loop.js`, `read-sync.js`,
+> **Onde vive no código:** experimentos em [`labs/node-internals/`](../../labs/node-internals/) (`event-loop.js`, `read-sync.js`,
 > `read-stream.js`, `copy-stream.js`, `generate-file.js`, `memory-leak.js`) · bcrypt no
 > [`auth.service.ts`](../../src/modules/auth/auth.service.ts)
 
@@ -103,7 +103,7 @@ cresceram** e **quem os segura**.
 
 ## 🧪 Experimentos
 
-### Experimento 1 — Ordem de execução ([`event-loop.js`](../../test/load/event-loop.js))
+### Experimento 1 — Ordem de execução ([`event-loop.js`](../../labs/node-internals/event-loop.js))
 
 ```javascript
 console.log('1. Início');
@@ -154,10 +154,10 @@ e não travam o Event Loop. As versões síncronas (`hashSync`) bloqueariam **to
 ### Experimento 3 — Arquivo de 100 MB: síncrono × stream
 
 ```powershell
-node test/load/generate-file.js   # cria test/load/large-file.txt (ignorado pelo Git)
-node test/load/read-sync.js
-node test/load/read-stream.js
-node test/load/copy-stream.js     # cópia com .pipe() (backpressure automático)
+node labs/node-internals/generate-file.js   # cria labs/node-internals/large-file.txt (ignorado pelo Git)
+node labs/node-internals/read-sync.js
+node labs/node-internals/read-stream.js
+node labs/node-internals/copy-stream.js     # cópia com .pipe() (backpressure automático)
 ```
 
 | | `readFileSync` | `createReadStream` |
@@ -174,7 +174,7 @@ ao arquivo. Com 10 downloads simultâneos de 500 MB, a versão síncrona precisa
 > de laboratório, tudo bem; num servidor, seria um vazamento por pico. O certo seria esperar o `'drain'` quando
 > `write()` devolve `false`, ou gerar os dados como um `Readable` ligado por `pipeline()`.
 
-### Experimento 4 — Memory leak ([`memory-leak.js`](../../test/load/memory-leak.js))
+### Experimento 4 — Memory leak ([`memory-leak.js`](../../labs/node-internals/memory-leak.js))
 
 ```javascript
 const cacheGlobal = []; // referência global: nada aqui é liberado
@@ -191,7 +191,7 @@ setInterval(() => {
 
 **Diagnóstico com heap snapshot:**
 
-1. `node --inspect test/load/memory-leak.js`
+1. `node --inspect labs/node-internals/memory-leak.js`
 2. Chrome → `chrome://inspect` → *Open dedicated DevTools for Node*
 3. Aba **Memory** → *Take snapshot*; esperar; outro snapshot
 4. Comparar (*Comparison*) e ordenar por *Size Delta*: o `Array` do `cacheGlobal` lidera o crescimento
@@ -234,7 +234,6 @@ o `.off()` correspondente.
 
 ## 🚧 Limitações e próximos passos
 
-- Os experimentos são **scripts isolados** em `test/load/`; o lugar natural seria uma pasta `labs/`, fora de `test/`.
 - **Medir o atraso do Event Loop em produção** (`perf_hooks.monitorEventLoopDelay`) e exportá-lo como métrica no Prometheus, para ver travamentos antes que virem incidentes.
 - **Experimento com Worker Threads** (o único conceito do módulo sem experimento próprio).
 - Corrigir o `generate-file.js` para respeitar o backpressure, como exemplo positivo.

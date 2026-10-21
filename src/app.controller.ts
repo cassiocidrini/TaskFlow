@@ -5,7 +5,7 @@ import { AppService } from './app.service';
 /**
  * Rota raiz, herdada do scaffold do NestJS.
  *
- * Mantida porque é o alvo do smoke test de carga (`test/load/k6-smoke.js`, Módulo 10): um endpoint sem banco
+ * Mantida porque é o alvo do smoke test de carga (`load/k6/k6-smoke.js`, Módulo 10): um endpoint sem banco
  * nem autenticação, que mede o custo mínimo do pipeline HTTP. Pública de propósito.
  *
  * Próximo passo natural: trocá-la por um health check real (`@nestjs/terminus`, com `/health/live` e

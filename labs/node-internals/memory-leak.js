@@ -1,5 +1,5 @@
 /**
- * Experimento: memory leak intencional (Módulo 11). `node --inspect test/load/memory-leak.js`.
+ * Experimento: memory leak intencional (Módulo 11). `node --inspect labs/node-internals/memory-leak.js`.
  *
  * Um array global que só cresce (~100 KB/s): o GC não pode liberar o que ainda é alcançável. Diagnóstico com
  * heap snapshots no Chrome DevTools (comparar dois e ordenar por Size Delta). Correção: LRU, TTL ou Redis.

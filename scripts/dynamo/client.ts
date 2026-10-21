@@ -1,6 +1,7 @@
 /**
  * LABORATÓRIO de modelagem DynamoDB (Módulo 04) — não faz parte da API, que persiste em PostgreSQL.
- * Os scripts de `src/dynamo/` modelam o MESMO domínio em Single-Table Design para comparar as abordagens.
+ * Os scripts de `scripts/dynamo/` modelam o MESMO domínio em Single-Table Design para comparar as abordagens.
+ * Ficam fora de `src/` para não serem compilados no `dist/` nem entrarem na imagem de produção.
  *
  * Cliente compartilhado pelos scripts de consulta. O `DynamoDBDocumentClient` aceita objetos JavaScript comuns
  * (`{ PK: 'USER#u1' }`); o cliente de baixo nível exigiria o formato tipado (`{ PK: { S: 'USER#u1' } }`).

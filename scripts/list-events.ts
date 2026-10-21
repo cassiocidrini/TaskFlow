@@ -8,7 +8,7 @@
  * e lê o `.env` diretamente. Lê a tabela inteira de uma vez: aceitável para estudo; com milhões de eventos,
  * seria preciso paginar ou usar um cursor/stream para não estourar a memória (Módulo 11).
  *
- * Existe uma cópia antiga e quebrada em `modules/tasks/events/list-events.ts` (marcada como `@deprecated`).
+ * Vive em `scripts/`, e não em `src/`, para não ser compilado no `dist/` nem entrar na imagem de produção.
  */
 import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';

@@ -208,7 +208,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 | 2 | `exports is not defined` | Conflito ESM × `transformIgnorePatterns` | Reverter o `jest.config.ts` ao original |
 | 3 | `Cannot find module @prisma/client` | Faltava gerar o client | Step `npx prisma generate` |
 | 4 | Falha por falta de `.env` | `.env` está no `.gitignore` | *Placeholder* no `prisma.config.ts` |
-| 5 | Lint vermelho em scripts de estudo | Os scripts de laboratório em `test/load/` também passam pelo lint | Corrigidos no próprio PR (`fix(ci): corrige erros de lint…`) |
+| 5 | Lint vermelho em scripts de estudo | Os scripts de laboratório (hoje em `scripts/`, `load/` e `labs/`) também passam pelo lint | Corrigidos no próprio PR (`fix(ci): corrige erros de lint…`) |
 | 6 | Cada teste rodava **duas vezes** | `npm test` (todas as suítes) **e depois** cada suíte de novo | Um script por job; cada suíte roda uma vez |
 | 7 | `--passWithNoTests` mascarava suíte vazia | A flag aprova até sem nenhum teste | Removida: suíte vazia falha |
 | 8 | Hook de teste estourou 5 s sob carga | `testTimeout` dentro de `projects` é **ignorado** pelo Jest | `jest.setTimeout(60_000)` em [`setup-slow-suites.ts`](../../test/setup-slow-suites.ts), só para integração/E2E |

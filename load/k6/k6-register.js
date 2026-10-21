@@ -6,7 +6,7 @@
  *
  * Pré-requisito: `DISABLE_THROTTLE=true` (senão o teste mede o rate limit: 100% de 429).
  * Cada execução cria usuários REAIS no banco; e-mails únicos por VU/iteração evitam 409.
- * Resultados do módulo: `k6 run --vus 20 --duration 60s test/load/k6-register.js`.
+ * Resultados do módulo: `k6 run --vus 20 --duration 60s load/k6/k6-register.js`.
  */
 import http from 'k6/http';
 import { check, sleep } from 'k6';

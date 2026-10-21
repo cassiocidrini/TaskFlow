@@ -76,7 +76,14 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `modules/tasks/events/` | Eventos de domínio + projeções (`@EventsHandler`) | Projeções **idempotentes** |
 | `modules/projects/` | CRUD de projetos + `assertOwner` | Ponto único de autorização por projeto |
 | `common/dto/pagination.dto.ts` | Paginação por cursor (`limit ≤ 100`) | Reusar em toda listagem |
-| `dynamo/`, `test/load/` | Scripts de estudo (Módulos 4, 10, 11) | Não são código de produção |
+
+**Fora de `src/`** (não entram no build nem na imagem de produção; o lint cobre todos):
+
+| Caminho | Responsabilidade | Regra |
+|---|---|---|
+| `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4) | Script novo de dev entra aqui, **nunca** em `src/` |
+| `load/k6/`, `load/autocannon/` | Testes de carga da API (Módulo 10) | Medem a API rodando; não são testes do Jest |
+| `labs/node-internals/` | Experimentos do runtime (Módulo 11) | Arquivos gerados (`*.txt`, ~100 MB) são ignorados pelo Git |
 
 ### Padrões aplicados (e onde)
 
