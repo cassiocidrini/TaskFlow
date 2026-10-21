@@ -91,17 +91,30 @@ respondendo `HIGH`, porque **os eventos são a fonte da verdade** e a projeção
 
 ## ⚡ Quickstart (≈ 5 min)
 
-**Pré-requisitos:** Node.js 24+ e Docker (com Compose v2).
+**Pré-requisitos:** Node.js 24+ (há um `.nvmrc`) e Docker (com Compose v2). Os mesmos comandos funcionam em
+Linux, macOS e Windows:
 
 ```bash
-git clone https://github.com/cassiocidrini/TaskFlow.git && cd TaskFlow
-cp .env.example .env                 # Windows (PowerShell): copy .env.example .env
-docker compose up -d postgres jaeger
+git clone https://github.com/cassiocidrini/TaskFlow.git
+cd TaskFlow
+npm run setup    # confere Node e Docker, cria o .env, instala, sobe Postgres + Jaeger e aplica as migrações
+npm run dev      # garante a infra de pé e inicia a API em modo watch
+```
+
+<details>
+<summary>O que o <code>npm run setup</code> faz, passo a passo</summary>
+
+```bash
+cp .env.example .env                       # só se ainda não existir (nunca sobrescreve)
 npm ci
+docker compose up -d --wait postgres jaeger  # --wait usa o healthcheck: segue quando o banco aceita conexões
 npx prisma generate
 npx prisma migrate deploy
-npm run start:dev
 ```
+
+O script é [`scripts/dev/setup.mjs`](scripts/dev/setup.mjs), escrito só com módulos nativos do Node (roda antes
+do `npm ci`) e idempotente: pode ser rodado de novo sem estragar nada.
+</details>
 
 Abra **http://localhost:3000/docs**: a documentação interativa (Swagger) é gerada a partir do código.
 
@@ -144,7 +157,15 @@ curl -s $API/projects/$PROJECT/tasks/$TASK/history -H "$AUTH" | jq
 | Grafana | http://localhost:3001 | `admin` / `admin` |
 | LocalStack (AWS) | http://localhost:4566 | `test` / `test` |
 
-> No Windows, os scripts `setup.ps1`, `dev.ps1` e `stop.ps1` automatizam os mesmos passos.
+### Comandos do dia a dia
+
+| Comando | O que faz |
+|---|---|
+| `npm run dev` | Sobe Postgres + Jaeger (se preciso) e inicia a API em modo watch |
+| `npm run infra:up:obs` | Postgres + Jaeger + Prometheus + Grafana |
+| `npm run infra:down` | Derruba os containers (os dados ficam nos volumes) |
+| `npm run aws:up` · `aws:down` · `aws:recreate` | LocalStack + Terraform ([Módulo 09](docs/modules/09-infraestrutura-como-codigo.md)) |
+| `npm run aws:resources` | Lista as filas SQS e os buckets S3 criados |
 
 ---
 

@@ -26,8 +26,10 @@
 
 ```bash
 # Desenvolvimento
-docker compose up -d postgres jaeger    # mínimo para a app (Windows: .\setup.ps1 / .\dev.ps1 / .\stop.ps1)
-npm run start:dev                       # http://localhost:3000 · Swagger em /docs
+npm run setup                           # clone novo → ambiente pronto (Linux, macOS e Windows)
+npm run dev                             # infra:up + start:dev → http://localhost:3000 · Swagger em /docs
+npm run infra:down                      # derruba os containers (infra:up:obs inclui Prometheus + Grafana)
+npm run aws:up                          # LocalStack + Terraform (aws:down · aws:recreate · aws:resources)
 
 # Qualidade — rodar SEMPRE antes de commitar
 npx tsc --noEmit && npm run lint && npm run test:unit

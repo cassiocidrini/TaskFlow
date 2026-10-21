@@ -1,10 +1,10 @@
 # Módulo 09 — Infraestrutura como Código (Terraform)
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 18/10/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 21/10/2026
 >
 > **Onde vive no código:** [`terraform/`](../../terraform/) (`main.tf`, `sns.tf`, `backend.tf`) ·
-> scripts [`terraform-setup.ps1`](../../terraform-setup.ps1), [`terraform-clean.ps1`](../../terraform-clean.ps1),
-> [`terraform-recreate.ps1`](../../terraform-recreate.ps1) · LocalStack no [`docker-compose.yml`](../../docker-compose.yml)
+> script [`scripts/dev/localstack.mjs`](../../scripts/dev/localstack.mjs) (`npm run aws:*`) ·
+> LocalStack no [`docker-compose.yml`](../../docker-compose.yml)
 
 ---
 
@@ -145,11 +145,20 @@ O `backend "s3"` ([`backend.tf`](../../terraform/backend.tf)) guarda o state em
 
 ## 📋 Como reproduzir
 
-```powershell
-.\terraform-setup.ps1      # sobe o LocalStack, espera ficar healthy, cria o bucket do state, init + apply
-.\terraform-clean.ps1      # destroy + remove state local, container e volume do LocalStack
-.\terraform-recreate.ps1   # clean + setup
+```bash
+npm run aws:up          # sobe o LocalStack (--wait no healthcheck), cria o bucket do state, init + apply
+npm run aws:down        # remove o container e o volume do LocalStack: recursos E state somem juntos
+npm run aws:recreate    # down + up
+npm run aws:resources   # lista filas SQS e buckets S3
 ```
+
+Funciona igual em Linux, macOS e Windows (Node puro). Exige `LOCALSTACK_AUTH_TOKEN` no `.env` e o `terraform`
+no PATH. O `aws:down` não roda `terraform destroy`: o state vive no S3 do **próprio** LocalStack, então apagar o
+volume remove os recursos e o state de uma vez.
+
+> **O LocalStack não guarda os recursos entre reinícios** (sem `PERSISTENCE=1`, o padrão): depois de reiniciar o
+> Docker ou a máquina, filas, buckets e o próprio state somem. Basta rodar `npm run aws:up` de novo. Como o state
+> some junto com os recursos, o Terraform recria tudo sem conflito.
 
 Ou manualmente, dentro de `terraform/`:
 
@@ -184,6 +193,7 @@ docker exec taskflow-localstack awslocal iam list-roles
 | 5 | `force_path_style` deprecated | Renomeado no Terraform 1.6+ | `use_path_style` |
 | 6 | `dynamodb_table` deprecated no backend | O Terraform 1.10+ trava o state com um *lockfile* no próprio S3 | Removido, **mas o substituto (`use_lockfile`) não foi adicionado**: o backend ficou sem lock |
 | 7 | `rds service is not included within your LocalStack license` | RDS não está no plano gratuito do LocalStack | Remover o `rds.tf`; o PostgreSQL continua no Docker Compose |
+| 8 | Scripts `.ps1` antigos: o clean apagava o `.terraform.lock.hcl` (versionado) e um `apply` com erro imprimia `[OK]` | O `try/catch` do PowerShell não captura erro de executável externo, e a saída ia para `Out-Null`; o lock file era tratado como lixo | Migração para `scripts/dev/localstack.mjs`: exit code checado em todo comando, saída visível, só o cache `.terraform/` é apagado |
 
 ### Lições
 
@@ -201,7 +211,6 @@ docker exec taskflow-localstack awslocal iam list-roles
 - **Sem módulos:** o padrão SQS + policy poderia virar um `module` reutilizável.
 - **IaC fora do CI:** um job com `terraform fmt -check`, `validate` e `plan` em cada PR, com o plano publicado como comentário.
 - **Recursos sem uso pela API:** SNS e SQS existem, mas o EventBus ainda é em memória.
-- **Comentário desatualizado** no `terraform-clean.ps1`, que ainda cita RDS entre os recursos destruídos.
 
 ---
 

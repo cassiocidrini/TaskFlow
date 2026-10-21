@@ -5,7 +5,11 @@
   "author": "",
   "private": true,
   "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
+    "setup": "node scripts/dev/setup.mjs",
     "build": "nest build",
     "deploy": "nest deploy",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
@@ -13,6 +17,14 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
+    "dev": "npm run infra:up && npm run start:dev",
+    "infra:up": "docker compose up -d --wait postgres jaeger",
+    "infra:up:obs": "docker compose up -d --wait postgres jaeger prometheus grafana",
+    "infra:down": "docker compose down",
+    "aws:up": "node scripts/dev/localstack.mjs up",
+    "aws:down": "node scripts/dev/localstack.mjs down",
+    "aws:recreate": "node scripts/dev/localstack.mjs recreate",
+    "aws:resources": "node scripts/dev/localstack.mjs resources",
     "lint": "oxlint --type-aware --deny-warnings src/ test/ scripts/ labs/ load/",
     "test": "npm run test:unit && npm run test:integration && npm run test:e2e",
     "test:unit": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --selectProjects unit",
