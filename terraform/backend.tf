@@ -11,8 +11,8 @@
 #    substituiu a antiga tabela DynamoDB `dynamodb_table`) e, junto, `required_version = ">= 1.10.0"` no main.tf.
 #    Hoje este backend compartilha e guarda o state, mas não impede corridas. Ver Módulo 09.
 #
-# O bucket do state é criado ANTES do `terraform init` pelo terraform-setup.ps1: o Terraform não pode criar o
-# lugar onde guardará o próprio state.
+# O bucket do state é criado ANTES do `terraform init` pelo `npm run aws:up` (scripts/dev/localstack.mjs): o
+# Terraform não pode criar o lugar onde guardará o próprio state.
 # =============================================================================
 terraform {
   backend "s3" {

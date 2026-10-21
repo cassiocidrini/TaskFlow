@@ -12,6 +12,13 @@ services:
       POSTGRES_DB: taskflow_db
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # "Container de pé" não é "banco aceitando conexões": o Postgres leva alguns segundos para iniciar.
+    # Com o healthcheck, `docker compose up --wait` (npm run infra:up) só retorna quando o banco está pronto.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskflow -d taskflow_db"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
   jaeger:
     # Jaeger v1 está descontinuado; a migração para o v2 (jaegertracing/jaeger) é um passo à parte
