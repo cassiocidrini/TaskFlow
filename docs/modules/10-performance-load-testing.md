@@ -2,8 +2,8 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 18/10/2026
 >
-> **Onde vive no código:** [`test/load/k6-smoke.js`](../../test/load/k6-smoke.js) ·
-> [`test/load/k6-register.js`](../../test/load/k6-register.js) · scripts com autocannon em [`test/load/`](../../test/load/)
+> **Onde vive no código:** [`load/k6/k6-smoke.js`](../../load/k6/k6-smoke.js) ·
+> [`load/k6/k6-register.js`](../../load/k6/k6-register.js) · scripts com autocannon em [`load/autocannon/`](../../load/autocannon/)
 >
 > ℹ️ Os resultados deste módulo foram medidos na **versão inicial** da API e são mantidos como registro histórico.
 
@@ -119,7 +119,7 @@ deixa de bloquear (`skipIf`); em produção ela fica `false`.
 ### 3. Smoke: `GET /`
 
 ```javascript
-// test/load/k6-smoke.js
+// load/k6/k6-smoke.js
 export const options = { vus: 10, duration: '10s' };
 
 export default function () {
@@ -135,7 +135,7 @@ export default function () {
 ### 4. Load com SLO: `POST /auth/register`
 
 ```javascript
-// test/load/k6-register.js
+// load/k6/k6-register.js
 export const options = {
   vus: 10,
   duration: '10s',
@@ -160,8 +160,8 @@ export default function () {
 ```
 
 ```powershell
-k6 run test/load/k6-register.js                         # 10 VUs por 10 s (o que está no arquivo)
-k6 run --vus 20 --duration 60s test/load/k6-register.js  # a configuração dos resultados abaixo
+k6 run load/k6/k6-register.js                         # 10 VUs por 10 s (o que está no arquivo)
+k6 run --vus 20 --duration 60s load/k6/k6-register.js  # a configuração dos resultados abaixo
 ```
 
 > Cada execução cria usuários de verdade no banco. Depois de alguns testes, o banco de desenvolvimento deste projeto

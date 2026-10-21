@@ -241,15 +241,20 @@ src/
 │       ├── queries/        # listagem (Read Model) e histórico (Event Store)
 │       ├── events/         # eventos de domínio + projeções
 │       └── strategies/     # Strategy de prioridade
-├── dynamo/                 # scripts de estudo de modelagem DynamoDB (Módulo 4)
 ├── app.setup.ts            # Helmet, CORS, ValidationPipe, Swagger (compartilhado com o E2E)
 ├── tracing.ts              # OpenTelemetry (carregado antes do Nest)
 └── main.ts
-test/
-├── unit/  ├── integration/  ├── e2e/   # pirâmide de testes
-└── load/                               # k6 e experimentos de Node.js internals
-terraform/                              # IaC (S3, SQS, SNS, IAM)
+test/                       # unit/ · integration/ · e2e/ — a pirâmide de testes (Jest)
+terraform/                  # IaC (S3, SQS, SNS, IAM)
+
+# Fora do produto: não entram no build nem na imagem de produção
+scripts/                    # ferramentas de dev: list-events.ts, dynamo/ (lab do Módulo 4)
+load/                       # testes de carga da API: k6/ e autocannon/ (Módulo 10)
+labs/node-internals/        # experimentos do runtime: event loop, streams, leaks (Módulo 11)
 ```
+
+`src/` contém só a API. O que é estudo ou ferramenta fica fora dele, para não ser compilado no `dist/` nem
+confundido com código de produção.
 
 ---
 
@@ -264,14 +269,14 @@ reproduzir, **problemas reais encontrados** e onde o resultado vive no código. 
 | [01](docs/modules/01-observabilidade.md) | Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana) | `tracing.ts`, `docker-compose.yml` |
 | 02 | Orquestração com Kubernetes | 🔜 planejado para um ambiente Linux dedicado |
 | [03](docs/modules/03-ci-cd-github-actions.md) | CI/CD com GitHub Actions | `.github/workflows/ci.yml` |
-| [04](docs/modules/04-modelagem-nosql-dynamodb.md) | Modelagem NoSQL (DynamoDB, single-table, GSI) | `src/dynamo/` |
+| [04](docs/modules/04-modelagem-nosql-dynamodb.md) | Modelagem NoSQL (DynamoDB, single-table, GSI) | `scripts/dynamo/` |
 | [05](docs/modules/05-event-sourcing-cqrs.md) | Event Sourcing, CQRS e arquitetura | `src/modules/tasks/`, `src/events/` |
 | [06](docs/modules/06-seguranca-owasp.md) | Segurança (OWASP Top 10) | `auth/`, `app.setup.ts`, autorização por projeto |
 | [07](docs/modules/07-testes.md) | Testes (unitários, integração, E2E) | `test/` |
 | [08](docs/modules/08-ia-no-desenvolvimento.md) | Engenharia assistida por IA | [`AGENTS.md`](AGENTS.md) |
 | [09](docs/modules/09-infraestrutura-como-codigo.md) | Infraestrutura como Código (Terraform) | `terraform/` |
-| [10](docs/modules/10-performance-load-testing.md) | Performance e load testing (k6) | `test/load/` |
-| [11](docs/modules/11-nodejs-internals.md) | Node.js internals (event loop, thread pool, streams, leaks) | `test/load/` |
+| [10](docs/modules/10-performance-load-testing.md) | Performance e load testing (k6) | `load/` |
+| [11](docs/modules/11-nodejs-internals.md) | Node.js internals (event loop, thread pool, streams, leaks) | `labs/node-internals/` |
 | [12](docs/modules/12-design-patterns.md) | Design patterns | ver [Padrões de projeto aplicados](#padrões-de-projeto-aplicados) |
 
 ---

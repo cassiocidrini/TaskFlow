@@ -1,11 +1,11 @@
 ---
 name: taskflow-docs
-description: Padrão de documentação do TaskFlow (NestJS + CQRS + Event Sourcing) — TSDoc em português explicando o porquê e Swagger fiel ao comportamento real. Use sempre que for documentar, comentar ou revisar comentários em qualquer arquivo de src/, test/ ou terraform/ deste repositório, criar/alterar um endpoint ou DTO (o Swagger faz parte da tarefa, não é opcional), adicionar um evento/comando novo, ou quando o usuário pedir "documente", "TSDoc", "Swagger", "OpenAPI" ou "comente o código".
+description: Padrão de documentação do TaskFlow (NestJS + CQRS + Event Sourcing) — TSDoc em português explicando o porquê e Swagger fiel ao comportamento real. Use sempre que for documentar, comentar ou revisar comentários em qualquer arquivo de src/, test/, terraform/, scripts/, load/ ou labs/ deste repositório, criar/alterar um endpoint ou DTO (o Swagger faz parte da tarefa, não é opcional), adicionar um evento/comando novo, ou quando o usuário pedir "documente", "TSDoc", "Swagger", "OpenAPI" ou "comente o código".
 ---
 
 # Documentação no TaskFlow
 
-Este é o padrão aplicado em todo o `src/`, `test/` e `terraform/` (PR `docs/tsdoc-swagger`). Ele especializa a skill
+Este é o padrão aplicado em todo o `src/`, `test/`, `terraform/`, `scripts/`, `load/` e `labs/`. Ele especializa a skill
 genérica `senior-code-docs` — se ela estiver disponível, os princípios gerais estão lá; o que vale AQUI está abaixo.
 
 **Antes de escrever qualquer comentário, leia o [AGENTS.md](../../../AGENTS.md)** — em especial "Padrões aplicados",
@@ -24,9 +24,9 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
    anti-IDOR do `projectId` da tarefa, `userId` só do JWT), A02/A07 (bcrypt, HS256 fixo, segredo ≥ 32), A05 (Helmet,
    CORS, Swagger fora de produção), API4 (`limit` ≤ 100, throttler).
 6. **Limitações conhecidas ficam documentadas ao lado do código, não escondidas.** As atuais (mantenha coerente com o
-   README e `docs/modules/`): timing attack no login; Strategy com `new` e `DeadlinePriorityStrategy` sem uso;
-   dual-write sem outbox; throttler em memória; login responde 201; state do Terraform sem lock;
-   `tasks/events/list-events.ts` é `@deprecated`; labs em `src/dynamo/` e `test/load/`.
+   README e `docs/modules/`): Strategy com `new` e `DeadlinePriorityStrategy` sem uso; dual-write sem outbox;
+   throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; sem health check nem graceful
+   shutdown; Dockerfile em `node:20` e como root. Ao corrigir uma, tire-a daqui no MESMO PR.
 
 ## Swagger — como está montado
 
@@ -60,7 +60,7 @@ assim (banco real via Testcontainers, `eventually()` para consistência eventual
 npx tsc --noEmit && npm run lint && npm run test:unit
 npm run build                                     # aplica o plugin do Swagger (nest-cli.json)
 node .claude/skills/taskflow-docs/scripts/probe-openapi.js            # 13 rotas, 4 tags, sem tag fantasma
-node .claude/skills/taskflow-docs/scripts/find-undocumented.js src test terraform   # esperado: 0
+node .claude/skills/taskflow-docs/scripts/find-undocumented.js src test terraform scripts load labs   # esperado: 0
 npm run test:e2e        # se tocou em controller/pipe/guard (Docker ligado; roda com --runInBand)
 ```
 

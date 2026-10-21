@@ -2,11 +2,11 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 18/10/2026
 >
-> **Onde vive no código:** [`src/dynamo/`](../../src/dynamo/) (scripts de estudo executados via `npm run dynamo:*`) ·
+> **Onde vive no código:** [`scripts/dynamo/`](../../scripts/dynamo/) (scripts de estudo executados via `npm run dynamo:*`) ·
 > LocalStack no [`docker-compose.yml`](../../docker-compose.yml)
 >
 > ℹ️ **Escopo:** este módulo é um **laboratório de modelagem**. A API do TaskFlow persiste em PostgreSQL; os
-> scripts em `src/dynamo/` modelam o **mesmo domínio** (usuários, projetos, tarefas) em DynamoDB para comparar
+> scripts em `scripts/dynamo/` modelam o **mesmo domínio** (usuários, projetos, tarefas) em DynamoDB para comparar
 > as duas abordagens.
 
 ---
@@ -108,7 +108,7 @@ docker compose up -d localstack        # emula DynamoDB, S3, SQS, SNS e IAM em h
 | `@aws-sdk/lib-dynamodb` | `DynamoDBDocumentClient`: aceita objetos JavaScript comuns (é o que as queries usam) |
 
 ```ts
-// src/dynamo/client.ts
+// scripts/dynamo/client.ts
 const baseClient = new DynamoDBClient({
   region: 'us-east-1',
   endpoint: 'http://localhost:4566',                      // LocalStack (na AWS real, omite-se o endpoint)
@@ -118,7 +118,7 @@ export const dynamo = DynamoDBDocumentClient.from(baseClient);
 export const TABLE_NAME = 'TaskFlowTable';
 ```
 
-### 3. Chaves centralizadas ([`model.ts`](../../src/dynamo/model.ts))
+### 3. Chaves centralizadas ([`model.ts`](../../scripts/dynamo/model.ts))
 
 ```ts
 export const keys = {
@@ -140,7 +140,7 @@ export const gsiKeys = {
 
 Gerar as chaves sempre pela mesma função evita o bug clássico de um script gravar `USER#u1` e outro buscar `USER-u1`.
 
-### 4. Tabela com GSI ([`createTable.ts`](../../src/dynamo/createTable.ts))
+### 4. Tabela com GSI ([`createTable.ts`](../../scripts/dynamo/createTable.ts))
 
 ```ts
 new CreateTableCommand({
