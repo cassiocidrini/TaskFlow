@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
@@ -40,17 +40,18 @@ export class AuthController {
   /**
    * Login. 5 tentativas por minuto por IP (anti força bruta).
    *
-   * Responde 201 porque é o padrão do NestJS para `POST`. Semanticamente o login não cria um recurso
-   * e o ideal seria 200 — limitação documentada no Módulo 06, mantida aqui para não mudar o contrato.
+   * `@HttpCode(200)` porque o login não cria um recurso: o NestJS responde 201 em todo `POST` por padrão,
+   * e 201 significa "recurso criado". Aqui se emite um token sobre uma sessão que não é persistida.
    */
   @Post('login')
+  @HttpCode(HttpStatus.OK)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @ApiOperation({
     summary: 'Autenticar e obter um JWT',
     description:
       'Devolve um `accessToken`. Use-o no botão **Authorize** (acima) ou no header `Authorization: Bearer <token>`.',
   })
-  @ApiResponse({ status: 201, description: 'Credenciais válidas; token emitido.', type: LoginResponseDto })
+  @ApiResponse({ status: 200, description: 'Credenciais válidas; token emitido.', type: LoginResponseDto })
   @ApiResponse({ status: 400, description: 'Entrada inválida (ex.: e-mail malformado).' })
   @ApiResponse({
     status: 401,

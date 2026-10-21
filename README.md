@@ -4,7 +4,7 @@
 ![Node](https://img.shields.io/badge/node-24-339933?logo=node.js&logoColor=white)
 ![NestJS](https://img.shields.io/badge/NestJS-12-E0234E?logo=nestjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
-![Testes](https://img.shields.io/badge/testes-150-brightgreen)
+![Testes](https://img.shields.io/badge/testes-153-brightgreen)
 
 API de gestão de tarefas em **NestJS + TypeScript** com **CQRS + Event Sourcing**: o estado de cada tarefa é
 **derivado de eventos imutáveis**, o que dá histórico completo, auditoria e projeções reconstruíveis.
@@ -23,7 +23,7 @@ teste que a comprova; o que **não** está implementado aparece em [Limitações
 | **Autorização (OWASP A01)** | Toda rota de tarefa exige JWT e posse do projeto; recurso alheio responde `404` (anti-enumeration) e há proteção anti-IDOR em rotas aninhadas | [`tasks.e2e-spec.ts`](test/e2e/tasks.e2e-spec.ts) |
 | **Projeções idempotentes** | `INSERT … ON CONFLICT DO NOTHING` e `UPDATE … SET`: entrega duplicada, 5 entregas simultâneas e replay completo resultam no mesmo estado | [`projections.spec.ts`](test/integration/projections.spec.ts) |
 | **Fail-fast de configuração** | Variáveis de ambiente validadas com `zod` no boot: configuração inválida impede a app de subir | [`env.schema.ts`](src/config/env.schema.ts) |
-| **Testes com infraestrutura real** | 101 unitários · 20 de integração e 29 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
+| **Testes com infraestrutura real** | 104 unitários · 20 de integração e 29 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
 | **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas p50/p95/p99) | [`tracing.ts`](src/tracing.ts) |
 | **IaC** | Terraform (S3, SQS, SNS, IAM de menor privilégio) com backend remoto, sobre LocalStack | [`terraform/`](terraform/) |
 
@@ -174,7 +174,7 @@ de outro usuário** · `409` regra de negócio violada ou conflito de concorrên
 
 | Suíte | Qtd. | Infraestrutura | O que prova |
 |---|---:|---|---|
-| **Unitários** | 101 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
+| **Unitários** | 104 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
 | **Integração** | 20 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade do `appendMany`, idempotência das projeções |
 | **E2E** | 29 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico, paginação, consistência eventual |
 

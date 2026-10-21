@@ -39,7 +39,7 @@ em aplicações web. Este módulo usa a numeração da edição **2021**, a mesm
 | A04 | Insecure Design | ✅ | Rate limit, teto de paginação (100), regras de negócio no agregado |
 | A05 | Security Misconfiguration | ✅ | Helmet, CORS explícito, *fail-fast* de configuração, Swagger desligado em produção |
 | A06 | Vulnerable Components | 🟡 | `npm ci` com lockfile; **sem** `npm audit`/Dependabot no CI |
-| A07 | Identification & Auth Failures | 🟡 | Mesma mensagem para erro de login, throttle; **timing attack** ainda presente ([Limitações](#-limitações-e-próximos-passos)) |
+| A07 | Identification & Auth Failures | 🟡 | Mesma mensagem **e mesmo tempo** para erro de login (anti timing attack), throttle; sem refresh token ([Limitações](#-limitações-e-próximos-passos)) |
 | A08 | Software & Data Integrity | 🟡 | CI com `permissions: contents: read`; actions fixadas por tag, não por SHA |
 | A09 | Logging & Monitoring Failures | 🟡 | Traces e métricas (Módulo 01); eventos de segurança (login falho, 403, 429) **não** são logados |
 | A10 | SSRF | ➖ | Não se aplica: a API não faz requisições a URLs fornecidas pelo usuário |
@@ -190,6 +190,7 @@ só quem tem o `JWT_SECRET` consegue gerar.
 | Expiração | `JWT_EXPIRES_IN` (padrão `1h`), formato validado por regex; `ignoreExpiration: false` |
 | Algoritmo fixo | `algorithm: 'HS256'` ao assinar **e** `algorithms: ['HS256']` ao verificar: bloqueia o ataque de *algorithm confusion* (`alg: none` ou troca de algoritmo) |
 | Mesma mensagem | `Credenciais inválidas` para "usuário não existe" **e** "senha errada" (anti-enumeração de usuários) |
+| Mesmo tempo | O `bcrypt.compare` roda **sempre**: contra um hash fictício (`DUMMY_PASSWORD_HASH`, mesmo custo do cadastro) quando o e-mail não existe. Sem isso, o tempo de resposta (~1 ms × ~60–100 ms) revelaria o cadastro (*timing attack*) |
 | Usuário tipado | `@CurrentUser()` devolve `AuthenticatedUser`, e não `any` |
 
 ---
@@ -275,10 +276,11 @@ Outras decisões de configuração:
 
 | Cenário | Resultado | Teste |
 |---|---|---|
-| Registro / login / `GET /auth/me` com token válido | 201 / 201 / 200 | [`auth.e2e-spec.ts`](../../test/e2e/auth.e2e-spec.ts) |
+| Registro / login / `GET /auth/me` com token válido | 201 / 200 / 200 | [`auth.e2e-spec.ts`](../../test/e2e/auth.e2e-spec.ts) |
 | Sem token, token falso, header malformado | 401 | idem |
 | E-mail inválido, senha curta, campo extra (`isAdmin`) | 400 | idem |
 | Mesma mensagem para usuário inexistente e senha errada | ✔ | [`auth.service.spec.ts`](../../test/unit/auth.service.spec.ts) |
+| Usuário inexistente também paga o `bcrypt.compare` (hash fictício de mesmo custo), sem atalho de login por ele | ✔ | idem |
 | Rotas de tarefa sem token | 401 | [`tasks.e2e-spec.ts`](../../test/e2e/tasks.e2e-spec.ts) |
 | Intruso lista/cria/lê histórico em projeto alheio | 404, e **0 eventos gravados** | idem |
 | Tarefa do projeto A alterada pela URL do projeto B (mesmo dono) | 404 | idem |
@@ -297,17 +299,17 @@ Outras decisões de configuração:
 | 3 | Um clone novo não subia: `JwtStrategy requires a secret or key` | `.env.example` sem `JWT_SECRET`; o `!` escondia o problema | Schema `zod` com segredo obrigatório |
 | 4 | O E2E testava uma configuração diferente da produção | O teste montava Helmet e `ValidationPipe` à mão, sem CORS | `configureApp()` compartilhado |
 | 5 | Teste com `JWT_SECRET = 'test-secret'` passou a falhar | O schema agora exige ≥ 32 caracteres | Segredo de teste com o tamanho mínimo (o teste estava errado, não a regra) |
+| 6 | **Timing attack** no login: e-mail inexistente respondia em ~1 ms, existente em ~60–100 ms | O `bcrypt.compare` só rodava se o usuário existisse, e um teste unitário **afirmava** isso ("não perde tempo comparando"): o teste protegia a vulnerabilidade | `compare` sempre, contra um hash fictício de mesmo custo; o teste passou a exigir o contrário |
+| 7 | `POST /auth/login` respondia `201 Created` | Padrão do NestJS para todo `POST`, mas o login não cria recurso | `@HttpCode(200)`, com Swagger e E2E ajustados |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
-- **Timing attack no login (A07):** quando o e-mail não existe, a resposta volta em ~1 ms; quando existe, leva ~60–100 ms (o `bcrypt.compare` roda). A **mensagem** é igual, mas o **tempo** revela se o e-mail está cadastrado. Correção: comparar contra um hash *dummy* quando o usuário não existe.
 - **Sem refresh token nem revogação:** um token roubado vale até expirar (1 h).
 - **Eventos de segurança não logados (A09):** login falho, 404 de autorização e 429 deveriam gerar log estruturado com IP e `correlationId`.
 - **Componentes vulneráveis (A06):** o `npm install` reporta vulnerabilidades em dependências transitivas; faltam `npm audit` no CI e Dependabot.
 - **Rate limit em memória:** não é compartilhado entre réplicas (em produção, *storage* em Redis).
-- **`POST /auth/login` responde 201:** login não cria recurso; o correto seria `200` (`@HttpCode(200)`).
 
 ---
 
@@ -320,7 +322,7 @@ Outras decisões de configuração:
 - [x] Autorização por dono do projeto, 404 anti-enumeração, anti-IDOR, `userId` só do token
 - [x] *Fail-fast* de configuração e Swagger desligado em produção
 - [x] Cenários de segurança cobertos por testes E2E
-- [ ] Correção do timing attack no login
+- [x] Login com mesma mensagem e mesmo tempo (anti-enumeração e anti timing attack)
 - [ ] Refresh token, logs de segurança, `npm audit`/Dependabot
 
 ---

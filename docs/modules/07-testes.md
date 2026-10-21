@@ -15,7 +15,7 @@ Escrever **testes de verdade**: não só o caminho feliz, mas as **propriedades*
 
 | Nível | Testes | Infraestrutura | O que prova |
 |---|---:|---|---|
-| **Unitários** | 101 | Nenhuma (mocks, ou nem isso) | Regras de domínio, handlers, autorização, ordem `save → publish` |
+| **Unitários** | 104 | Nenhuma (mocks, ou nem isso) | Regras de domínio, handlers, autorização, ordem `save → publish` |
 | **Integração** | 20 | **PostgreSQL real** (Testcontainers) | Concorrência otimista, atomicidade, idempotência das projeções |
 | **E2E** | 29 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico, paginação |
 
@@ -40,7 +40,7 @@ entre teste como cerimônia e teste como **garantia**.
 
 | | Unitário | Integração | E2E |
 |---|---|---|---|
-| Velocidade | ~3 s para os 101 | ~1 min | ~1,5 min |
+| Velocidade | ~3 s para os 104 | ~1 min | ~1,5 min |
 | Quando rodar | O tempo todo | Ao mexer em banco, Event Store, projeção | Ao mexer em controller, guard, módulo |
 | Pega | Regra errada, decisão errada | SQL, constraint, tipo de coluna, `ON CONFLICT` | Guard esquecido, módulo não importado, migração × código |
 
@@ -75,7 +75,7 @@ afterAll    → derruba o container
 test/
 ├── setup.ts                    # DISABLE_THROTTLE=true, NODE_ENV=test (antes de tudo)
 ├── setup-slow-suites.ts        # timeout de 60 s, só para integração e E2E
-├── unit/                       # 12 arquivos, 101 testes
+├── unit/                       # 12 arquivos, 104 testes
 ├── integration/
 │   ├── support/test-database.ts   # startTestDatabase(): Postgres + migrações
 │   ├── event-store.spec.ts        # 14 testes
@@ -262,7 +262,7 @@ projeção: as respostas dos comandos são lidas na hora, porque esconder bugs a
 | Momento | Unitários | Integração | E2E |
 |---|---:|---:|---:|
 | Primeira versão deste módulo | 13 | 8 | 12 + 1 `todo` |
-| **Hoje** | **101** | **20** | **29** |
+| **Hoje** | **104** | **20** | **29** |
 
 A suíte completa (`npm test`, em sequência) leva cerca de 3 minutos numa máquina de desenvolvimento com 8 GB
 reservados ao Docker. No CI, as três suítes rodam em VMs separadas e em paralelo.

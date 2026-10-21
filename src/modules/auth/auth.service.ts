@@ -4,6 +4,24 @@ import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../../prisma/prisma.service';
 
 /**
+ * Custo do bcrypt: 10 = 2^10 iterações. Lento o bastante para encarecer ataques offline a hashes vazados,
+ * rápido o bastante para não degradar o login. Aumentar 1 ponto dobra o tempo de cada hash.
+ */
+export const BCRYPT_SALT_ROUNDS = 10;
+
+/**
+ * Hash bcrypt de um segredo aleatório que ninguém conhece, usado no login quando o e-mail não existe.
+ *
+ * **Por que existe (timing attack, OWASP A07):** sem ele, "usuário não encontrado" respondia em ~1 ms e
+ * "senha errada" em ~60–100 ms. A mensagem era a mesma, mas o TEMPO revelava quais e-mails estão cadastrados.
+ * Comparar contra este hash faz os dois caminhos custarem o mesmo.
+ *
+ * Precisa ter o MESMO custo de {@link BCRYPT_SALT_ROUNDS} (o `$10$` do prefixo), senão o tempo volta a
+ * vazar. Um teste unitário trava esse acoplamento. Pré-calculado para não pagar um hash no boot.
+ */
+export const DUMMY_PASSWORD_HASH = '$2b$10$NIcoG2SaEIFkqcPuBZHSFuI2EF7e29gkpuqsrOyQWLi91swRIg1k.';
+
+/**
  * Regras de autenticação: cadastro com senha protegida por hash e emissão de JWT.
  *
  * Estilo Layered (service → Prisma) de propósito: autenticação é CRUD simples, sem histórico relevante,
@@ -15,12 +33,6 @@ import { PrismaService } from '../../prisma/prisma.service';
  */
 @Injectable()
 export class AuthService {
-  /**
-   * Custo 10 = 2^10 iterações. Lento o bastante para encarecer ataques offline a hashes vazados,
-   * rápido o bastante para não degradar o login. Aumentar 1 ponto dobra o tempo de cada hash.
-   */
-  private readonly SALT_ROUNDS = 10;
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
@@ -39,7 +51,7 @@ export class AuthService {
       throw new ConflictException('Email já cadastrado');
     }
 
-    const hashedPassword = await bcrypt.hash(password, this.SALT_ROUNDS);
+    const hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
 
     const user = await this.prisma.user.create({
       data: { email, name, password: hashedPassword },
@@ -54,20 +66,17 @@ export class AuthService {
    * **Anti-enumeração (OWASP A07):** "e-mail inexistente" e "senha errada" respondem a MESMA mensagem,
    * para a API não confirmar quais e-mails estão cadastrados.
    *
-   * **Limitação conhecida — timing attack:** quando o e-mail não existe, o `bcrypt.compare` não roda e a
-   * resposta volta em ~1 ms, contra ~60–100 ms quando existe. A mensagem é igual, mas o TEMPO revela o
-   * cadastro. Correção: comparar contra um hash fictício também no caminho "usuário não encontrado".
+   * **Anti timing attack:** o `bcrypt.compare` roda SEMPRE, contra {@link DUMMY_PASSWORD_HASH} quando o
+   * e-mail não existe. Assim o tempo de resposta não denuncia o cadastro. A decisão fica numa condição
+   * só (`!user || !passwordMatches`): mesmo que a senha "batesse" com o hash fictício, o login falha.
    *
    * @throws UnauthorizedException (401) com a mensagem genérica `Credenciais inválidas`.
    */
   async login(email: string, password: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
-    if (!user) {
-      throw new UnauthorizedException('Credenciais inválidas');
-    }
 
-    const passwordMatches = await bcrypt.compare(password, user.password);
-    if (!passwordMatches) {
+    const passwordMatches = await bcrypt.compare(password, user?.password ?? DUMMY_PASSWORD_HASH);
+    if (!user || !passwordMatches) {
       throw new UnauthorizedException('Credenciais inválidas');
     }
 

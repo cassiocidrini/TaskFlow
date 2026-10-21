@@ -97,7 +97,7 @@ export async function registerAndLogin(app: INestApplication, name = 'Usuario E2
     .send({ email, name, password })
     .expect(201);
 
-  const login = await request(app.getHttpServer()).post('/auth/login').send({ email, password }).expect(201);
+  const login = await request(app.getHttpServer()).post('/auth/login').send({ email, password }).expect(200);
   const token = login.body.accessToken as string;
 
   return {

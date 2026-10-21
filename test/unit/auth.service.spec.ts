@@ -2,8 +2,8 @@
  * `AuthService` — cadastro e login.
  *
  * Protege propriedades de SEGURANÇA, não só o caminho feliz: a senha nunca é salva em texto plano, e-mail
- * duplicado não cria usuário, nenhum token é emitido com senha errada e a MESMA mensagem para "usuário não
- * existe" e "senha errada" (anti-enumeração, OWASP A07).
+ * duplicado não cria usuário, nenhum token é emitido com senha errada, a MESMA mensagem para "usuário não
+ * existe" e "senha errada" (anti-enumeração, OWASP A07) e o MESMO custo nos dois caminhos (anti timing attack).
  *
  * `jest.mock('bcrypt')`: o bcrypt é lento POR DESIGN (~60–100 ms); mockado, a suíte roda em milissegundos.
  * O hashing real é exercitado nos testes E2E.
@@ -12,7 +12,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import { AuthService } from '../../src/modules/auth/auth.service';
+import { AuthService, BCRYPT_SALT_ROUNDS, DUMMY_PASSWORD_HASH } from '../../src/modules/auth/auth.service';
 import { PrismaService } from '../../src/prisma/prisma.service';
 
 // Mock do bcrypt — evita hashing real (que é lento)
@@ -147,13 +147,44 @@ describe('AuthService', () => {
     it('deve lançar UnauthorizedException se o usuário não existir', async () => {
       // Arrange
       prisma.user.findUnique.mockResolvedValue(null);
+      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
 
       // Act + Assert
       await expect(
         authService.login(validEmail, validPassword),
       ).rejects.toThrow(UnauthorizedException);
 
-      expect(bcrypt.compare).not.toHaveBeenCalled();   // não perde tempo comparando
+      expect(jwt.signAsync).not.toHaveBeenCalled();
+    });
+
+    it('deve rodar o bcrypt.compare contra o hash fictício quando o usuário não existir (anti timing attack)', async () => {
+      // Arrange
+      prisma.user.findUnique.mockResolvedValue(null);
+      (bcrypt.compare as jest.Mock).mockResolvedValue(false);
+
+      // Act
+      await authService.login(validEmail, validPassword).catch(() => undefined);
+
+      // Assert — o custo do caminho "usuário não existe" é o mesmo do caminho "senha errada"
+      expect(bcrypt.compare).toHaveBeenCalledWith(validPassword, DUMMY_PASSWORD_HASH);
+    });
+
+    it('deve falhar mesmo se a senha "bater" com o hash fictício (sem atalho de login)', async () => {
+      // Arrange — cenário improvável, mas a decisão não pode depender só do compare
+      prisma.user.findUnique.mockResolvedValue(null);
+      (bcrypt.compare as jest.Mock).mockResolvedValue(true);
+
+      // Act + Assert
+      await expect(
+        authService.login(validEmail, validPassword),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(jwt.signAsync).not.toHaveBeenCalled();
+    });
+
+    it('o hash fictício deve ter o MESMO custo do cadastro (senão o tempo volta a vazar)', () => {
+      // O prefixo `$2b$<custo>$` codifica o número de rounds do bcrypt
+      expect(DUMMY_PASSWORD_HASH.startsWith(`$2b$${BCRYPT_SALT_ROUNDS}$`)).toBe(true);
     });
 
     it('deve lançar UnauthorizedException se a senha estiver errada', async () => {
