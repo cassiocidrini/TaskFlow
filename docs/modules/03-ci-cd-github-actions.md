@@ -125,7 +125,7 @@ jobs:
 | `setup-node` com `cache: 'npm'` | Reaproveita o cache de pacotes entre execuções (instalação mais rápida) |
 | `npx prisma generate` | Gera o client tipado; sem ele, nada que importe `@prisma/client` compila |
 | `npx tsc --noEmit` | O `ts-jest` só **transpila**: erros de tipo passam nos testes e só o `tsc` pega |
-| `npm run lint` | `oxlint --type-aware`: regras que usam tipos, como `no-floating-promises` (Promise esquecida sem `await`) |
+| `npm run lint` | `oxlint --type-aware --deny-warnings`: regras que usam tipos, como `no-floating-promises` (Promise esquecida sem `await`) e `no-explicit-any`. Com `--deny-warnings`, um *warning* também falha o job: warning que não bloqueia vira ruído e se acumula |
 | `npm run build` | Garante que o `nest build` (com o plugin do Swagger) funciona |
 
 ### O CI sem `.env`

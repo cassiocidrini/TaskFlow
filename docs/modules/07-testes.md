@@ -61,7 +61,7 @@ Sobe um **PostgreSQL real** num container Docker durante os testes e o destrói 
 mesmas migrações da produção. Elimina o "passa no mock, quebra em produção".
 
 ```text
-beforeAll   → sobe postgres:16-alpine → prisma migrate deploy (as 6 migrações)
+beforeAll   → sobe postgres:16.15 → prisma migrate deploy (as 6 migrações)
 beforeEach  → limpa as tabelas
 testes      → contra o banco real
 afterAll    → derruba o container
@@ -199,7 +199,9 @@ exercitam a API via HTTP com **dois usuários**, o dono e um intruso:
 
 ```ts
 export async function startE2EApp(): Promise<E2EContext> {
-  const container = await new PostgreSqlContainer('postgres:16-alpine').start();
+  // A MESMA tag do docker-compose.yml (test/support/postgres-image.ts): Debian, não Alpine,
+  // porque a musl libc do Alpine tem suporte limitado a locale e pode ordenar texto diferente
+  const container = await new PostgreSqlContainer(POSTGRES_TEST_IMAGE).start();
   process.env.DATABASE_URL = container.getConnectionUri();
   process.env.JWT_SECRET = 'e2e-test-secret-com-no-minimo-32-caracteres';
   execSync('npx prisma migrate deploy', { /* ... */ });

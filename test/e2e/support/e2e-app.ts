@@ -7,6 +7,7 @@ import { execSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import request from 'supertest';
 import { configureApp } from '../../../src/app.setup';
+import { POSTGRES_TEST_IMAGE } from '../../support/postgres-image';
 
 /*
  * Infraestrutura compartilhada dos testes E2E.
@@ -29,7 +30,7 @@ export interface E2EContext {
  * com a MESMA configuração de produção (configureApp).
  */
 export async function startE2EApp(): Promise<E2EContext> {
-  const container: StartedPostgreSqlContainer = await new PostgreSqlContainer('postgres:16-alpine')
+  const container: StartedPostgreSqlContainer = await new PostgreSqlContainer(POSTGRES_TEST_IMAGE)
     .withDatabase('test_db')
     .withUsername('test')
     .withPassword('test')

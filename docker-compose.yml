@@ -1,6 +1,8 @@
+# Versões FIXAS (nunca :latest): o mesmo compose sobe o mesmo ambiente em qualquer máquina e em qualquer dia.
+# Atualizar = trocar a tag aqui num PR revisado. São as versões que já rodavam quando a fixação foi feita.
 services:
   postgres:
-    image: postgres:16
+    image: postgres:16.15
     container_name: taskflow-postgres
     ports:
       - "5432:5432"
@@ -12,7 +14,8 @@ services:
       - postgres_data:/var/lib/postgresql/data
 
   jaeger:
-    image: jaegertracing/all-in-one:latest
+    # Jaeger v1 está descontinuado; a migração para o v2 (jaegertracing/jaeger) é um passo à parte
+    image: jaegertracing/all-in-one:1.76.0
     container_name: taskflow-jaeger
     ports:
       - "16686:16686"   # UI
@@ -22,7 +25,7 @@ services:
       - COLLECTOR_OTLP_ENABLED=true
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.15.0
     container_name: taskflow-prometheus
     ports:
       - "9090:9090"
@@ -32,7 +35,7 @@ services:
       - '--config.file=/etc/prometheus/prometheus.yml'
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.2.3
     container_name: taskflow-grafana
     ports:
       - "3001:3000"
@@ -42,7 +45,7 @@ services:
       - grafana_data:/var/lib/grafana
 
   localstack:
-    image: localstack/localstack
+    image: localstack/localstack:2026.9.0
     container_name: taskflow-localstack
     ports:
       - "4566:4566"

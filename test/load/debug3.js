@@ -1,6 +1,6 @@
 /**
  * Depuração por bisseção do autocannon 8 (Módulo 10) — versão final, com log do que é enviado e recebido.
- * Candidato a remoção na limpeza de `test/load/` (é a origem do único warning de lint do projeto).
+ * Candidato a remoção na limpeza de `test/load/`.
  */
 const autocannon = require('autocannon');
 
@@ -22,7 +22,7 @@ async function main() {
     headers: {
       'Content-Type': 'application/json',
     },
-    setupRequest: (req, context) => {
+    setupRequest: (req) => {
       counter++;
       const body = JSON.stringify({
         email: `dbg3-${counter}-${Date.now()}@test.com`,
