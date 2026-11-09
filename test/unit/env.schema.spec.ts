@@ -31,6 +31,8 @@ describe('validateEnv', () => {
         DISABLE_THROTTLE: false,
         LOG_LEVEL: 'info',
         LOG_PRETTY: false,
+        SHUTDOWN_DRAIN_MS: 0,
+        SHUTDOWN_TIMEOUT_MS: 8000,
       });
     });
 
@@ -105,6 +107,13 @@ describe('validateEnv', () => {
     });
 
     // pino-pretty é devDependency: a imagem de produção não o tem, e a app quebraria no primeiro log
+    // Drenagem maior que o watchdog = a app seria SEMPRE morta no meio do encerramento
+    it('deve rejeitar SHUTDOWN_DRAIN_MS maior ou igual a SHUTDOWN_TIMEOUT_MS', () => {
+      expect(() => validateEnv({ ...minimalEnv, SHUTDOWN_DRAIN_MS: '8000', SHUTDOWN_TIMEOUT_MS: '8000' })).toThrow(
+        /SHUTDOWN_DRAIN_MS deve ser menor que SHUTDOWN_TIMEOUT_MS/,
+      );
+    });
+
     it('deve rejeitar LOG_PRETTY=true em produção', () => {
       expect(() => validateEnv({ ...minimalEnv, NODE_ENV: 'production', LOG_PRETTY: 'true' })).toThrow(
         /LOG_PRETTY=true não é permitido com NODE_ENV=production/,

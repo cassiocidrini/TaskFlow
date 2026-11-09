@@ -41,6 +41,12 @@ export const envSchema = z.object({
     .default('false')
     .transform((value) => value === 'true'),
 
+  // Graceful shutdown. DRAIN: quanto tempo a réplica continua atendendo com o readiness em 503 após o SIGTERM
+  // (0 em dev; ~5000 em Kubernetes, onde a remoção do balanceador é assíncrona). TIMEOUT: watchdog que força a saída
+  // se algum hook travar; fica abaixo dos 10 s do `docker stop` para a app sair sozinha, com log, antes do SIGKILL.
+  SHUTDOWN_DRAIN_MS: z.coerce.number().int().min(0).max(60_000).default(0),
+  SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(8_000),
+
   DISABLE_THROTTLE: z
     .enum(['true', 'false'])
     .default('false')
@@ -49,6 +55,10 @@ export const envSchema = z.object({
   // pino-pretty é devDependency: em produção a app quebraria no primeiro log. Melhor recusar o boot com a causa.
   message: 'LOG_PRETTY=true não é permitido com NODE_ENV=production (pino-pretty é dependência só de desenvolvimento)',
   path: ['LOG_PRETTY'],
+}).refine((env) => env.SHUTDOWN_DRAIN_MS < env.SHUTDOWN_TIMEOUT_MS, {
+  // Senão o watchdog mataria a app no meio da drenagem, sempre
+  message: 'SHUTDOWN_DRAIN_MS deve ser menor que SHUTDOWN_TIMEOUT_MS',
+  path: ['SHUTDOWN_DRAIN_MS'],
 });
 
 export type Env = z.infer<typeof envSchema>;

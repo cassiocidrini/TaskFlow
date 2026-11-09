@@ -5,6 +5,8 @@
 > **Onde vive no código:** [`src/tracing.ts`](../../src/tracing.ts) · [`src/env.ts`](../../src/env.ts) ·
 > [`src/main.ts`](../../src/main.ts) · [`src/common/logging/`](../../src/common/logging/logger.options.ts) ·
 > [`src/common/correlation/`](../../src/common/correlation/correlation-id.middleware.ts) ·
+> [`src/health/`](../../src/health/health.controller.ts) ·
+> [`src/common/lifecycle/`](../../src/common/lifecycle/telemetry-shutdown.ts) ·
 > [`docker-compose.yml`](../../docker-compose.yml) · [`prometheus.yml`](../../prometheus.yml)
 
 ---
@@ -221,6 +223,9 @@ const sdk = new NodeSDK({
 });
 
 sdk.start();
+
+// Sem handler de SIGTERM aqui: o encerramento do SDK é o último passo do graceful shutdown do Nest
+registerTelemetryShutdown(() => sdk.shutdown());
 ```
 
 O endpoint do Jaeger vem da variável **`OTEL_EXPORTER_OTLP_ENDPOINT`** (default `http://localhost:4318`), validada
@@ -290,6 +295,82 @@ histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_bucket[1
 
 ---
 
+## 🩺 Operação: health checks e graceful shutdown
+
+Observabilidade responde "o que está acontecendo". Um orquestrador (Kubernetes, ECS, um load balancer) precisa
+de duas respostas mais simples, a cada poucos segundos: **reinicio esta réplica?** e **mando tráfego para ela?**
+E, quando ela vai sair (deploy, *scale-in*), de um encerramento que não derrube requisições.
+
+### Liveness × readiness
+
+| Rota | Pergunta | Verifica | Falha significa |
+|---|---|---|---|
+| `GET /health/live` | O processo está vivo? | Nada externo | O orquestrador **reinicia** o container |
+| `GET /health/ready` | Posso receber tráfego agora? | `SELECT 1` no Postgres (até 1 s) + "não estou encerrando" | A réplica **sai do balanceador**, mas continua viva |
+
+**Por que o liveness não olha o banco:** com o Postgres fora do ar, todas as réplicas falhariam o liveness ao mesmo
+tempo e seriam reiniciadas em massa (*restart storm*). Reiniciar a API não conserta o banco, e o tráfego de boot
+de todas as réplicas juntas ainda pesa no banco quando ele voltar. O readiness tira as réplicas da rotação e
+as devolve sozinho quando o banco volta.
+
+Outras decisões ([`health.controller.ts`](../../src/health/health.controller.ts)):
+
+- **Públicos, sem JWT:** probe não autentica. O guard fica nos controllers de negócio, não global.
+- **`@SkipThrottle()`:** o probe não pode tomar 429.
+- **Fora do log de acesso:** um probe a cada 5 s daria ~17 mil linhas/dia por réplica sem informação. A falha
+  continua no log (warn do indicador + erro do terminus em JSON).
+- **Sem detalhe de infraestrutura na resposta:** o indicador próprio ([`database.health.ts`](../../src/health/database.health.ts))
+  devolve só `up`/`down`. O `PrismaHealthIndicator` pronto do terminus devolveria a mensagem crua do driver
+  (`connect ECONNREFUSED 10.0.3.7:5432`) numa rota pública (OWASP A05).
+- **Timeout de 1 s:** um banco que *trava* é pior que um que recusa. Sem timeout, o probe ficaria pendurado.
+
+```bash
+curl -s localhost:3000/health/live    # {"status":"ok","info":{},"error":{},"details":{}}
+curl -s localhost:3000/health/ready   # {"status":"ok","info":{"shutdown":{"status":"up"},"database":{"status":"up"}},…}
+```
+
+### A sequência do graceful shutdown
+
+`app.enableShutdownHooks(['SIGTERM', 'SIGINT'])` faz o Nest rodar `app.close()` no sinal. A ordem do `close()`
+está no código do Nest (`nest-application-context.js`): `onModuleDestroy` → `beforeApplicationShutdown` →
+fecha o HTTP → `onApplicationShutdown`. O TaskFlow encaixa cada passo onde ele faz sentido:
+
+```text
+SIGTERM
+ 1. onModuleDestroy            (nada)
+ 2. beforeApplicationShutdown  ShutdownState: draining = true → /health/ready = 503, respostas com Connection: close
+                               espera SHUTDOWN_DRAIN_MS, ainda atendendo normalmente
+ 3. HTTP fecha                 para de aceitar conexões e ESPERA as requisições em andamento
+ 4. onApplicationShutdown      Prisma desconecta → OpenTelemetry envia os spans finais
+    (watchdog: se tudo isso passar de SHUTDOWN_TIMEOUT_MS, saída forçada com código 1 e log do motivo)
+```
+
+| Peça | Por quê |
+|---|---|
+| **Drenagem** (`SHUTDOWN_DRAIN_MS`, 0 em dev; ~5000 em Kubernetes) | O SIGTERM e a remoção do pod dos endpoints do Service acontecem **em paralelo**. Sem a janela, requisições roteadas nesse meio-tempo encontram o servidor fechado. A opção `gracefulShutdownTimeoutMs` do terminus só espera; ela não faz o readiness falhar |
+| **`Connection: close` durante a drenagem** ([`draining-connection.middleware.ts`](../../src/health/draining-connection.middleware.ts)) | Proxies (ALB, nginx) mantêm um *pool* keep-alive com a réplica. O header faz o proxy descartar essas conexões em vez de reutilizá-las até o fechamento |
+| **Prisma no `onApplicationShutdown`** (antes: `onModuleDestroy`) | Ver o problema 14: desconectar antes de o HTTP fechar deixava uma conexão órfã |
+| **OTel pelo ciclo de vida do Nest** ([`telemetry-shutdown.ts`](../../src/common/lifecycle/telemetry-shutdown.ts)) | Antes, o `tracing.ts` tinha o próprio `process.on('SIGTERM')` com `process.exit(0)`: saía sem esperar o Nest. Agora o `tracing.ts` só **registra** `sdk.shutdown` num arquivo sem imports ([`telemetry-registry.ts`](../../src/common/lifecycle/telemetry-registry.ts)), para não carregar o `@nestjs/common` antes do `sdk.start()` |
+| **Watchdog** (`SHUTDOWN_TIMEOUT_MS`, 8 s) | Abaixo dos 10 s do `docker stop`: a app sai sozinha, com log do motivo, em vez de levar `SIGKILL` em silêncio. O schema exige `DRAIN < TIMEOUT` |
+
+### Prova: SIGTERM sob carga
+
+Script com 20 conexões keep-alive em `GET /projects` (rota que consulta o banco), SIGTERM aos 2 s, drenagem de
+2 s, polling do `/health/ready` a cada 100 ms. Cada requisição foi classificada como OK, **cortada** (`ECONNRESET`
+ou 5xx: estava em andamento e morreu) ou **recusada** (`ECONNREFUSED`: chegou depois de o servidor fechar).
+
+| Cliente | OK | Cortadas | Recusadas | Readiness |
+|---|---:|---:|---:|---|
+| **Como um balanceador** (para de mandar tráfego ao ver 503) | 2.872 | **0** | **0** | 200 → **503 no SIGTERM** (t=2,0 s) → fechado 2 s depois (t=4,1 s) |
+| Cru (ignora o readiness e insiste na réplica) | 5.874 | 17 | 1.908 | idem |
+
+Com um cliente que respeita o readiness, o encerramento é limpo. As 17 cortadas do cliente cru são conexões
+abertas no instante do `close()`, que o Node fecha como ociosas porque ainda não tinham uma requisição lida. É o
+tráfego que a drenagem existe para desviar, e nenhum balanceador o mandaria. O processo terminou com
+**exit 143** (SIGTERM tratado), com os logs na ordem `ShutdownState` → `Telemetry`.
+
+---
+
 ## ⚠️ Problemas encontrados e soluções
 
 Problemas **reais**, na ordem em que apareceram:
@@ -309,6 +390,8 @@ Problemas **reais**, na ordem em que apareceram:
 | 11 | Tipos do Prisma desatualizados depois de uma migração | No Prisma 7, o `migrate dev` **não** roda mais o `prisma generate` | Sempre `npx prisma migrate dev` → `npx prisma generate` |
 | 12 | No Linux, alvo `taskflow` `down` no Prometheus (`lookup host.docker.internal: no such host`) | Só o Docker Desktop cria `host.docker.internal`; o Docker Engine não | `extra_hosts: host.docker.internal:host-gateway` no serviço `prometheus` (ver item 2) |
 | 13 | Ao testar os logs, a API nova falhou com `EADDRINUSE :3000` (o erro, ao menos, já saiu em JSON) | Encerrar o `nest start --watch` com `pkill` deixou o processo filho `node dist/main` órfão, segurando a porta | Matar o órfão (`ss -ltnp \| grep 3000`). A causa de fundo, sinais de encerramento sem tratamento, é assunto do graceful shutdown |
+| 14 | O Prisma desconectava **antes** de o HTTP fechar | `$disconnect` no `onModuleDestroy`, o 1º passo do `app.close()` | Mover para o `onApplicationShutdown`. A hipótese inicial ("a requisição em andamento falha com 500") estava **errada**: o teste passou na ordem antiga, porque o Prisma reconecta sozinho. O efeito real, medido no `pg_stat_activity`: a query tardia **reabria** o pool e deixava **1 conexão** aberta até o processo morrer (0 na ordem nova). O teste `graceful-shutdown.spec.ts` falha na ordem antiga |
+| 15 | No primeiro teste de SIGTERM sob carga, 20 requisições "cortadas" | O script batia direto na réplica ignorando o readiness: conexões abertas no instante do `close()` levam reset | Medir com um cliente que se comporta como balanceador (0 cortadas). O `Connection: close` na drenagem cuida dos pools keep-alive de proxies |
 
 ---
 
@@ -344,11 +427,13 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 | `console.log` no `main.ts` | `Logger` do Nest | Primeiro passo rumo a logs estruturados |
 | `Logger` do Nest em texto colorido | JSON via `nestjs-pino`, com `correlationId`, `trace_id` e `span_id` | Logs pesquisáveis por campo e ligados ao trace; os call sites do `Logger` não mudaram |
 | `X-Correlation-Id` só listado no CORS (ninguém lia nem devolvia) | Middleware que valida, gera, devolve, expõe via CORS e propaga por `AsyncLocalStorage` | O cliente sempre tem um id para citar; o código lê o id sem recebê-lo por parâmetro |
+| Sem health check; `process.exit(0)` no SIGTERM do `tracing.ts` | `/health/live` + `/health/ready` e graceful shutdown pelo ciclo de vida do Nest | O orquestrador sabe quando reiniciar e quando tirar a réplica do balanceador; deploy sem cortar requisições |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
+- **Probes ainda sem consumidor:** não há manifesto Kubernetes nem `HEALTHCHECK` no Dockerfile. Os probes existem e foram testados, mas nada os chama automaticamente (Módulo 02 e a troca do Dockerfile para `node:24` não-root).
 - **Coleta de logs:** os logs saem em JSON no stdout, mas nenhum agregador os coleta localmente (ex.: Loki + Promtail no compose). Hoje se lê com `docker logs`/terminal.
 - **`correlationId` fora do HTTP:** um log emitido fora de uma requisição (boot, script) sai sem `correlationId`, e um evento gravado fora dela fica sem o campo no envelope.
 - **Dashboards como código:** o dashboard do Grafana foi importado manualmente. O ideal é provisioná-lo por arquivo (`grafana/provisioning/`), para que suba pronto com o `docker compose up`.
@@ -366,6 +451,8 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 - [x] Dashboard no Grafana com p50/p95/p99 e taxa de requisições
 - [x] Logs estruturados em JSON com `trace_id`, `span_id` e `correlationId`
 - [x] `X-Correlation-Id` validado, gerado, devolvido e propagado por `AsyncLocalStorage`
+- [x] Liveness e readiness separados, sem vazar detalhes de infraestrutura
+- [x] Graceful shutdown: drenagem com readiness 503, HTTP antes do banco, OTel por último, watchdog
 - [ ] Dashboards provisionados por arquivo
 
 ---

@@ -14,6 +14,7 @@ import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
+import { registerTelemetryShutdown } from './common/lifecycle/telemetry-registry';
 import { envSchema } from './config/env.schema';
 
 // Ainda não existe ConfigService (o Nest não subiu). Reaproveitamos o MESMO schema zod para validar só este
@@ -54,16 +55,6 @@ sdk.start();
 // console (e não o Logger do Nest): este código roda antes de o Nest existir
 console.log('[OTel] Tracing e métricas inicializados (service: taskflow)');
 
-/**
- * Encerramento: descarrega os spans pendentes antes de sair.
- *
- * Limitação conhecida: o `process.exit(0)` encerra o processo sem esperar o Nest fechar conexões (não há
- * `app.enableShutdownHooks()`). Um graceful shutdown completo encerraria o OTel em `onApplicationShutdown`.
- */
-process.on('SIGTERM', () => {
-  sdk
-    .shutdown()
-    .then(() => console.log('[OTel] Encerrado'))
-    .catch((err) => console.error('[OTel] Erro ao encerrar', err))
-    .finally(() => process.exit(0));
-});
+// Encerramento: SEM handler de sinal próprio. Quem encerra o SDK é o ciclo de vida do Nest
+// (`TelemetryShutdownHook`, último passo do graceful shutdown), depois de o HTTP fechar.
+registerTelemetryShutdown(() => sdk.shutdown());

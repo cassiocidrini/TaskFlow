@@ -25,8 +25,8 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
    CORS, Swagger fora de produção), API4 (`limit` ≤ 100, throttler).
 6. **Limitações conhecidas ficam documentadas ao lado do código, não escondidas.** As atuais (mantenha coerente com o
    README e `docs/modules/`): Strategy com `new` e `DeadlinePriorityStrategy` sem uso; dual-write sem outbox;
-   throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; sem health check nem graceful
-   shutdown; Dockerfile em `node:20` e como root. Ao corrigir uma, tire-a daqui no MESMO PR.
+   throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; probes `/health` sem consumidor
+   (sem manifesto Kubernetes nem `HEALTHCHECK`); Dockerfile em `node:20` e como root. Ao corrigir uma, tire-a daqui no MESMO PR.
 
 ## Swagger — como está montado
 

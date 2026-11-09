@@ -88,7 +88,7 @@ export function setupSwagger(app: INestApplication): void {
       .addTag('auth', 'Cadastro, login (emissão de JWT) e identificação do usuário')
       .addTag('projects', 'Projetos do usuário autenticado (cada projeto tem um dono)')
       .addTag('tasks', 'Tarefas event-sourced: criação, ciclo de vida, listagem e histórico de eventos')
-      .addTag('app', 'Rota raiz (smoke test)')
+      .addTag('app', 'Rota raiz (smoke test) e health checks para o orquestrador (liveness e readiness)')
       .build(),
   );
 

@@ -15,9 +15,9 @@ Escrever **testes de verdade**: não só o caminho feliz, mas as **propriedades*
 
 | Nível | Testes | Infraestrutura | O que prova |
 |---|---:|---|---|
-| **Unitários** | 137 | Nenhuma (mocks, ou nem isso) | Regras de domínio, handlers, autorização, ordem `save → publish` |
-| **Integração** | 24 | **PostgreSQL real** (Testcontainers) | Concorrência otimista, atomicidade, envelope de metadados, idempotência das projeções |
-| **E2E** | 35 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico com autor, paginação, `X-Correlation-Id` |
+| **Unitários** | 156 | Nenhuma (mocks, ou nem isso) | Regras de domínio, handlers, autorização, ordem `save → publish` |
+| **Integração** | 27 | **PostgreSQL real** (Testcontainers) | Concorrência otimista, atomicidade, envelope de metadados, idempotência das projeções, ordem do graceful shutdown |
+| **E2E** | 38 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico com autor, paginação, `X-Correlation-Id`, health checks |
 
 **Por que importa:** quase todo dev "escreve teste". Pouca gente testa uma *race condition* com 10 escritas
 simultâneas contra um banco real, ou prova que uma requisição não autorizada grava **zero** eventos. É a diferença
@@ -40,7 +40,7 @@ entre teste como cerimônia e teste como **garantia**.
 
 | | Unitário | Integração | E2E |
 |---|---|---|---|
-| Velocidade | ~3 s para os 137 | ~1 min | ~1,5 min |
+| Velocidade | ~3 s para os 156 | ~1 min | ~1,5 min |
 | Quando rodar | O tempo todo | Ao mexer em banco, Event Store, projeção | Ao mexer em controller, guard, módulo |
 | Pega | Regra errada, decisão errada | SQL, constraint, tipo de coluna, `ON CONFLICT` | Guard esquecido, módulo não importado, migração × código |
 
@@ -75,15 +75,17 @@ afterAll    → derruba o container
 test/
 ├── setup.ts                    # DISABLE_THROTTLE=true, NODE_ENV=test (antes de tudo)
 ├── setup-slow-suites.ts        # timeout de 60 s, só para integração e E2E
-├── unit/                       # 14 arquivos, 137 testes
+├── unit/                       # 15 arquivos, 156 testes
 ├── integration/
 │   ├── support/test-database.ts   # startTestDatabase(): Postgres + migrações
 │   ├── event-store.spec.ts        # 18 testes
+│   ├── graceful-shutdown.spec.ts  # 3 testes (ordem do app.close() com HTTP real, Módulo 01)
 │   └── projections.spec.ts        # 6 testes
 ├── e2e/
 │   ├── support/e2e-app.ts         # startE2EApp(), resetDatabase(), registerAndLogin(), eventually()
 │   ├── auth.e2e-spec.ts           # 12 testes
 │   ├── correlation.e2e-spec.ts    # 5 testes (X-Correlation-Id, Módulo 01)
+│   ├── health.e2e-spec.ts         # 3 testes (probes sem token, Módulo 01)
 │   └── tasks.e2e-spec.ts          # 18 testes
 └── load/                       # k6 e experimentos (NÃO são testes do Jest)
 ```
@@ -265,7 +267,7 @@ projeção: as respostas dos comandos são lidas na hora, porque esconder bugs a
 | Momento | Unitários | Integração | E2E |
 |---|---:|---:|---:|
 | Primeira versão deste módulo | 13 | 8 | 12 + 1 `todo` |
-| **Hoje** | **137** | **24** | **35** |
+| **Hoje** | **156** | **27** | **38** |
 
 A suíte completa (`npm test`, em sequência) leva cerca de 3 minutos numa máquina de desenvolvimento com 8 GB
 reservados ao Docker. No CI, as três suítes rodam em VMs separadas e em paralelo.

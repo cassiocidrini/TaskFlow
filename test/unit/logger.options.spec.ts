@@ -8,7 +8,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Options } from 'pino-http';
 import { runWithCorrelationId } from '../../src/common/correlation/correlation-context';
-import { accessLogLevel, buildLoggerOptions } from '../../src/common/logging/logger.options';
+import { accessLogLevel, buildLoggerOptions, isHealthCheck } from '../../src/common/logging/logger.options';
 
 function pinoHttpOptions(LOG_PRETTY = false): Options {
   return buildLoggerOptions({ LOG_LEVEL: 'info', LOG_PRETTY }).pinoHttp as Options;
@@ -48,6 +48,17 @@ describe('buildLoggerOptions', () => {
   it('deve emitir JSON por padrão e só usar o pino-pretty quando LOG_PRETTY=true', () => {
     expect(pinoHttpOptions(false).transport).toBeUndefined();
     expect(pinoHttpOptions(true).transport).toMatchObject({ target: 'pino-pretty' });
+  });
+});
+
+// Probes a cada poucos segundos não podem inundar o log de acesso
+describe('isHealthCheck', () => {
+  it.each(['/health/live', '/health/ready', '/health/ready?x=1', '/health'])('deve ignorar %s', (url) => {
+    expect(isHealthCheck(url)).toBe(true);
+  });
+
+  it.each(['/', '/healthy', '/projects/health', '/auth/me', undefined])('NÃO deve ignorar %s', (url) => {
+    expect(isHealthCheck(url)).toBe(false);
   });
 });
 
