@@ -2,6 +2,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
+import { CORRELATION_ID_HEADER, correlationIdMiddleware } from './common/correlation/correlation-id.middleware';
 import type { Env } from './config/env.schema';
 
 /**
@@ -14,6 +15,10 @@ import type { Env } from './config/env.schema';
 export function configureApp(app: INestApplication): void {
   const config = app.get<ConfigService<Env, true>>(ConfigService);
 
+  // PRIMEIRO middleware: o correlationId precisa existir antes de qualquer outro (inclusive do log de acesso).
+  // Os middlewares de módulo (o pino-http do nestjs-pino) só são montados no init/listen, então rodam depois deste.
+  app.use(correlationIdMiddleware);
+
   // ~15 headers de segurança numa linha: anti-clickjacking, HSTS, nosniff, CSP… (OWASP A05)
   app.use(helmet());
 
@@ -23,7 +28,9 @@ export function configureApp(app: INestApplication): void {
     origin: config.get('CORS_ORIGINS', { infer: true }),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
+    allowedHeaders: ['Content-Type', 'Authorization', CORRELATION_ID_HEADER],
+    // Sem isto, o JavaScript de um front em outra origem não consegue LER o header da resposta (só o envia)
+    exposedHeaders: [CORRELATION_ID_HEADER],
   });
 
   // Validação global de TODA entrada. whitelist + forbidNonWhitelisted = defesa contra mass assignment:
@@ -60,9 +67,22 @@ export function setupSwagger(app: INestApplication): void {
           '**Códigos de resposta:** `400` entrada inválida · `401` sem token ou token inválido · ' +
             '`404` recurso inexistente **ou de outro usuário** (a API não confirma a existência de recursos alheios) · ' +
             '`409` regra de negócio violada ou conflito de concorrência · `429` limite de requisições excedido.',
+          '',
+          '**Correlação:** toda resposta traz o header `X-Correlation-Id`. Envie o seu (até 64 caracteres: letras, ' +
+            'dígitos, `.`, `_`, `-`) para rastrear a chamada de ponta a ponta; ausente ou inválido, a API gera um UUID. ' +
+            'Cite esse id ao reportar um problema.',
         ].join('\n'),
       )
       .setVersion('1.0')
+      .addGlobalParameters({
+        in: 'header',
+        name: CORRELATION_ID_HEADER,
+        required: false,
+        description:
+          'Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; ' +
+          'se ausente ou inválido, a API gera um UUID.',
+        schema: { type: 'string', maxLength: 64, pattern: '^[A-Za-z0-9._-]{1,64}$' },
+      })
       // O cadeado aparece só nas rotas marcadas com @ApiBearerAuth(): register e login ficam públicos
       .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' })
       .addTag('auth', 'Cadastro, login (emissão de JWT) e identificação do usuário')

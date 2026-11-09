@@ -3,7 +3,9 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { CqrsModule } from '@nestjs/cqrs';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { LoggerModule } from 'nestjs-pino';
 import { AppController } from './app.controller';
+import { buildLoggerOptions } from './common/logging/logger.options';
 import { AppService } from './app.service';
 import { validateEnv, type Env } from './config/env.schema';
 import { PrismaModule } from './prisma/prisma.module';
@@ -20,6 +22,9 @@ import { ProjectsModule } from './modules/projects/projects.module';
  *   testes E2E: o `AppModule` precisa ser carregado DEPOIS de o teste definir o ambiente (`startE2EApp`).
  * - **Rate limit global (OWASP A04):** 100 req/min por IP em todas as rotas, com limites mais rígidos por rota
  *   onde há risco de força bruta (`@Throttle` no login e no cadastro).
+ * - **Logs JSON (`nestjs-pino`):** um log de acesso por requisição e os `Logger` do Nest encaminhados ao pino
+ *   (`app.useLogger` no `main.ts`), todos com `correlationId`, `trace_id` e `span_id`. Configuração em
+ *   `common/logging/logger.options.ts`.
  * - **Ordem dos imports = ordem de dependência** (Auth → Projects → Tasks), só para leitura: o Nest resolve
  *   qualquer ordem.
  */
@@ -29,6 +34,14 @@ import { ProjectsModule } from './modules/projects/projects.module';
       isGlobal: true,
       cache: true,
       validate: validateEnv,
+    }),
+    LoggerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<Env, true>) =>
+        buildLoggerOptions({
+          LOG_LEVEL: config.get('LOG_LEVEL', { infer: true }),
+          LOG_PRETTY: config.get('LOG_PRETTY', { infer: true }),
+        }),
     }),
     PrismaModule,
     CqrsModule.forRoot(),

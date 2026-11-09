@@ -40,6 +40,8 @@ export async function startE2EApp(): Promise<E2EContext> {
   process.env.DATABASE_URL = connectionString;
   process.env.JWT_SECRET = 'e2e-test-secret-com-no-minimo-32-caracteres';
   process.env.JWT_EXPIRES_IN = '1h';
+  // Uma linha de log de acesso por requisição só polui a saída do Jest; o comportamento HTTP testado é o mesmo
+  process.env.LOG_LEVEL = 'silent';
 
   execSync('npx prisma migrate deploy', {
     env: { ...process.env, DATABASE_URL: connectionString },
