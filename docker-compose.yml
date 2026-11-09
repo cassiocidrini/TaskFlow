@@ -40,6 +40,11 @@ services:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+    # A API roda no host (npm run dev) e o prometheus.yml coleta de host.docker.internal:9464.
+    # O Docker Desktop (macOS/Windows) cria esse nome sozinho; o Docker Engine do Linux não.
+    # `host-gateway` é o IP do host na rede bridge: o mesmo prometheus.yml funciona nas três plataformas.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   grafana:
     image: grafana/grafana:13.2.3

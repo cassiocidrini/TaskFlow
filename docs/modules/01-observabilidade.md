@@ -122,8 +122,20 @@ scrape_configs:
 docker compose up -d postgres jaeger prometheus grafana
 ```
 
-> `host.docker.internal` é o nome que o Docker Desktop dá à máquina hospedeira. É assim que um container
-> enxerga a app rodando **fora** do Docker (`npm run start:dev`).
+> `host.docker.internal` é o nome da máquina hospedeira visto de dentro do container. É assim que o
+> Prometheus enxerga a app rodando **fora** do Docker (`npm run start:dev`).
+>
+> O Docker Desktop (macOS/Windows) cria esse nome sozinho; o **Docker Engine do Linux não**. Sem ajuda, o
+> alvo fica `down` com `lookup host.docker.internal: no such host`. Por isso o serviço `prometheus` declara:
+>
+> ```yaml
+> extra_hosts:
+>   - "host.docker.internal:host-gateway"   # host-gateway = IP do host na rede bridge do Docker
+> ```
+>
+> Alternativas descartadas: `network_mode: host` (não funciona igual no Docker Desktop e tira o container da
+> rede do compose) e IP fixo como `172.17.0.1` (depende da sub-rede configurada em cada máquina).
+> Com firewall ativo no Linux (`ufw`), pode ser preciso liberar a porta `9464` vinda da bridge do Docker.
 
 ### 3. `src/tracing.ts`
 
