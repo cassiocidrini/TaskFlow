@@ -1,0 +1,16 @@
+# Provider de dashboards: carrega todo JSON de /etc/grafana/dashboards (montado de grafana/dashboards/).
+#
+# `allowUiUpdates: false`: o arquivo é a fonte da verdade. Uma edição feita na UI não pode ser salva por cima;
+# para mudar o dashboard, exporte o JSON, atualize o arquivo e abra um PR (o teste
+# test/unit/grafana-dashboard.spec.ts valida o JSON no CI).
+apiVersion: 1
+
+providers:
+  - name: taskflow
+    folder: TaskFlow
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30 # recarrega o JSON alterado sem reiniciar o Grafana
+    options:
+      path: /etc/grafana/dashboards

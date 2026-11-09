@@ -7,6 +7,8 @@
 > [`src/common/correlation/`](../../src/common/correlation/correlation-id.middleware.ts) ·
 > [`src/health/`](../../src/health/health.controller.ts) ·
 > [`src/common/lifecycle/`](../../src/common/lifecycle/telemetry-shutdown.ts) ·
+> [`src/common/telemetry/`](../../src/common/telemetry/route-telemetry.guard.ts) ·
+> [`grafana/`](../../grafana/dashboards/taskflow-api.json) ·
 > [`docker-compose.yml`](../../docker-compose.yml) · [`prometheus.yml`](../../prometheus.yml)
 
 ---
@@ -37,7 +39,8 @@ flowchart LR
     APP -->|"OTLP/HTTP :4318<br/>(traces)"| J[Jaeger :16686]
     APP -->|"expõe /metrics<br/>na porta :9464"| M(( ))
     P[Prometheus :9090] -->|"scrape a cada 5s"| M
-    G[Grafana :3001] -->|consulta PromQL| P
+    G["Grafana :3001<br/>(provisionado por arquivo)"] -->|consulta PromQL| P
+    G -.->|traces| J
     APP -->|"logs JSON no stdout<br/>(correlationId + trace_id)"| L[[stdout]]
 ```
 
@@ -46,6 +49,7 @@ flowchart LR
 3. O **`OTLPTraceExporter`** envia os traces ao Jaeger via OTLP/HTTP.
 4. O **`PrometheusExporter`** expõe as métricas em `http://localhost:9464/metrics`. Esse servidor é **do OTel**, e não a porta 3000 da API.
 5. O **Prometheus** coleta (*scrape*) esse endpoint a cada 5 s, e o **Grafana** monta os dashboards a partir dele.
+   Datasources e dashboard vêm de arquivos versionados em [`grafana/`](../../grafana/): o Grafana sobe pronto.
 6. Cada linha de log sai em **JSON no stdout** (`nestjs-pino`), com `correlationId`, `trace_id` e `span_id`. Quem
    coleta o stdout é a plataforma (Docker, Kubernetes, CloudWatch), não a aplicação (12-Factor, fator XI).
 
@@ -171,7 +175,7 @@ Os serviços estão no [`docker-compose.yml`](../../docker-compose.yml):
 |---|---|---|
 | `jaeger` (all-in-one) | `16686` UI · `4318` OTLP/HTTP · `4317` OTLP/gRPC | `COLLECTOR_OTLP_ENABLED=true` |
 | `prometheus` | `9090` | Lê o [`prometheus.yml`](../../prometheus.yml) |
-| `grafana` | `3001` → 3000 | Porta 3001 para não colidir com a API · `admin` / `admin` |
+| `grafana` | `3001` → 3000 | Porta 3001 para não colidir com a API · `admin` / `admin` · datasources e dashboard provisionados de `grafana/` |
 
 ```yaml
 # prometheus.yml — o Prometheus roda num container e "olha para fora" para achar a app
@@ -285,13 +289,98 @@ trace: no Jaeger, *Search* → *Tags* `correlation.id=chamado-1234`.
 | Logs | terminal do `npm run start:dev` | Uma linha JSON por evento; `correlationId` e `trace_id` em cada uma |
 | Métricas cruas | http://localhost:9464/metrics | O texto que o Prometheus coleta |
 | Prometheus | http://localhost:9090/targets | Target `taskflow` deve estar **UP** |
-| Grafana | http://localhost:3001 (`admin` / `admin`) | Dashboard com p50/p95/p99 |
+| Grafana | http://localhost:3001 (`admin` / `admin`) | *Dashboards* → pasta **TaskFlow** → **TaskFlow — API** (provisionado) |
 
 Consulta PromQL do **p95** usada no painel de latência:
 
 ```promql
 histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_bucket[1m])))
 ```
+
+---
+
+## 📈 Dashboard como código
+
+O primeiro dashboard deste módulo foi importado **à mão** (problema 10), e ficou na máquina onde foi importado: o
+Grafana de um clone novo subia vazio, sem datasource. Agora tudo vem de arquivos versionados:
+
+```text
+grafana/
+├── provisioning/
+│   ├── datasources/datasources.yml   # Prometheus + Jaeger, com uid FIXO
+│   └── dashboards/dashboards.yml     # provider: carrega grafana/dashboards/*.json
+└── dashboards/taskflow-api.json      # o dashboard "TaskFlow — API"
+```
+
+| Decisão | Por quê |
+|---|---|
+| `uid` fixo nos datasources (`taskflow-prometheus`) | O JSON do dashboard referencia o datasource pelo uid. Gerado pelo Grafana, seria diferente em cada ambiente e o JSON versionado quebraria |
+| `allowUiUpdates: false` e `editable: false` | O arquivo é a fonte da verdade: mudança de dashboard passa por PR, revisada como código |
+| Montar só `provisioning/datasources` e `provisioning/dashboards` | Montar a pasta `provisioning/` inteira esconde as subpastas vazias da imagem (`plugins/`, `alerting/`), e o Grafana registra erro no boot |
+| Teste do JSON no CI ([`grafana-dashboard.spec.ts`](../../test/unit/grafana-dashboard.spec.ts)) | Garante que toda consulta usa uma métrica que a API expõe e todo painel aponta para um datasource provisionado. O "No data" do problema 8 vira teste vermelho, e não descoberta ao abrir o painel |
+
+### Os painéis (12)
+
+| Linha | Painéis | Para responder |
+|---|---|---|
+| **Tráfego HTTP (RED)** | req/s por rota · respostas por status · latência p50/p95/p99 · p95 por rota · % de 5xx | Quanto, quantos erros, quão rápido, e **qual endpoint** |
+| **Banco** | p95 das queries por operação · conexões do pool (em uso × ociosas × máximo) · requisições esperando conexão | O gargalo é o banco? |
+| **Runtime Node** | event loop delay p99 · utilização do event loop · heap usado · tempo em GC | O gargalo é o próprio processo (CPU, memória)? |
+
+As consultas usam `$__rate_interval`, e não `[1m]` fixo. O Grafana ajusta a janela ao zoom e ao intervalo de
+coleta (`timeInterval: 5s` no datasource).
+
+### Antes do dashboard: higiene das métricas
+
+Ao levantar as métricas para os painéis, apareceram dois problemas que tornariam qualquer dashboard enganoso:
+
+1. **Probes contados como tráfego** (problema 16). Das 61 requisições `200` medidas, 31 eram `/health/*`. Os
+   probes respondem em ~1 ms, a cada 5 s, por réplica: puxam o p50 para baixo e inflam o req/s. Agora o
+   `ignoreIncomingRequestHook` do `instrumentation-http` ([`tracing.ts`](../../src/tracing.ts)) os deixa fora dos
+   traces e das métricas. O predicado está em [`health-paths.ts`](../../src/health/health-paths.ts), um arquivo
+   sem imports, porque o `tracing.ts` não pode carregar bibliotecas antes do `sdk.start()`.
+2. **Sem o label `http_route`** (problema 17). A métrica e o span raiz não sabiam a rota (`GET` em vez de
+   `GET /projects/:projectId`), então não dava para ver **qual endpoint** estava lento.
+
+**Por que não havia rota, e a correção.** O `instrumentation-http` grava a rota que encontra no `rpcMetadata` do
+contexto OTel, e quem a preenche é o `instrumentation-express`. Com Express 5 + Nest, ela ficava vazia. A
+correção é o [`RouteTelemetryGuard`](../../src/common/telemetry/route-telemetry.guard.ts): grava
+`req.route.path` (o **padrão** da rota, nunca a URL) no `rpcMetadata` e devolve `true` sempre.
+
+| Onde preencher a rota | Problema |
+|---|---|
+| Middleware | Roda **antes** do roteamento: ainda não existe rota |
+| Interceptor (testado num experimento) | Roda **depois** dos guards: um 401 do JWT ou um 429 do throttler saía **sem rota**, justamente os erros que mais interessa ver por endpoint |
+| **Primeiro `APP_GUARD`** ✅ | O ponto mais cedo com a rota resolvida. Não é controle de acesso (sempre `true`) |
+
+Resultado na métrica, com a correção:
+
+| Requisição | `http_route` |
+|---|---|
+| `GET /` | `/` |
+| `GET /projects/3f2a…` **sem token** (401 do JWT) | `/projects/:projectId` |
+| `POST /auth/login` com senha errada (401) | `/auth/login` |
+| Rota inexistente (404) | *(ausente, como pede a semântica do OTel)* |
+| `/health/*` | *(fora da métrica)* |
+
+**Cardinalidade:** cada combinação de labels é uma série no Prometheus. `http_route` tem ~15 valores; a URL teria
+um por UUID. O teste do dashboard também recusa agrupamento por `url`, `user_id` ou `correlation_id`.
+
+### O que o dashboard mostrou na primeira carga
+
+`autocannon` por 25 s em `GET /projects` (autenticado e sem token) e `GET /`, com `DISABLE_THROTTLE=true`:
+
+| Sinal | Pico |
+|---|---|
+| req/s em `/projects` · em `/` | ~1.290 · ~990 |
+| Latência p95 em `/projects` · em `/` | 9 ms · 5 ms |
+| Conexões do pool em uso | **2 de 10**, com **0** requisições esperando conexão |
+| Utilização do event loop | **100%** |
+
+A leitura que o dashboard permite de relance: com essa carga, o limite **não é o banco** (pool folgado, nenhuma
+espera), é a **CPU do processo único**. O próximo passo de capacidade seria escalar horizontalmente (mais
+réplicas) ou usar `cluster`, e não aumentar o pool (ver [Módulo 10](10-performance-load-testing.md) e
+[Módulo 11](11-nodejs-internals.md)).
 
 ---
 
@@ -392,6 +481,9 @@ Problemas **reais**, na ordem em que apareceram:
 | 13 | Ao testar os logs, a API nova falhou com `EADDRINUSE :3000` (o erro, ao menos, já saiu em JSON) | Encerrar o `nest start --watch` com `pkill` deixou o processo filho `node dist/main` órfão, segurando a porta | Matar o órfão (`ss -ltnp \| grep 3000`). A causa de fundo, sinais de encerramento sem tratamento, é assunto do graceful shutdown |
 | 14 | O Prisma desconectava **antes** de o HTTP fechar | `$disconnect` no `onModuleDestroy`, o 1º passo do `app.close()` | Mover para o `onApplicationShutdown`. A hipótese inicial ("a requisição em andamento falha com 500") estava **errada**: o teste passou na ordem antiga, porque o Prisma reconecta sozinho. O efeito real, medido no `pg_stat_activity`: a query tardia **reabria** o pool e deixava **1 conexão** aberta até o processo morrer (0 na ordem nova). O teste `graceful-shutdown.spec.ts` falha na ordem antiga |
 | 15 | No primeiro teste de SIGTERM sob carga, 20 requisições "cortadas" | O script batia direto na réplica ignorando o readiness: conexões abertas no instante do `close()` levam reset | Medir com um cliente que se comporta como balanceador (0 cortadas). O `Connection: close` na drenagem cuida dos pools keep-alive de proxies |
+| 16 | Metade das requisições "200" da métrica eram probes `/health/*` | A instrumentação HTTP mede toda requisição, inclusive as do orquestrador | `ignoreIncomingRequestHook` para `/health/*` no `tracing.ts` |
+| 17 | Métrica sem `http_route` e span raiz chamado só `GET` | Com Express 5 + Nest, o `instrumentation-express` não preenche a rota no `rpcMetadata` | `RouteTelemetryGuard` como primeiro guard global. Um interceptor foi testado antes e descartado: perdia a rota dos 401/429 |
+| 18 | Grafana registrando erro no boot após o provisionamento | Montar `provisioning/` inteira escondeu as pastas vazias `plugins/` e `alerting/` da imagem | Montar só as subpastas usadas |
 
 ---
 
@@ -427,6 +519,8 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 | `console.log` no `main.ts` | `Logger` do Nest | Primeiro passo rumo a logs estruturados |
 | `Logger` do Nest em texto colorido | JSON via `nestjs-pino`, com `correlationId`, `trace_id` e `span_id` | Logs pesquisáveis por campo e ligados ao trace; os call sites do `Logger` não mudaram |
 | `X-Correlation-Id` só listado no CORS (ninguém lia nem devolvia) | Middleware que valida, gera, devolve, expõe via CORS e propaga por `AsyncLocalStorage` | O cliente sempre tem um id para citar; o código lê o id sem recebê-lo por parâmetro |
+| Dashboard importado à mão (só existia na máquina onde foi importado) | Datasources e dashboard provisionados de `grafana/`, com teste no CI | Um ambiente novo nasce observável; mudança de dashboard é PR |
+| Métrica HTTP sem rota e contando probes | `http_route` em toda rota conhecida (inclusive 401/429); probes fora | Dá para ver qual endpoint degrada, sem a média diluída pelos probes |
 | Sem health check; `process.exit(0)` no SIGTERM do `tracing.ts` | `/health/live` + `/health/ready` e graceful shutdown pelo ciclo de vida do Nest | O orquestrador sabe quando reiniciar e quando tirar a réplica do balanceador; deploy sem cortar requisições |
 
 ---
@@ -436,7 +530,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 - **Probes ainda sem consumidor:** não há manifesto Kubernetes nem `HEALTHCHECK` no Dockerfile. Os probes existem e foram testados, mas nada os chama automaticamente (Módulo 02 e a troca do Dockerfile para `node:24` não-root).
 - **Coleta de logs:** os logs saem em JSON no stdout, mas nenhum agregador os coleta localmente (ex.: Loki + Promtail no compose). Hoje se lê com `docker logs`/terminal.
 - **`correlationId` fora do HTTP:** um log emitido fora de uma requisição (boot, script) sai sem `correlationId`, e um evento gravado fora dela fica sem o campo no envelope.
-- **Dashboards como código:** o dashboard do Grafana foi importado manualmente. O ideal é provisioná-lo por arquivo (`grafana/provisioning/`), para que suba pronto com o `docker compose up`.
+- **Sem alertas:** o dashboard mostra, mas ninguém é avisado. O próximo passo são regras de alerta (ex.: 5xx > 1% por 5 min, p95 acima do SLO) provisionadas também por arquivo.
 - **Jaeger v1:** as imagens do compose têm versão fixa (nunca `:latest`, para o ambiente de amanhã ser igual ao de hoje), mas o `jaegertracing/all-in-one:1.76.0` é a última linha do **v1**, já descontinuado. O próximo passo é migrar para o Jaeger v2 (`jaegertracing/jaeger`), que é construído sobre o OpenTelemetry Collector.
 - **Amostragem (*sampling*):** hoje 100% das requisições geram trace. Em produção com alto volume, amostra-se (ex.: 10%, ou 100% só das que têm erro) para controlar custo.
 
@@ -453,7 +547,9 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 - [x] `X-Correlation-Id` validado, gerado, devolvido e propagado por `AsyncLocalStorage`
 - [x] Liveness e readiness separados, sem vazar detalhes de infraestrutura
 - [x] Graceful shutdown: drenagem com readiness 503, HTTP antes do banco, OTel por último, watchdog
-- [ ] Dashboards provisionados por arquivo
+- [x] Datasources e dashboard provisionados por arquivo, validados no CI
+- [x] `http_route` nas métricas e probes fora da telemetria
+- [ ] Alertas
 
 ---
 

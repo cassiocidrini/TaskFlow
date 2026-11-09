@@ -15,6 +15,7 @@ import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
 import { resourceFromAttributes } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { registerTelemetryShutdown } from './common/lifecycle/telemetry-registry';
+import { isHealthCheck } from './health/health-paths';
 import { envSchema } from './config/env.schema';
 
 // Ainda não existe ConfigService (o Nest não subiu). Reaproveitamos o MESMO schema zod para validar só este
@@ -47,8 +48,13 @@ const sdk = new NodeSDK({
   resource,
   traceExporter,
   metricReader: metricExporter,
-  // Spans automáticos de HTTP, Express e PostgreSQL, sem alterar o código da aplicação
-  instrumentations: [getNodeAutoInstrumentations()],
+  // Spans automáticos de HTTP, Express e PostgreSQL, sem alterar o código da aplicação.
+  // Probes (/health/*) ficam fora: sem span e sem métrica HTTP, para não distorcer latência e req/s.
+  instrumentations: [
+    getNodeAutoInstrumentations({
+      '@opentelemetry/instrumentation-http': { ignoreIncomingRequestHook: (req) => isHealthCheck(req.url) },
+    }),
+  ],
 });
 
 sdk.start();

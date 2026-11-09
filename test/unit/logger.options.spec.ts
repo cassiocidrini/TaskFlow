@@ -8,7 +8,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Options } from 'pino-http';
 import { runWithCorrelationId } from '../../src/common/correlation/correlation-context';
-import { accessLogLevel, buildLoggerOptions, isHealthCheck } from '../../src/common/logging/logger.options';
+import { accessLogLevel, buildLoggerOptions } from '../../src/common/logging/logger.options';
+import { isHealthCheck } from '../../src/health/health-paths';
 
 function pinoHttpOptions(LOG_PRETTY = false): Options {
   return buildLoggerOptions({ LOG_LEVEL: 'info', LOG_PRETTY }).pinoHttp as Options;

@@ -80,6 +80,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `modules/projects/` | CRUD de projetos + `assertOwner` | Ponto único de autorização por projeto |
 | `common/dto/pagination.dto.ts` | Paginação por cursor (`limit ≤ 100`) | Reusar em toda listagem |
 | `common/correlation/` | `X-Correlation-Id` (1º middleware) + `AsyncLocalStorage` | Ler o id com `currentCorrelationId()`, nunca de parâmetro ou header |
+| `common/telemetry/route-telemetry.guard.ts` | Preenche `http.route` (span e métrica); **1º `APP_GUARD`** | Não é controle de acesso (sempre `true`); grava o padrão da rota, nunca a URL |
 | `health/` | `/health/live`, `/health/ready`, `ShutdownState` (drenagem) | Liveness **nunca** consulta dependências; readiness não expõe detalhe de infraestrutura |
 | `common/lifecycle/` | Encerramento do OTel pelo ciclo de vida do Nest | `telemetry-registry.ts` não pode ter imports (é carregado pelo `tracing.ts`, antes de tudo) |
 | `common/logging/logger.options.ts` | Opções do `nestjs-pino` (JSON, serializers, nível por status) | Serializers são **allowlist**: não adicione headers ao log |
@@ -88,6 +89,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 
 | Caminho | Responsabilidade | Regra |
 |---|---|---|
+| `grafana/` | Datasources e dashboard **provisionados** (montados no compose) | Mudança de dashboard = editar o JSON + PR; métrica nova no painel entra em `KNOWN_METRICS` de `test/unit/grafana-dashboard.spec.ts`; nunca agrupar por label de alta cardinalidade |
 | `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4) | Script novo de dev entra aqui, **nunca** em `src/` |
 | `load/k6/`, `load/autocannon/` | Testes de carga da API (Módulo 10) | Medem a API rodando; não são testes do Jest |
 | `labs/node-internals/` | Experimentos do runtime (Módulo 11) | Arquivos gerados (`*.txt`, ~100 MB) são ignorados pelo Git |
@@ -104,8 +106,8 @@ import './env';      // 1º: carrega .env
 import './tracing';  // 2º: OpenTelemetry ANTES de http/express/pg serem carregados
 ```
 
-O `tracing.ts` também só pode importar arquivos sem dependências de biblioteca (hoje: `config/env.schema.ts` e
-`common/lifecycle/telemetry-registry.ts`). Importar algo que puxe o `@nestjs/common` faria o Nest carregar antes do
+O `tracing.ts` também só pode importar arquivos sem dependências de biblioteca (hoje: `config/env.schema.ts`,
+`common/lifecycle/telemetry-registry.ts` e `health/health-paths.ts`). Importar algo que puxe o `@nestjs/common` faria o Nest carregar antes do
 `sdk.start()`.
 
 ---
@@ -189,7 +191,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · Transactional Outbox / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · dashboards do Grafana provisionados · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · Transactional Outbox / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

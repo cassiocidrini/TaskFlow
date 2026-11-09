@@ -24,8 +24,8 @@ teste que a comprova; o que **não** está implementado aparece em [Limitações
 | **Projeções idempotentes** | `INSERT … ON CONFLICT DO NOTHING` e `UPDATE … SET`: entrega duplicada, 5 entregas simultâneas e replay completo resultam no mesmo estado | [`projections.spec.ts`](test/integration/projections.spec.ts) |
 | **Health checks e graceful shutdown** | `/health/live` × `/health/ready`; no SIGTERM, readiness 503 e drenagem → HTTP fecha esperando as requisições → banco → telemetria. Sob carga: 0 requisições cortadas | [`health/`](src/health/health.controller.ts) |
 | **Fail-fast de configuração** | Variáveis de ambiente validadas com `zod` no boot: configuração inválida impede a app de subir | [`env.schema.ts`](src/config/env.schema.ts) |
-| **Testes com infraestrutura real** | 156 unitários · 27 de integração e 38 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
-| **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas p50/p95/p99); logs JSON com `correlationId` e `trace_id` | [`tracing.ts`](src/tracing.ts) · [`logger.options.ts`](src/common/logging/logger.options.ts) |
+| **Testes com infraestrutura real** | 166 unitários · 27 de integração e 38 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
+| **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas com `http_route`, sem os probes); Grafana **provisionado** com dashboard RED + banco + event loop; logs JSON com `correlationId` e `trace_id` | [`tracing.ts`](src/tracing.ts) · [`grafana/`](grafana/dashboards/taskflow-api.json) |
 | **IaC** | Terraform (S3, SQS, SNS, IAM de menor privilégio) com backend remoto, sobre LocalStack | [`terraform/`](terraform/) |
 
 ---
@@ -155,7 +155,7 @@ curl -s $API/projects/$PROJECT/tasks/$TASK/history -H "$AUTH" | jq
 | Jaeger (traces) | http://localhost:16686 | — |
 | Métricas (exporter OTel) | http://localhost:9464/metrics | — |
 | Prometheus | http://localhost:9090 | — |
-| Grafana | http://localhost:3001 | `admin` / `admin` |
+| Grafana | http://localhost:3001 | `admin` / `admin` · dashboard **TaskFlow — API** já provisionado |
 | LocalStack (AWS) | http://localhost:4566 | `test` / `test` |
 
 ### Comandos do dia a dia
@@ -197,7 +197,7 @@ de outro usuário** · `409` regra de negócio violada ou conflito de concorrên
 
 | Suíte | Qtd. | Infraestrutura | O que prova |
 |---|---:|---|---|
-| **Unitários** | 156 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
+| **Unitários** | 166 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
 | **Integração** | 27 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade do `appendMany`, envelope de metadados, idempotência das projeções, ordem do graceful shutdown |
 | **E2E** | 38 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico com autor, paginação, consistência eventual, `X-Correlation-Id`, health checks |
 
@@ -240,8 +240,9 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 - **Dual-write entre Event Store e EventBus:** se o processo cair entre gravar e publicar, a projeção não é atualizada. Próximo passo: *Transactional Outbox* + comando de **replay** das projeções.
 - **EventBus em memória:** entrega em ordem dentro de um processo. Com um broker externo (SQS/SNS), as projeções precisariam guardar a versão do agregado para descartar eventos fora de ordem.
 - **Logs:** JSON no stdout com `correlationId` e `trace_id`, mas sem agregador local (Loki).
+- **Sem alertas:** o dashboard provisionado mostra os sinais, mas nenhuma regra de alerta avisa quando o 5xx ou o p95 passam do limite.
 - **Eventos antigos sem autor:** eventos gravados antes do envelope de metadados aparecem no histórico com `actorId: null`; o autor não é inferido. O metadata ainda não chega ao `EventBus` nem às projeções.
-- **Dockerfile:** usa `node:20` (o projeto exige 24), não roda como usuário não-root e não declara `HEALTHCHECK` (os probes `/health` existem, mas nenhum orquestrador os consome ainda). Dashboards do Grafana ainda não são provisionados por arquivo.
+- **Dockerfile:** usa `node:20` (o projeto exige 24), não roda como usuário não-root e não declara `HEALTHCHECK` (os probes `/health` existem, mas nenhum orquestrador os consome ainda).
 - **Rate limit em memória:** não é compartilhado entre réplicas (em produção, usaria Redis).
 - **Terraform sem lock do state:** o backend S3 não tem `use_lockfile`; dois `apply` simultâneos poderiam corromper o state.
 - **Strategy de prioridade incompleto:** a estratégia é instanciada no handler (não injetada) e a `DeadlinePriorityStrategy` não é usada.
@@ -257,6 +258,7 @@ src/
 │   ├── dto/                # paginação por cursor
 │   ├── correlation/        # X-Correlation-Id + AsyncLocalStorage
 │   ├── lifecycle/          # encerramento do OpenTelemetry no graceful shutdown
+│   ├── telemetry/          # http.route nas métricas e spans (RouteTelemetryGuard)
 │   └── logging/            # opções do nestjs-pino (logs JSON)
 ├── events/                 # EventStoreService (append atômico, concorrência otimista)
 ├── health/                 # /health/live, /health/ready, drenagem do graceful shutdown
@@ -275,6 +277,7 @@ src/
 └── main.ts
 test/                       # unit/ · integration/ · e2e/ — a pirâmide de testes (Jest)
 terraform/                  # IaC (S3, SQS, SNS, IAM)
+grafana/                    # datasources e dashboard provisionados (dashboard como código)
 
 # Fora do produto: não entram no build nem na imagem de produção
 scripts/                    # ferramentas de dev: list-events.ts, dynamo/ (lab do Módulo 4)
