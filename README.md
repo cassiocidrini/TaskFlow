@@ -155,7 +155,7 @@ curl -s $API/projects/$PROJECT/tasks/$TASK/history -H "$AUTH" | jq
 | Jaeger (traces) | http://localhost:16686 | — |
 | Métricas (exporter OTel) | http://localhost:9464/metrics | — |
 | Prometheus | http://localhost:9090 | — |
-| Grafana | http://localhost:3001 | `admin` / `admin` · dashboard **TaskFlow — API** já provisionado |
+| Grafana | http://localhost:3001 | `admin` / `admin` · dashboard **TaskFlow API** já provisionado |
 | LocalStack (AWS) | http://localhost:4566 | `test` / `test` |
 
 ### Comandos do dia a dia

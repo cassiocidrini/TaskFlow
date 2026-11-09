@@ -47,11 +47,15 @@ const datasourcesYaml = readFileSync(join(ROOT, 'provisioning', 'datasources', '
 const providedUids = new Set([...datasourcesYaml.matchAll(/^\s+uid:\s*(\S+)/gm)].map((m) => m[1]));
 
 /**
- * Nomes de métrica numa expressão PromQL. Remove antes os seletores `{...}` e os agrupamentos `by (...)`, onde só há
- * nomes de LABEL (que têm os mesmos prefixos: `http_route`, `db_operation_name`).
+ * Nomes de métrica numa expressão PromQL. Remove antes os seletores `{...}`, os agrupamentos `by (...)` e as strings
+ * entre aspas (argumentos do `label_replace`), onde só há nomes de LABEL, que têm os mesmos prefixos
+ * (`http_route`, `db_operation_name`).
  */
 function metricsIn(expr: string): string[] {
-  const withoutLabels = expr.replace(/\{[^}]*\}/g, '').replace(/\bby\s*\([^)]*\)/g, '');
+  const withoutLabels = expr
+    .replace(/\{[^}]*\}/g, '')
+    .replace(/\bby\s*\([^)]*\)/g, '')
+    .replace(/"[^"]*"/g, '');
   return withoutLabels.match(/\b(?:http|db|nodejs|v8js)_[a-z0-9_]+\b/g) ?? [];
 }
 
