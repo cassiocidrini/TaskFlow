@@ -131,7 +131,9 @@ export class TasksController {
   @ApiOperation({
     summary: 'Histórico de eventos da tarefa',
     description:
-      'Linha do tempo completa (quem mudou o quê e quando) lida do Event Store, com o estado atual reconstruído a partir dos eventos.',
+      'Linha do tempo completa (quem mudou o quê e quando) lida do Event Store, com o estado atual reconstruído a ' +
+      'partir dos eventos. Cada evento traz o autor (`actorId`) e o `correlationId` da requisição que o gerou; em ' +
+      'eventos antigos, gravados antes desse registro, os dois vêm `null`.',
   })
   @ProjectIdParam()
   @TaskIdParam()

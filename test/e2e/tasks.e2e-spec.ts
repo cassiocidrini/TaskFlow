@@ -6,6 +6,8 @@
  *   anti-IDOR entre dois projetos do MESMO dono (o caso mais sutil: o `assertOwner` passaria).
  * - CQRS: a tarefa aparece no Read Model — via `eventually()`, porque a projeção roda depois da resposta.
  * - Paginação "sem repetição nem buracos" e ciclo de vida completo, com 409 em tarefa concluída.
+ * - Auditoria: cada evento do histórico traz o autor (userId do JWT) e o `X-Correlation-Id` da requisição que o
+ *   gerou — a prova de que o envelope de metadados atravessa HTTP → comando → Event Store → leitura.
  *
  * Testes com consistência eventual: rode 3 vezes antes de confiar.
  */
@@ -228,6 +230,30 @@ describe('Tasks (e2e)', () => {
         assigneeId: owner.userId,
         version: 4,
       });
+    });
+
+    it('histórico: cada evento traz o autor e o correlationId da requisição que o gerou', async () => {
+      const res = await http()
+        .post(tasksUrl())
+        .set(owner.auth)
+        .set('X-Correlation-Id', 'criar-001')
+        .send({ title: 'Auditar autor' })
+        .expect(201);
+      const taskUrl = `${tasksUrl()}/${res.body.taskId}`;
+      await http()
+        .patch(`${taskUrl}/status`)
+        .set(owner.auth)
+        .set('X-Correlation-Id', 'iniciar-002')
+        .send({ status: 'IN_PROGRESS' })
+        .expect(200);
+
+      const history = (await http().get(`${taskUrl}/history`).set(owner.auth).expect(200)).body.history;
+
+      expect(history).toEqual([
+        expect.objectContaining({ type: 'TaskCreated', actorId: owner.userId, correlationId: 'criar-001' }),
+        expect.objectContaining({ type: 'TaskStatusChanged', actorId: owner.userId, correlationId: 'iniciar-002' }),
+      ]);
+      expect(history[0].eventId).not.toEqual(history[1].eventId);
     });
   });
 });

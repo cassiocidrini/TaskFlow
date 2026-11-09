@@ -2,8 +2,8 @@ import { Injectable } from '@nestjs/common';
 import type { Event as StoredEvent } from '@prisma/client';
 import { EventStoreService } from '../../../events/event-store.service';
 import { TaskAggregate } from '../domain/task.aggregate';
-import { TaskRepository } from '../domain/task.repository';
-import type { TaskDomainEvent } from '../events/task.events';
+import { TaskRepository, type SaveContext } from '../domain/task.repository';
+import { TASK_EVENT_SCHEMA_VERSIONS, type TaskDomainEvent } from '../events/task.events';
 
 const AGGREGATE_TYPE = 'Task';
 
@@ -40,7 +40,7 @@ export class EventSourcedTaskRepository extends TaskRepository {
     return TaskAggregate.fromHistory(rows.map(toDomainEvent));
   }
 
-  async save(task: TaskAggregate): Promise<TaskDomainEvent[]> {
+  async save(task: TaskAggregate, context: SaveContext): Promise<TaskDomainEvent[]> {
     const events = task.pullPendingEvents();
     if (events.length === 0) {
       return []; // nada mudou (ex.: comando idempotente) — não toca no banco
@@ -53,8 +53,10 @@ export class EventSourcedTaskRepository extends TaskRepository {
         aggregateType: AGGREGATE_TYPE,
         eventType: event.type,
         payload: { ...event.data },
+        schemaVersion: TASK_EVENT_SCHEMA_VERSIONS[event.type],
       })),
       task.version,
+      { actorId: context.actorId },
     );
 
     return events;

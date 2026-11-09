@@ -112,9 +112,10 @@ Log em texto livre (`Tarefa criada para o projeto X`) só se pesquisa com regex.
 | Natureza | Técnica: amostrável, some se um salto não propagar `traceparent` | De negócio: o app pode exibi-lo na tela de erro e o usuário cita no chamado |
 | Onde aparece | Logs e Jaeger | Logs, header de resposta e atributo `correlation.id` no span |
 
-Logar os dois liga o **chamado do suporte** ao **trace no Jaeger**. O próximo passo é gravar o `correlationId` nos
-eventos e nas mensagens de broker, fronteiras assíncronas onde o trace nem sempre é propagado (ainda não feito, ver
-limitações).
+Logar os dois liga o **chamado do suporte** ao **trace no Jaeger**. O `correlationId` também é gravado no envelope
+de metadados de cada evento (`events.metadata`, ver [Módulo 05](05-event-sourcing-cqrs.md#o-envelope-de-metadados))
+e aparece no histórico da tarefa: dá para ir do evento à requisição que o gerou. As mensagens de broker, outra
+fronteira assíncrona onde o trace nem sempre é propagado, ainda não existem.
 
 Como funciona no TaskFlow ([`correlation-id.middleware.ts`](../../src/common/correlation/correlation-id.middleware.ts)):
 
@@ -349,7 +350,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 ## 🚧 Limitações e próximos passos
 
 - **Coleta de logs:** os logs saem em JSON no stdout, mas nenhum agregador os coleta localmente (ex.: Loki + Promtail no compose). Hoje se lê com `docker logs`/terminal.
-- **`correlationId` fora do HTTP:** o id ainda não é gravado nos eventos do Event Store; um log emitido fora de uma requisição sai sem `correlationId`.
+- **`correlationId` fora do HTTP:** um log emitido fora de uma requisição (boot, script) sai sem `correlationId`, e um evento gravado fora dela fica sem o campo no envelope.
 - **Dashboards como código:** o dashboard do Grafana foi importado manualmente. O ideal é provisioná-lo por arquivo (`grafana/provisioning/`), para que suba pronto com o `docker compose up`.
 - **Jaeger v1:** as imagens do compose têm versão fixa (nunca `:latest`, para o ambiente de amanhã ser igual ao de hoje), mas o `jaegertracing/all-in-one:1.76.0` é a última linha do **v1**, já descontinuado. O próximo passo é migrar para o Jaeger v2 (`jaegertracing/jaeger`), que é construído sobre o OpenTelemetry Collector.
 - **Amostragem (*sampling*):** hoje 100% das requisições geram trace. Em produção com alto volume, amostra-se (ex.: 10%, ou 100% só das que têm erro) para controlar custo.

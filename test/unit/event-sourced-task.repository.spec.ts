@@ -81,19 +81,27 @@ describe('EventSourcedTaskRepository', () => {
       task.assign('u1');
       task.changeStatus('IN_PROGRESS');
 
-      const saved = await repository.save(task);
+      const saved = await repository.save(task, { actorId: 'user-1' });
 
       expect(eventStore.appendMany).toHaveBeenCalledWith(
         [
-          { aggregateId: 't1', aggregateType: 'Task', eventType: 'TaskAssigned', payload: { taskId: 't1', assigneeId: 'u1' } },
+          {
+            aggregateId: 't1',
+            aggregateType: 'Task',
+            eventType: 'TaskAssigned',
+            payload: { taskId: 't1', assigneeId: 'u1' },
+            schemaVersion: 1, // TASK_EVENT_SCHEMA_VERSIONS.TaskAssigned
+          },
           {
             aggregateId: 't1',
             aggregateType: 'Task',
             eventType: 'TaskStatusChanged',
             payload: { taskId: 't1', from: 'PENDING', to: 'IN_PROGRESS' },
+            schemaVersion: 1,
           },
         ],
         1, // o agregado foi lido na versão 1
+        { actorId: 'user-1' }, // o autor chega ao Event Store sem ser alterado
       );
       expect(saved.map((e) => e.type)).toEqual(['TaskAssigned', 'TaskStatusChanged']);
     });
@@ -104,7 +112,7 @@ describe('EventSourcedTaskRepository', () => {
       ]);
       task.changeStatus('PENDING'); // já está PENDING → nenhum evento
 
-      await expect(repository.save(task)).resolves.toEqual([]);
+      await expect(repository.save(task, { actorId: 'user-1' })).resolves.toEqual([]);
       expect(eventStore.appendMany).not.toHaveBeenCalled();
     });
 
@@ -115,7 +123,7 @@ describe('EventSourcedTaskRepository', () => {
       ]);
       task.complete(new Date());
 
-      await expect(repository.save(task)).rejects.toThrow(ConcurrencyConflictError);
+      await expect(repository.save(task, { actorId: 'user-1' })).rejects.toThrow(ConcurrencyConflictError);
     });
   });
 });

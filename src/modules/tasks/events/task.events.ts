@@ -134,3 +134,17 @@ export type TaskDomainEvent =
   | { type: 'TaskAssigned'; data: TaskAssignedData }
   | { type: 'TaskStatusChanged'; data: TaskStatusChangedData }
   | { type: 'TaskCompleted'; data: TaskCompletedData };
+
+/**
+ * Versão ATUAL do formato do payload de cada tipo de evento, gravada no envelope (`metadata.schemaVersion`).
+ *
+ * Mudou o formato de um `XData`? Incremente aqui e escreva o *upcaster* que converte a versão antiga na nova
+ * ao ler, porque os eventos já gravados não são reescritos (append-only). O `Record` é exaustivo: um tipo de
+ * evento novo sem versão declarada não compila.
+ */
+export const TASK_EVENT_SCHEMA_VERSIONS: Readonly<Record<TaskDomainEvent['type'], number>> = {
+  TaskCreated: 1,
+  TaskAssigned: 1,
+  TaskStatusChanged: 1,
+  TaskCompleted: 1,
+};

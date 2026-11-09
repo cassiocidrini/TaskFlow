@@ -118,6 +118,15 @@ export class TaskCurrentStateDto {
 
 /** Um evento da linha do tempo, exatamente como gravado no Event Store (append-only). */
 export class TaskHistoryEntryDto {
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    format: 'uuid',
+    description: 'Identidade estável do evento. `null` em eventos gravados antes do envelope de metadados.',
+    example: UUID_EXAMPLE,
+  })
+  eventId!: string | null;
+
   @ApiProperty({ description: 'Posição do evento no histórico da tarefa (1, 2, 3…)', example: 3 })
   version!: number;
 
@@ -131,6 +140,27 @@ export class TaskHistoryEntryDto {
     example: { taskId: UUID_EXAMPLE, from: 'PENDING', to: 'IN_PROGRESS' },
   })
   data!: Record<string, unknown>;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    format: 'uuid',
+    description:
+      'Quem emitiu o comando que gerou o evento (id do usuário autenticado). `null` em eventos antigos, gravados ' +
+      'antes de o autor ser registrado: o histórico é imutável e o autor não é inferido.',
+    example: UUID_EXAMPLE,
+  })
+  actorId!: string | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      '`X-Correlation-Id` da requisição que gerou o evento: liga o evento aos logs e ao trace. `null` em eventos ' +
+      'antigos ou gerados fora de uma requisição HTTP.',
+    example: 'chamado-1234',
+  })
+  correlationId!: string | null;
 
   @ApiProperty({ format: 'date-time', example: '2026-10-18T05:43:16.294Z' })
   occurredAt!: Date;

@@ -1,5 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import { IQueryHandler, QueryHandler } from '@nestjs/cqrs';
+import { toEventMetadata } from '../../../events/event-metadata';
 import { EventStoreService } from '../../../events/event-store.service';
 import { ProjectsService } from '../../projects/projects.service';
 import { TaskAggregate } from '../domain/task.aggregate';
@@ -7,11 +8,19 @@ import { toDomainEvent } from '../infrastructure/event-sourced-task.repository';
 import type { TaskDomainEvent, TaskPriority, TaskStatus } from '../events/task.events';
 import { GetTaskHistoryQuery } from './get-task-history.query';
 
-/** Um evento da linha do tempo, como gravado no Event Store. Contrato público: `TaskHistoryEntryDto`. */
+/**
+ * Um evento da linha do tempo, como gravado no Event Store. Contrato público: `TaskHistoryEntryDto`.
+ *
+ * `eventId`, `actorId` e `correlationId` vêm do envelope de metadados e são `null` em eventos gravados antes
+ * dele existir: o histórico é append-only, então o passado não é reescrito nem tem o autor "adivinhado".
+ */
 export interface TaskHistoryEntry {
+  eventId: string | null;
   version: number;
   type: TaskDomainEvent['type'];
   data: TaskDomainEvent['data'];
+  actorId: string | null;
+  correlationId: string | null;
   occurredAt: Date;
 }
 
@@ -69,12 +78,18 @@ export class GetTaskHistoryHandler implements IQueryHandler<GetTaskHistoryQuery,
         completedAt: task.completedAt,
         version: task.version,
       },
-      history: rows.map((row, i) => ({
-        version: row.version,
-        type: events[i].type,
-        data: events[i].data,
-        occurredAt: row.createdAt,
-      })),
+      history: rows.map((row, i) => {
+        const metadata = toEventMetadata(row.metadata);
+        return {
+          eventId: metadata.eventId ?? null,
+          version: row.version,
+          type: events[i].type,
+          data: events[i].data,
+          actorId: metadata.actorId ?? null,
+          correlationId: metadata.correlationId ?? null,
+          occurredAt: row.createdAt,
+        };
+      }),
     };
   }
 }

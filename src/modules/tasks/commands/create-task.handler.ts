@@ -2,7 +2,7 @@ import { CommandHandler, ICommandHandler, EventBus } from '@nestjs/cqrs';
 import { randomUUID } from 'crypto';
 import { CreateTaskCommand } from './create-task.command';
 import { EventStoreService } from '../../../events/event-store.service';
-import { TaskCreatedEvent, type TaskCreatedData } from '../events/task.events';
+import { TASK_EVENT_SCHEMA_VERSIONS, TaskCreatedEvent, type TaskCreatedData } from '../events/task.events';
 import { KeywordPriorityStrategy } from '../strategies/task-priority.strategy';
 import { ProjectsService } from '../../projects/projects.service';
 
@@ -53,8 +53,15 @@ export class CreateTaskHandler implements ICommandHandler<CreateTaskCommand> {
     };
 
     await this.eventStore.append(
-      { aggregateId: taskId, aggregateType: 'Task', eventType: 'TaskCreated', payload: { ...data } },
+      {
+        aggregateId: taskId,
+        aggregateType: 'Task',
+        eventType: 'TaskCreated',
+        payload: { ...data },
+        schemaVersion: TASK_EVENT_SCHEMA_VERSIONS.TaskCreated,
+      },
       0, // agregado NOVO: esperamos encontrá-lo sem nenhum evento (versão 0)
+      { actorId: command.userId }, // userId do JWT (o controller nunca o lê do body)
     );
 
     this.eventBus.publish(new TaskCreatedEvent(data));

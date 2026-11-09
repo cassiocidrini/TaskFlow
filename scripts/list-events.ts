@@ -33,6 +33,8 @@ async function main(): Promise<void> {
     console.log(`  [v${e.version}] ${e.eventType}`);
     console.log(`         aggregate: ${e.aggregateType}#${e.aggregateId}`);
     console.log(`         payload:   ${JSON.stringify(e.payload)}`);
+    // Eventos anteriores ao envelope de metadados têm {}: aparecem como "{}" (autor desconhecido)
+    console.log(`         metadata:  ${JSON.stringify(e.metadata)}`);
     console.log(`         criado em: ${e.createdAt.toISOString()}`);
     console.log('');
   }
