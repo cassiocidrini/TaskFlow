@@ -289,7 +289,7 @@ trace: no Jaeger, *Search* → *Tags* `correlation.id=chamado-1234`.
 | Logs | terminal do `npm run start:dev` | Uma linha JSON por evento; `correlationId` e `trace_id` em cada uma |
 | Métricas cruas | http://localhost:9464/metrics | O texto que o Prometheus coleta |
 | Prometheus | http://localhost:9090/targets | Target `taskflow` deve estar **UP** |
-| Grafana | http://localhost:3001 (`admin` / `admin`) | *Dashboards* → pasta **TaskFlow** → **TaskFlow — API** (provisionado) |
+| Grafana | http://localhost:3001 (`admin` / `admin`) | *Dashboards* → pasta **TaskFlow** → **TaskFlow API** (provisionado) |
 
 Consulta PromQL do **p95** usada no painel de latência:
 
@@ -309,7 +309,7 @@ grafana/
 ├── provisioning/
 │   ├── datasources/datasources.yml   # Prometheus + Jaeger, com uid FIXO
 │   └── dashboards/dashboards.yml     # provider: carrega grafana/dashboards/*.json
-└── dashboards/taskflow-api.json      # o dashboard "TaskFlow — API"
+└── dashboards/taskflow-api.json      # o dashboard "TaskFlow API"
 ```
 
 | Decisão | Por quê |
@@ -323,7 +323,7 @@ grafana/
 
 | Linha | Painéis | Para responder |
 |---|---|---|
-| **Tráfego HTTP (RED)** | req/s por rota · respostas por status · latência p50/p95/p99 · p95 por rota · % de 5xx | Quanto, quantos erros, quão rápido, e **qual endpoint** |
+| **Tráfego HTTP (RED)** | req/s por rota (404 aparece como "(sem rota)") · respostas por status · latência p50/p95/p99 · p95 por rota · % de 5xx | Quanto, quantos erros, quão rápido, e **qual endpoint** |
 | **Banco** | p95 das queries por operação · conexões do pool (em uso × ociosas × máximo) · requisições esperando conexão | O gargalo é o banco? |
 | **Runtime Node** | event loop delay p99 · utilização do event loop · heap usado · tempo em GC | O gargalo é o próprio processo (CPU, memória)? |
 
@@ -484,6 +484,7 @@ Problemas **reais**, na ordem em que apareceram:
 | 16 | Metade das requisições "200" da métrica eram probes `/health/*` | A instrumentação HTTP mede toda requisição, inclusive as do orquestrador | `ignoreIncomingRequestHook` para `/health/*` no `tracing.ts` |
 | 17 | Métrica sem `http_route` e span raiz chamado só `GET` | Com Express 5 + Nest, o `instrumentation-express` não preenche a rota no `rpcMetadata` | `RouteTelemetryGuard` como primeiro guard global. Um interceptor foi testado antes e descartado: perdia a rota dos 401/429 |
 | 18 | Grafana registrando erro no boot após o provisionamento | Montar `provisioning/` inteira escondeu as pastas vazias `plugins/` e `alerting/` da imagem | Montar só as subpastas usadas |
+| 19 | No navegador: legenda "Value" no painel de req/s e URL `taskflow-e28094-api` | A série dos 404 não tem `http_route` (o Grafana mostra "Value"); o "—" do título virou `e28094` no slug. A verificação pela API do Grafana conferia só se havia dados, não como apareciam | `label_replace(…, "http_route", "(sem rota)", "http_route", "")` e título "TaskFlow API". Lição: um dashboard também se revisa **olhando** |
 
 ---
 

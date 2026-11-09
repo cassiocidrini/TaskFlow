@@ -1,6 +1,6 @@
 {
   "uid": "taskflow-api",
-  "title": "TaskFlow — API",
+  "title": "TaskFlow API",
   "description": "RED da API, banco e runtime Node. Provisionado por arquivo (grafana/dashboards/): mudanças via PR.",
   "tags": [
     "taskflow",
@@ -40,7 +40,7 @@
       "type": "timeseries",
       "id": 2,
       "title": "Requisições por segundo, por rota",
-      "description": "Taxa de requisições por padrão de rota (http_route). Rota inexistente (404) aparece sem nome.",
+      "description": "Taxa de requisições por padrão de rota (http_route). Rota inexistente (404) aparece como (sem rota).",
       "datasource": {
         "type": "prometheus",
         "uid": "taskflow-prometheus"
@@ -80,7 +80,7 @@
             "uid": "taskflow-prometheus"
           },
           "refId": "A",
-          "expr": "sum by (http_route) (rate(http_server_request_duration_count[$__rate_interval]))",
+          "expr": "label_replace(sum by (http_route) (rate(http_server_request_duration_count[$__rate_interval])), \"http_route\", \"(sem rota)\", \"http_route\", \"\")",
           "legendFormat": "{{http_route}}"
         }
       ]
