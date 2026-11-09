@@ -33,10 +33,22 @@ export const envSchema = z.object({
 
   OTEL_EXPORTER_OTLP_ENDPOINT: z.url().default('http://localhost:4318'),
 
+  // Níveis do pino. `silent` existe para os testes E2E, onde o log de acesso de cada requisição só faz ruído.
+  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  // JSON é o padrão (formato de produção); `true` liga o pino-pretty, legível no terminal de desenvolvimento.
+  LOG_PRETTY: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
+
   DISABLE_THROTTLE: z
     .enum(['true', 'false'])
     .default('false')
     .transform((value) => value === 'true'),
+}).refine((env) => !(env.NODE_ENV === 'production' && env.LOG_PRETTY), {
+  // pino-pretty é devDependency: em produção a app quebraria no primeiro log. Melhor recusar o boot com a causa.
+  message: 'LOG_PRETTY=true não é permitido com NODE_ENV=production (pino-pretty é dependência só de desenvolvimento)',
+  path: ['LOG_PRETTY'],
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -17,7 +17,7 @@
 | Dados | PostgreSQL 16 · Prisma 7 (driver adapter `@prisma/adapter-pg`) |
 | Validação | `zod` (ambiente) · `class-validator` (DTOs) |
 | Testes | Jest · Testcontainers · supertest · k6 (carga) |
-| Observabilidade | OpenTelemetry → Jaeger + Prometheus · Grafana |
+| Observabilidade | OpenTelemetry → Jaeger + Prometheus · Grafana · logs JSON (`nestjs-pino`) |
 | Infra | Docker Compose · Terraform (LocalStack) · GitHub Actions |
 
 ---
@@ -78,6 +78,8 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `modules/tasks/events/` | Eventos de domínio + projeções (`@EventsHandler`) | Projeções **idempotentes** |
 | `modules/projects/` | CRUD de projetos + `assertOwner` | Ponto único de autorização por projeto |
 | `common/dto/pagination.dto.ts` | Paginação por cursor (`limit ≤ 100`) | Reusar em toda listagem |
+| `common/correlation/` | `X-Correlation-Id` (1º middleware) + `AsyncLocalStorage` | Ler o id com `currentCorrelationId()`, nunca de parâmetro ou header |
+| `common/logging/logger.options.ts` | Opções do `nestjs-pino` (JSON, serializers, nível por status) | Serializers são **allowlist**: não adicione headers ao log |
 
 **Fora de `src/`** (não entram no build nem na imagem de produção; o lint cobre todos):
 
@@ -146,7 +148,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Construtor de evento/command com vários parâmetros posicionais do mesmo tipo (já corrompeu o histórico uma vez: o banco de dev tem uma tarefa com título `"HIGH"`, prioridade passada na posição do título).
 
 **Código e testes**
-- ❌ `any` sem justificativa; `console.log` em código de produção (use `Logger` do Nest).
+- ❌ `any` sem justificativa; `console.log` em código de produção (use `Logger` do Nest: ele escreve pelo pino, em JSON, com `correlationId` e `trace_id`).
 - ❌ Regra de negócio em controller.
 - ❌ Importar `AppModule` estaticamente no topo de teste E2E — use `startE2EApp()` (`test/e2e/support/e2e-app.ts`).
 - ❌ `sleep` fixo para esperar projeção em teste — use `eventually()`.
@@ -173,7 +175,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-Logger estruturado em JSON e `correlationId` · Transactional Outbox / replay de projeções · health check (`/health`) · dashboards do Grafana provisionados · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+`correlationId`/`actorId` nos eventos gravados · agregador de logs (Loki) · Transactional Outbox / replay de projeções · health check (`/health`) · dashboards do Grafana provisionados · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

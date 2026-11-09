@@ -8,6 +8,7 @@ import './tracing';
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Logger as PinoLogger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import { configureApp, setupSwagger } from './app.setup';
 import type { Env } from './config/env.schema';
@@ -20,7 +21,11 @@ import type { Env } from './config/env.schema';
  */
 async function bootstrap() {
   // Se o ambiente for inválido, o ConfigModule lança AQUI, listando todos os erros (fail-fast).
-  const app = await NestFactory.create(AppModule);
+  // bufferLogs: os logs do boot ficam retidos até o pino assumir, então saem em JSON como os demais
+  // (sem isso, as primeiras linhas sairiam no formato texto do logger padrão do Nest)
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  // Daqui em diante, todo `new Logger(...)` do @nestjs/common escreve pelo pino: nenhum call site precisou mudar
+  app.useLogger(app.get(PinoLogger));
   const logger = new Logger('Bootstrap');
 
   configureApp(app); // Helmet, CORS e ValidationPipe — a mesma configuração usada nos testes E2E

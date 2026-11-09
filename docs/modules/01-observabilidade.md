@@ -1,16 +1,19 @@
 # Módulo 01 — Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana)
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 18/10/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 09/11/2026
 >
 > **Onde vive no código:** [`src/tracing.ts`](../../src/tracing.ts) · [`src/env.ts`](../../src/env.ts) ·
-> [`src/main.ts`](../../src/main.ts) · [`docker-compose.yml`](../../docker-compose.yml) · [`prometheus.yml`](../../prometheus.yml)
+> [`src/main.ts`](../../src/main.ts) · [`src/common/logging/`](../../src/common/logging/logger.options.ts) ·
+> [`src/common/correlation/`](../../src/common/correlation/correlation-id.middleware.ts) ·
+> [`docker-compose.yml`](../../docker-compose.yml) · [`prometheus.yml`](../../prometheus.yml)
 
 ---
 
 ## 🎯 Objetivo
 
-Instrumentar a API **NestJS** com **OpenTelemetry (OTel)** para coletar **traces** e **métricas**, e visualizá-los
-em ferramentas de mercado:
+Instrumentar a API **NestJS** com **OpenTelemetry (OTel)** para coletar **traces** e **métricas**, emitir **logs
+estruturados em JSON** ligados aos traces por `trace_id` e por um `correlationId` de negócio, e visualizar tudo em
+ferramentas de mercado:
 
 | Ferramenta | Papel |
 |---|---|
@@ -33,6 +36,7 @@ flowchart LR
     APP -->|"expõe /metrics<br/>na porta :9464"| M(( ))
     P[Prometheus :9090] -->|"scrape a cada 5s"| M
     G[Grafana :3001] -->|consulta PromQL| P
+    APP -->|"logs JSON no stdout<br/>(correlationId + trace_id)"| L[[stdout]]
 ```
 
 1. Uma requisição HTTP chega ao NestJS.
@@ -40,6 +44,8 @@ flowchart LR
 3. O **`OTLPTraceExporter`** envia os traces ao Jaeger via OTLP/HTTP.
 4. O **`PrometheusExporter`** expõe as métricas em `http://localhost:9464/metrics`. Esse servidor é **do OTel**, e não a porta 3000 da API.
 5. O **Prometheus** coleta (*scrape*) esse endpoint a cada 5 s, e o **Grafana** monta os dashboards a partir dele.
+6. Cada linha de log sai em **JSON no stdout** (`nestjs-pino`), com `correlationId`, `trace_id` e `span_id`. Quem
+   coleta o stdout é a plataforma (Docker, Kubernetes, CloudWatch), não a aplicação (12-Factor, fator XI).
 
 ---
 
@@ -51,7 +57,7 @@ flowchart LR
 |---|---|---|
 | **Métricas** | *O quê* está acontecendo? (req/s, latência, erros) | ✅ Prometheus |
 | **Traces** | *Onde* está o problema? (qual etapa da requisição demorou) | ✅ Jaeger |
-| **Logs** | *Por quê* aconteceu? (detalhe de um evento específico) | 🟡 `Logger` do Nest em texto; logs estruturados em JSON com `correlationId` ainda **não implementados** |
+| **Logs** | *Por quê* aconteceu? (detalhe de um evento específico) | ✅ JSON (`nestjs-pino`) com `correlationId`, `trace_id` e `span_id` em cada linha |
 
 ### Span, trace e contexto
 
@@ -77,6 +83,56 @@ O *resource* descreve **quem** emite a telemetria. Sem `service.name`, o Jaeger 
 em que elas são carregadas**. Daí a regra mais importante deste módulo: **o tracing precisa ser inicializado antes
 de qualquer outra importação**. Se o `express` ou o `pg` forem carregados primeiro, eles escapam da instrumentação.
 
+### Logs estruturados (JSON)
+
+Log em texto livre (`Tarefa criada para o projeto X`) só se pesquisa com regex. Em JSON, cada informação é um
+**campo**, e o agregador (Loki, CloudWatch Logs Insights, Datadog) filtra e agrega por ele:
+`level >= 50 and req.url like '/projects%'`. Uma linha por evento, sempre no stdout.
+
+```json
+{"level":30,"time":1794257381012,"correlationId":"demo-task-001",
+ "req":{"method":"POST","url":"/projects/5b23…/tasks"},
+ "trace_id":"9192a6fa8a9bdbb28c4ea32e902ccb2d","span_id":"2ea7d713c26e56b4","trace_flags":"01",
+ "res":{"statusCode":201},"responseTime":10,"msg":"request completed"}
+```
+
+| Decisão | Por quê |
+|---|---|
+| **JSON por padrão**, `LOG_PRETTY=true` só em dev | O caminho padrão é o de produção. O pino-pretty é devDependency, e o schema de ambiente **recusa o boot** com `LOG_PRETTY=true` + `NODE_ENV=production` |
+| **Serializers por allowlist** (método, url, status) | O log de acesso nunca contém headers: `Authorization` e cookies não vazam (OWASP A09). Allowlist vence uma lista de `redact`, porque um header sensível novo não precisa ser lembrado |
+| **Nível pelo status**: 5xx = `error`, 4xx = `warn` | `level >= 50` mostra só falha nossa; 404 e 401 são erro do cliente e não devem acordar ninguém |
+| **`bufferLogs` + `app.useLogger`** | Os logs do boot também saem em JSON, e todo `new Logger(...)` do Nest passa pelo pino **sem mudar nenhum call site** |
+| **`trace_id` sem código** | A instrumentação do pino já vem no `getNodeAutoInstrumentations()` e injeta `trace_id`/`span_id` em toda linha emitida dentro de um span. Exige o pino carregado **depois** do `tracing` (a ordem do `main.ts` garante) |
+
+### `correlationId` × `trace_id`
+
+| | `trace_id` (OTel) | `correlationId` (`X-Correlation-Id`) |
+|---|---|---|
+| Quem cria | A infraestrutura de tracing | O cliente (front, app mobile) ou, na falta dele, a API |
+| Natureza | Técnica: amostrável, some se um salto não propagar `traceparent` | De negócio: o app pode exibi-lo na tela de erro e o usuário cita no chamado |
+| Onde aparece | Logs e Jaeger | Logs, header de resposta e atributo `correlation.id` no span |
+
+Logar os dois liga o **chamado do suporte** ao **trace no Jaeger**. O próximo passo é gravar o `correlationId` nos
+eventos e nas mensagens de broker, fronteiras assíncronas onde o trace nem sempre é propagado (ainda não feito, ver
+limitações).
+
+Como funciona no TaskFlow ([`correlation-id.middleware.ts`](../../src/common/correlation/correlation-id.middleware.ts)):
+
+1. É o **primeiro** middleware (`configureApp()`), antes do Helmet e do log de acesso. Vale igual no E2E.
+2. Aceita o header só se casar com `^[A-Za-z0-9._-]{1,64}$`. Ausente ou inválido → **gera um UUID e segue**
+   (correlação é diagnóstico, nunca vira 400). A regex barra *log injection* (quebra de linha forjando outra
+   linha de log) e ids de 10 KB repetidos em cada linha.
+3. Devolve o id no header da resposta (inclusive em erros) e o expõe via CORS (`Access-Control-Expose-Headers`).
+4. Roda o resto da requisição dentro de um **`AsyncLocalStorage`**
+   ([`correlation-context.ts`](../../src/common/correlation/correlation-context.ts)): qualquer código chamado
+   durante a requisição lê o id com `currentCorrelationId()`, sem parâmetro, e duas requisições simultâneas nunca
+   veem o id uma da outra.
+5. O `pino-http` usa esse mesmo id como id da requisição, gravado com o nome `correlationId`.
+
+**Por que um ALS próprio, e não o do `nestjs-pino`:** o de lá guarda o *logger* e só existe numa requisição HTTP.
+O id também será lido por código sem HTTP (gravação de eventos, worker, consumers), que não deve depender da
+biblioteca de log.
+
 ### Percentis: p50, p95, p99
 
 | Percentil | Significado |
@@ -98,6 +154,10 @@ de qualquer outra importação**. Se o `express` ou o `pg` forem carregados prim
 npm install @opentelemetry/sdk-node @opentelemetry/auto-instrumentations-node \
   @opentelemetry/exporter-trace-otlp-proto @opentelemetry/exporter-prometheus \
   @opentelemetry/sdk-metrics @opentelemetry/resources @opentelemetry/semantic-conventions
+
+# Logs JSON (o @opentelemetry/api é usado direto pelo middleware de correlação)
+npm install nestjs-pino pino pino-http @opentelemetry/api
+npm install -D pino-pretty
 ```
 
 ### 2. Infraestrutura local
@@ -187,16 +247,36 @@ npm ci && npx prisma generate && npx prisma migrate deploy
 npm run start:dev
 ```
 
-```powershell
-# PowerShell: 100 requisições
-1..100 | ForEach-Object { curl.exe -s http://localhost:3000 | Out-Null }
+```bash
+# 100 requisições
+for i in $(seq 1 100); do curl -s -o /dev/null http://localhost:3000; done
 ```
 
-### 6. Onde olhar
+### 6. Logs e correlação
+
+| Variável | Default | Uso |
+|---|---|---|
+| `LOG_LEVEL` | `info` | `fatal` · `error` · `warn` · `info` · `debug` · `trace` · `silent` (os E2E usam `silent`) |
+| `LOG_PRETTY` | `false` | `true` = legível no terminal (o `.env.example` liga em dev). Proibido com `NODE_ENV=production` |
+
+```bash
+# Com LOG_PRETTY=false para ver o JSON cru:
+curl -i -H 'X-Correlation-Id: chamado-1234' http://localhost:3000   # a resposta traz X-Correlation-Id: chamado-1234
+curl -i -H 'X-Correlation-Id: a b<script>' http://localhost:3000   # inválido → a resposta traz um UUID novo
+```
+
+Do log ao trace: copie o `trace_id` da linha e abra `http://localhost:16686/trace/<trace_id>`. Do chamado ao
+trace: no Jaeger, *Search* → *Tags* `correlation.id=chamado-1234`.
+
+> O atributo `correlation.id` fica no span `middleware - correlationIdMiddleware` (é o span ativo quando o
+> middleware roda), não no span raiz do HTTP. A busca por tag encontra o trace inteiro do mesmo jeito.
+
+### 7. Onde olhar
 
 | Ferramenta | URL | O que ver |
 |---|---|---|
 | Jaeger | http://localhost:16686 | *Service:* `taskflow` → *Find Traces* → abrir um trace e ver os spans |
+| Logs | terminal do `npm run start:dev` | Uma linha JSON por evento; `correlationId` e `trace_id` em cada uma |
 | Métricas cruas | http://localhost:9464/metrics | O texto que o Prometheus coleta |
 | Prometheus | http://localhost:9090/targets | Target `taskflow` deve estar **UP** |
 | Grafana | http://localhost:3001 (`admin` / `admin`) | Dashboard com p50/p95/p99 |
@@ -226,6 +306,8 @@ Problemas **reais**, na ordem em que apareceram:
 | 9 | Porta 3000 em conflito (API × Grafana) | Os dois usavam a 3000 | Grafana exposto na 3001 |
 | 10 | Fluxo de criação de dashboard confuso no Grafana 12 | A UI mudou | Importar o dashboard via JSON |
 | 11 | Tipos do Prisma desatualizados depois de uma migração | No Prisma 7, o `migrate dev` **não** roda mais o `prisma generate` | Sempre `npx prisma migrate dev` → `npx prisma generate` |
+| 12 | No Linux, alvo `taskflow` `down` no Prometheus (`lookup host.docker.internal: no such host`) | Só o Docker Desktop cria `host.docker.internal`; o Docker Engine não | `extra_hosts: host.docker.internal:host-gateway` no serviço `prometheus` (ver item 2) |
+| 13 | Ao testar os logs, a API nova falhou com `EADDRINUSE :3000` (o erro, ao menos, já saiu em JSON) | Encerrar o `nest start --watch` com `pkill` deixou o processo filho `node dist/main` órfão, segurando a porta | Matar o órfão (`ss -ltnp \| grep 3000`). A causa de fundo, sinais de encerramento sem tratamento, é assunto do graceful shutdown |
 
 ---
 
@@ -259,12 +341,15 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 | `process.env.DATABASE_URL!` no `PrismaService` | `ConfigService<Env, true>` | O `!` só calava o compilador; agora a app **recusa subir** se o valor faltar |
 | `.env` com uma variável | [`.env.example`](../../.env.example) completo e documentado | Um clone novo sobe com `cp .env.example .env` |
 | `console.log` no `main.ts` | `Logger` do Nest | Primeiro passo rumo a logs estruturados |
+| `Logger` do Nest em texto colorido | JSON via `nestjs-pino`, com `correlationId`, `trace_id` e `span_id` | Logs pesquisáveis por campo e ligados ao trace; os call sites do `Logger` não mudaram |
+| `X-Correlation-Id` só listado no CORS (ninguém lia nem devolvia) | Middleware que valida, gera, devolve, expõe via CORS e propaga por `AsyncLocalStorage` | O cliente sempre tem um id para citar; o código lê o id sem recebê-lo por parâmetro |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
-- **Logs estruturados:** o terceiro pilar ainda é texto simples. O próximo passo é um logger JSON (ex.: `nestjs-pino`) com o **trace ID** em cada linha, para pular do log direto ao trace no Jaeger.
+- **Coleta de logs:** os logs saem em JSON no stdout, mas nenhum agregador os coleta localmente (ex.: Loki + Promtail no compose). Hoje se lê com `docker logs`/terminal.
+- **`correlationId` fora do HTTP:** o id ainda não é gravado nos eventos do Event Store; um log emitido fora de uma requisição sai sem `correlationId`.
 - **Dashboards como código:** o dashboard do Grafana foi importado manualmente. O ideal é provisioná-lo por arquivo (`grafana/provisioning/`), para que suba pronto com o `docker compose up`.
 - **Jaeger v1:** as imagens do compose têm versão fixa (nunca `:latest`, para o ambiente de amanhã ser igual ao de hoje), mas o `jaegertracing/all-in-one:1.76.0` é a última linha do **v1**, já descontinuado. O próximo passo é migrar para o Jaeger v2 (`jaegertracing/jaeger`), que é construído sobre o OpenTelemetry Collector.
 - **Amostragem (*sampling*):** hoje 100% das requisições geram trace. Em produção com alto volume, amostra-se (ex.: 10%, ou 100% só das que têm erro) para controlar custo.
@@ -278,7 +363,8 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 - [x] Endpoint OTLP configurável por variável de ambiente (validada)
 - [x] Métricas expostas em `:9464/metrics` e coletadas pelo Prometheus
 - [x] Dashboard no Grafana com p50/p95/p99 e taxa de requisições
-- [ ] Logs estruturados com trace ID
+- [x] Logs estruturados em JSON com `trace_id`, `span_id` e `correlationId`
+- [x] `X-Correlation-Id` validado, gerado, devolvido e propagado por `AsyncLocalStorage`
 - [ ] Dashboards provisionados por arquivo
 
 ---

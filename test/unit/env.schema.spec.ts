@@ -29,6 +29,8 @@ describe('validateEnv', () => {
         CORS_ORIGINS: ['http://localhost:5173'],
         OTEL_EXPORTER_OTLP_ENDPOINT: 'http://localhost:4318',
         DISABLE_THROTTLE: false,
+        LOG_LEVEL: 'info',
+        LOG_PRETTY: false,
       });
     });
 
@@ -51,6 +53,12 @@ describe('validateEnv', () => {
       const env = validateEnv({ ...minimalEnv, DISABLE_THROTTLE: 'true' });
 
       expect(env.DISABLE_THROTTLE).toBe(true);
+    });
+
+    it('deve aceitar LOG_PRETTY="true" fora de produção', () => {
+      const env = validateEnv({ ...minimalEnv, LOG_PRETTY: 'true' });
+
+      expect(env.LOG_PRETTY).toBe(true);
     });
   });
 
@@ -90,6 +98,17 @@ describe('validateEnv', () => {
 
     it('deve rejeitar DISABLE_THROTTLE com valor diferente de "true"/"false"', () => {
       expect(() => validateEnv({ ...minimalEnv, DISABLE_THROTTLE: 'yes' })).toThrow(/DISABLE_THROTTLE/);
+    });
+
+    it('deve rejeitar LOG_LEVEL fora dos níveis do pino', () => {
+      expect(() => validateEnv({ ...minimalEnv, LOG_LEVEL: 'verbose' })).toThrow(/LOG_LEVEL/);
+    });
+
+    // pino-pretty é devDependency: a imagem de produção não o tem, e a app quebraria no primeiro log
+    it('deve rejeitar LOG_PRETTY=true em produção', () => {
+      expect(() => validateEnv({ ...minimalEnv, NODE_ENV: 'production', LOG_PRETTY: 'true' })).toThrow(
+        /LOG_PRETTY=true não é permitido com NODE_ENV=production/,
+      );
     });
   });
 });

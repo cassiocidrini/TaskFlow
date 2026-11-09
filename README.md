@@ -23,8 +23,8 @@ teste que a comprova; o que **não** está implementado aparece em [Limitações
 | **Autorização (OWASP A01)** | Toda rota de tarefa exige JWT e posse do projeto; recurso alheio responde `404` (anti-enumeration) e há proteção anti-IDOR em rotas aninhadas | [`tasks.e2e-spec.ts`](test/e2e/tasks.e2e-spec.ts) |
 | **Projeções idempotentes** | `INSERT … ON CONFLICT DO NOTHING` e `UPDATE … SET`: entrega duplicada, 5 entregas simultâneas e replay completo resultam no mesmo estado | [`projections.spec.ts`](test/integration/projections.spec.ts) |
 | **Fail-fast de configuração** | Variáveis de ambiente validadas com `zod` no boot: configuração inválida impede a app de subir | [`env.schema.ts`](src/config/env.schema.ts) |
-| **Testes com infraestrutura real** | 104 unitários · 20 de integração e 29 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
-| **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas p50/p95/p99) | [`tracing.ts`](src/tracing.ts) |
+| **Testes com infraestrutura real** | 135 unitários · 20 de integração e 34 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
+| **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas p50/p95/p99); logs JSON com `correlationId` e `trace_id` | [`tracing.ts`](src/tracing.ts) · [`logger.options.ts`](src/common/logging/logger.options.ts) |
 | **IaC** | Terraform (S3, SQS, SNS, IAM de menor privilégio) com backend remoto, sobre LocalStack | [`terraform/`](terraform/) |
 
 ---
@@ -171,7 +171,8 @@ curl -s $API/projects/$PROJECT/tasks/$TASK/history -H "$AUTH" | jq
 
 ## 📡 API
 
-Todas as rotas, exceto `register` e `login`, exigem `Authorization: Bearer <token>`.
+Todas as rotas, exceto `register` e `login`, exigem `Authorization: Bearer <token>`. Toda resposta traz
+`X-Correlation-Id`: o valor enviado pelo cliente (até 64 caracteres `[A-Za-z0-9._-]`) ou um UUID gerado pela API.
 
 | Método | Rota | Descrição |
 |---|---|---|
@@ -195,9 +196,9 @@ de outro usuário** · `409` regra de negócio violada ou conflito de concorrên
 
 | Suíte | Qtd. | Infraestrutura | O que prova |
 |---|---:|---|---|
-| **Unitários** | 104 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
+| **Unitários** | 135 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
 | **Integração** | 20 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade do `appendMany`, idempotência das projeções |
-| **E2E** | 29 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico, paginação, consistência eventual |
+| **E2E** | 34 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico, paginação, consistência eventual, `X-Correlation-Id` |
 
 ```bash
 npm run test:unit          # ~3 s — use o tempo todo
@@ -237,7 +238,7 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 
 - **Dual-write entre Event Store e EventBus:** se o processo cair entre gravar e publicar, a projeção não é atualizada. Próximo passo: *Transactional Outbox* + comando de **replay** das projeções.
 - **EventBus em memória:** entrega em ordem dentro de um processo. Com um broker externo (SQS/SNS), as projeções precisariam guardar a versão do agregado para descartar eventos fora de ordem.
-- **Logs:** ainda sem logger estruturado em JSON nem `correlationId` ponta a ponta.
+- **Logs:** JSON no stdout com `correlationId` e `trace_id`, mas sem agregador local (Loki) e sem o `correlationId` gravado nos eventos.
 - **Dockerfile:** usa `node:20` (o projeto exige 24) e não roda como usuário não-root. Dashboards do Grafana ainda não são provisionados por arquivo.
 - **Rate limit em memória:** não é compartilhado entre réplicas (em produção, usaria Redis).
 - **Terraform sem lock do state:** o backend S3 não tem `use_lockfile`; dois `apply` simultâneos poderiam corromper o state.
@@ -250,7 +251,10 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 ```text
 src/
 ├── config/                 # env.schema.ts — validação do ambiente (zod)
-├── common/dto/             # paginação por cursor
+├── common/
+│   ├── dto/                # paginação por cursor
+│   ├── correlation/        # X-Correlation-Id + AsyncLocalStorage
+│   └── logging/            # opções do nestjs-pino (logs JSON)
 ├── events/                 # EventStoreService (append atômico, concorrência otimista)
 ├── modules/
 │   ├── auth/               # JWT + bcrypt, guards, @CurrentUser
@@ -287,7 +291,7 @@ reproduzir, **problemas reais encontrados** e onde o resultado vive no código. 
 
 | Módulo | Tema | No projeto |
 |:-:|---|---|
-| [01](docs/modules/01-observabilidade.md) | Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana) | `tracing.ts`, `docker-compose.yml` |
+| [01](docs/modules/01-observabilidade.md) | Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana) | `tracing.ts`, `common/logging/`, `common/correlation/`, `docker-compose.yml` |
 | 02 | Orquestração com Kubernetes | 🔜 planejado para um ambiente Linux dedicado |
 | [03](docs/modules/03-ci-cd-github-actions.md) | CI/CD com GitHub Actions | `.github/workflows/ci.yml` |
 | [04](docs/modules/04-modelagem-nosql-dynamodb.md) | Modelagem NoSQL (DynamoDB, single-table, GSI) | `scripts/dynamo/` |
