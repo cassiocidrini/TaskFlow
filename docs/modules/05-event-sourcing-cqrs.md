@@ -1,9 +1,10 @@
 # Módulo 05 — Event Sourcing, CQRS e Arquitetura de Software
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 18/10/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 09/11/2026
 >
 > **Onde vive no código:** [`src/modules/tasks/`](../../src/modules/tasks/) ·
 > [`src/events/event-store.service.ts`](../../src/events/event-store.service.ts) ·
+> [`src/events/event-metadata.ts`](../../src/events/event-metadata.ts) ·
 > [`prisma/schema.prisma`](../../prisma/schema.prisma) (tabelas `events` e `tasks_read`)
 
 ---
@@ -92,10 +93,42 @@ Uma tabela **append-only**: linhas só são inseridas, nunca alteradas nem apaga
 | `aggregate_id` | De qual tarefa é o evento |
 | `event_type` | `TaskCreated`, `TaskAssigned`… |
 | `payload` (JSONB) | Os dados do fato |
+| `metadata` (JSONB) | O contexto da gravação: `eventId`, `actorId`, `correlationId`, `schemaVersion` (ver abaixo) |
 | `version` | Posição do evento no histórico daquela tarefa (1, 2, 3…) |
 | `created_at` | Quando aconteceu |
 
 **`@@unique([aggregateId, version])`** é a peça mais importante da tabela, e a próxima seção explica por quê.
+
+### O envelope de metadados
+
+O `payload` responde **o que aconteceu** (o fato de domínio, que o agregado reaplica). O `metadata` responde
+**em que contexto foi gravado**:
+
+```json
+{ "eventId": "e2046359-…", "actorId": "dcfe527e-…", "correlationId": "demo-meta-1", "schemaVersion": 1 }
+```
+
+| Campo | De onde vem | Para quê |
+|---|---|---|
+| `eventId` | `randomUUID()` no `appendMany`, **antes** do INSERT | Identidade estável do evento: chave de idempotência de quem o consumir fora do processo (broker, outbox) |
+| `actorId` | `userId` do JWT, passado **explicitamente** (`save(task, { actorId })`) | Auditoria: "quem mudou o quê" |
+| `correlationId` | `currentCorrelationId()` (o `X-Correlation-Id` da requisição, [Módulo 01](01-observabilidade.md)) | Ligar o evento aos logs e ao trace. Ausente fora de HTTP |
+| `schemaVersion` | `TASK_EVENT_SCHEMA_VERSIONS` em [`task.events.ts`](../../src/modules/tasks/events/task.events.ts) | Saber em que formato o payload foi gravado; base para *upcasting* |
+
+Decisões, e por quê:
+
+| Decisão | Alternativa descartada | Por quê |
+|---|---|---|
+| Envelope separado do payload | Pôr `actorId` dentro do payload | O domínio não muda: `TaskAggregate` e `TaskDomainEvent` não conhecem HTTP nem autenticação |
+| `actorId` **explícito** no contrato | Ler de um contexto implícito, como o `correlationId` | Autor é dado de auditoria: esquecer de informá-lo tem de ser **erro de compilação**, não um evento silenciosamente sem autor. Já o `correlationId` é transversal e técnico, então o contexto implícito serve |
+| JSONB | Uma coluna por campo | O envelope vai crescer (`causationId`, versão do app) sem uma migração por campo. Se surgir a consulta "o que o usuário X fez", cabe um índice de expressão `((metadata->>'actorId'))` |
+| `schemaVersion` num `Record` exaustivo | Um default `1` no Event Store | Um tipo de evento novo sem versão declarada **não compila**: a versão é uma decisão consciente |
+| Eventos antigos com `{}`, sem backfill | Preencher `actorId` com o dono do projeto | Seria **inventar** dado de auditoria. O histórico mostra `null` (autor desconhecido) |
+
+A migração é segura em tabela grande: `ADD COLUMN … NOT NULL DEFAULT '{}'`. Desde o PostgreSQL 11, um default
+constante só altera o catálogo, sem reescrever a tabela. Na leitura, o JSONB passa por um schema `zod`
+(`toEventMetadata`) com tudo opcional, porque o legado é `{}`. Um metadata corrompido falha alto, em vez de virar
+`undefined` em silêncio.
 
 ### Concorrência otimista
 
@@ -176,7 +209,7 @@ entram eventos, saem eventos.
 // domain/task.repository.ts — a PORTA (abstract class: existe em runtime e serve de token de DI)
 export abstract class TaskRepository {
   abstract load(taskId: string): Promise<TaskAggregate | null>;
-  abstract save(task: TaskAggregate): Promise<TaskDomainEvent[]>;
+  abstract save(task: TaskAggregate, context: SaveContext): Promise<TaskDomainEvent[]>; // SaveContext = { actorId }
 }
 
 // tasks.module.ts — quem pede o contrato recebe a implementação event-sourced
@@ -184,7 +217,7 @@ export abstract class TaskRepository {
 ```
 
 - **`load`**: lê os eventos e chama `TaskAggregate.fromHistory()`. Um tipo de evento desconhecido no stream **falha alto**, em vez de produzir um agregado silenciosamente errado.
-- **`save`**: pega os eventos pendentes e chama `appendMany(eventos, task.version)`. Um comando sem efeito não toca no banco.
+- **`save`**: pega os eventos pendentes e chama `appendMany(eventos, task.version, { actorId })`, com o `schemaVersion` de cada tipo. Um comando sem efeito não toca no banco.
 
 ## 2.5 O lado de escrita: um roteiro, várias regras
 
@@ -237,13 +270,16 @@ que seria lento quando sobra tempo e instável quando falta.
 {
   "current": { "status": "DONE", "assigneeId": "c5af…", "version": 4 },
   "history": [
-    { "version": 1, "type": "TaskCreated" },
-    { "version": 2, "type": "TaskAssigned" },
-    { "version": 3, "type": "TaskStatusChanged", "data": { "from": "PENDING", "to": "IN_PROGRESS" } },
-    { "version": 4, "type": "TaskCompleted" }
+    { "version": 1, "type": "TaskCreated", "actorId": null, "correlationId": null },
+    { "version": 2, "type": "TaskAssigned", "actorId": "c5af…", "correlationId": "chamado-1234" },
+    { "version": 3, "type": "TaskStatusChanged", "data": { "from": "PENDING", "to": "IN_PROGRESS" }, "actorId": "c5af…" },
+    { "version": 4, "type": "TaskCompleted", "actorId": "c5af…", "eventId": "e204…" }
   ]
 }
 ```
+
+Cada entrada traz `eventId`, `actorId` e `correlationId` do envelope. No exemplo, a versão 1 é um evento **legado**
+(gravado antes do envelope): os três campos vêm `null`, e o autor não é inferido.
 
 ### A prova de que os eventos são a fonte da verdade
 
@@ -259,9 +295,9 @@ descartáveis, os eventos não.
 
 ## 2.8 Estendendo o domínio
 
-Adicionar um evento novo exige mexer em **5 lugares** (união de tipos, `apply` do agregado, `toBusEvent`, lista de
-tipos conhecidos do repositório e projeção). Dois deles o compilador cobra sozinho (`never`); os outros exigem
-teste. A receita completa está no [`AGENTS.md`](../../AGENTS.md#adicionar-um-evento-novo-ao-ciclo-de-vida-da-tarefa-5-lugares).
+Adicionar um evento novo exige mexer em **6 lugares** (união de tipos, `schemaVersion` em
+`TASK_EVENT_SCHEMA_VERSIONS`, `apply` do agregado, `toBusEvent`, lista de tipos conhecidos do repositório e
+projeção). Três deles o compilador cobra sozinho (`never` e o `Record` exaustivo); os outros exigem teste. A receita completa está no [`AGENTS.md`](../../AGENTS.md#adicionar-um-evento-novo-ao-ciclo-de-vida-da-tarefa-5-lugares).
 
 ---
 
@@ -332,6 +368,7 @@ real para o time.
 | 7 | Read Model com `priority` errada para tarefas antigas | Default da migração não sabe o que o evento dizia | Registrado: replay das projeções (roadmap) |
 | 8 | Migração do `status` para enum **apagaria os dados** | O Prisma gerou `DROP COLUMN` + `ADD COLUMN` | `--create-only` e SQL reescrito com `ALTER COLUMN … USING` |
 | 9 | Teste passava e o `tsc` falhava | `ts-jest` só transpila; o cast `JsonValue → TaskDomainEvent` era inválido | *Type guard* + um único `as unknown as`, documentado |
+| 10 | O Swagger do histórico prometia "quem mudou o quê", mas nenhum evento guardava o autor | O `userId` chegava ao handler e morria antes do Event Store | Envelope `metadata` com `actorId` explícito; eventos antigos expostos com `actorId: null` |
 
 ---
 
@@ -346,6 +383,7 @@ real para o time.
 | Handlers usavam o `PrismaService` direto | Porta `TaskRepository` + adaptador event-sourced |
 | Rotas de tarefa sem autenticação | Autorização por dono do projeto + anti-IDOR |
 | `TaskCompletedEvent` declarado e nunca usado | Usado pelo comando `complete` |
+| Evento sem autor nem correlação | Envelope `metadata` (`eventId`, `actorId`, `correlationId`, `schemaVersion`) |
 
 ---
 
@@ -354,7 +392,8 @@ real para o time.
 - **Dual-write:** se o processo cair entre gravar no Event Store e publicar no EventBus, a projeção não é atualizada. Próximo passo: **Transactional Outbox**, com um *projector* lendo a tabela `events` por posição e guardando um *checkpoint*.
 - **Replay das projeções:** falta o comando `projections:rebuild`, que esvaziaria o `tasks_read` e reaplicaria todos os eventos (e corrigiria as prioridades antigas).
 - **Snapshots:** agregados com milhares de eventos ficariam lentos para carregar; um snapshot a cada N versões resolveria.
-- **Versionamento de eventos:** o formato do payload vai mudar com o tempo; seria preciso *upcasting* (converter eventos antigos para o formato novo na leitura).
+- **Versionamento de eventos:** cada evento já grava o `schemaVersion` do seu payload, mas ainda não existe nenhum *upcaster* (converter eventos antigos para o formato novo na leitura), porque nenhum formato mudou.
+- **Metadata fora do processo:** o envelope fica no Event Store e no histórico; o `EventBus` e as projeções ainda recebem só o payload.
 - **EventBus em memória:** entrega em ordem dentro de um processo. Com um broker externo, as projeções teriam de guardar a versão do agregado e descartar eventos fora de ordem.
 
 ---
@@ -369,7 +408,8 @@ real para o time.
 - [x] Projeções idempotentes, testadas contra o banco real
 - [x] Histórico consultável pela API, com estado reconstruído
 - [ ] Transactional Outbox e replay das projeções
-- [ ] Snapshots e versionamento de eventos
+- [x] Envelope de metadados (`eventId`, `actorId`, `correlationId`, `schemaVersion`) com legado honesto
+- [ ] Snapshots e *upcasters* de eventos
 
 ---
 

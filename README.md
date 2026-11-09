@@ -23,7 +23,7 @@ teste que a comprova; o que **não** está implementado aparece em [Limitações
 | **Autorização (OWASP A01)** | Toda rota de tarefa exige JWT e posse do projeto; recurso alheio responde `404` (anti-enumeration) e há proteção anti-IDOR em rotas aninhadas | [`tasks.e2e-spec.ts`](test/e2e/tasks.e2e-spec.ts) |
 | **Projeções idempotentes** | `INSERT … ON CONFLICT DO NOTHING` e `UPDATE … SET`: entrega duplicada, 5 entregas simultâneas e replay completo resultam no mesmo estado | [`projections.spec.ts`](test/integration/projections.spec.ts) |
 | **Fail-fast de configuração** | Variáveis de ambiente validadas com `zod` no boot: configuração inválida impede a app de subir | [`env.schema.ts`](src/config/env.schema.ts) |
-| **Testes com infraestrutura real** | 135 unitários · 20 de integração e 34 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
+| **Testes com infraestrutura real** | 137 unitários · 24 de integração e 35 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
 | **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas p50/p95/p99); logs JSON com `correlationId` e `trace_id` | [`tracing.ts`](src/tracing.ts) · [`logger.options.ts`](src/common/logging/logger.options.ts) |
 | **IaC** | Terraform (S3, SQS, SNS, IAM de menor privilégio) com backend remoto, sobre LocalStack | [`terraform/`](terraform/) |
 
@@ -196,9 +196,9 @@ de outro usuário** · `409` regra de negócio violada ou conflito de concorrên
 
 | Suíte | Qtd. | Infraestrutura | O que prova |
 |---|---:|---|---|
-| **Unitários** | 135 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
-| **Integração** | 20 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade do `appendMany`, idempotência das projeções |
-| **E2E** | 34 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico, paginação, consistência eventual, `X-Correlation-Id` |
+| **Unitários** | 137 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
+| **Integração** | 24 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade do `appendMany`, envelope de metadados, idempotência das projeções |
+| **E2E** | 35 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico com autor, paginação, consistência eventual, `X-Correlation-Id` |
 
 ```bash
 npm run test:unit          # ~3 s — use o tempo todo
@@ -238,7 +238,8 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 
 - **Dual-write entre Event Store e EventBus:** se o processo cair entre gravar e publicar, a projeção não é atualizada. Próximo passo: *Transactional Outbox* + comando de **replay** das projeções.
 - **EventBus em memória:** entrega em ordem dentro de um processo. Com um broker externo (SQS/SNS), as projeções precisariam guardar a versão do agregado para descartar eventos fora de ordem.
-- **Logs:** JSON no stdout com `correlationId` e `trace_id`, mas sem agregador local (Loki) e sem o `correlationId` gravado nos eventos.
+- **Logs:** JSON no stdout com `correlationId` e `trace_id`, mas sem agregador local (Loki).
+- **Eventos antigos sem autor:** eventos gravados antes do envelope de metadados aparecem no histórico com `actorId: null`; o autor não é inferido. O metadata ainda não chega ao `EventBus` nem às projeções.
 - **Dockerfile:** usa `node:20` (o projeto exige 24) e não roda como usuário não-root. Dashboards do Grafana ainda não são provisionados por arquivo.
 - **Rate limit em memória:** não é compartilhado entre réplicas (em produção, usaria Redis).
 - **Terraform sem lock do state:** o backend S3 não tem `use_lockfile`; dois `apply` simultâneos poderiam corromper o state.

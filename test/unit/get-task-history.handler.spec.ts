@@ -3,7 +3,8 @@
  *
  * Protege: a linha do tempo em ordem e, principalmente, que o estado atual é RECONSTRUÍDO a partir dos eventos
  * (o mock do Read Model nem existe neste teste). Também: posse verificada antes de ler o Event Store e o mesmo
- * 404 para tarefa de outro projeto (o histórico revela quem fez o quê — é dado sensível).
+ * 404 para tarefa de outro projeto (o histórico revela quem fez o quê — é dado sensível). E o envelope de
+ * metadados: autor e correlação expostos, `null` em evento legado (nunca inferido) e metadata corrompido como erro.
  */
 import { NotFoundException } from '@nestjs/common';
 import { GetTaskHistoryHandler } from '../../src/modules/tasks/queries/get-task-history.handler';
@@ -19,19 +20,31 @@ describe('GetTaskHistoryHandler', () => {
   const target = { userId: 'u-dono', projectId: 'p1', taskId: 't1' };
   const t0 = new Date('2026-10-18T10:00:00.000Z');
 
-  const row = (version: number, eventType: string, payload: Record<string, unknown>) => ({
+  const row = (
+    version: number,
+    eventType: string,
+    payload: Record<string, unknown>,
+    metadata: Record<string, unknown> = {},
+  ) => ({
     id: `e${version}`,
     aggregateId: 't1',
     aggregateType: 'Task',
     eventType,
     payload,
+    metadata,
     version,
     createdAt: new Date(t0.getTime() + version * 60_000), // um evento por minuto
   });
 
   const stream = [
+    // v1 é LEGADO (gravado antes do envelope de metadados: {}); as demais têm autor e correlação
     row(1, 'TaskCreated', { taskId: 't1', projectId: 'p1', title: 'Corrigir bug', priority: 'HIGH' }),
-    row(2, 'TaskAssigned', { taskId: 't1', assigneeId: 'u1' }),
+    row(
+      2,
+      'TaskAssigned',
+      { taskId: 't1', assigneeId: 'u1' },
+      { eventId: 'ev-2', actorId: 'u-dono', correlationId: 'chamado-1234', schemaVersion: 1 },
+    ),
     row(3, 'TaskStatusChanged', { taskId: 't1', from: 'PENDING', to: 'IN_PROGRESS' }),
     row(4, 'TaskCompleted', { taskId: 't1', completedAt: '2026-10-18T10:04:00.000Z' }),
   ];
@@ -56,6 +69,21 @@ describe('GetTaskHistoryHandler', () => {
     ]);
     expect(result.history[2].data).toEqual({ taskId: 't1', from: 'PENDING', to: 'IN_PROGRESS' });
     expect(result.history[0].occurredAt).toEqual(new Date('2026-10-18T10:01:00.000Z'));
+  });
+
+  it('deve expor autor, correlação e eventId do envelope, e null nos eventos legados (sem inventar autor)', async () => {
+    const result = await handler.execute(new GetTaskHistoryQuery(target));
+
+    expect(result.history[0]).toMatchObject({ eventId: null, actorId: null, correlationId: null });
+    expect(result.history[1]).toMatchObject({ eventId: 'ev-2', actorId: 'u-dono', correlationId: 'chamado-1234' });
+  });
+
+  it('deve falhar de forma explícita se o metadata gravado estiver corrompido', async () => {
+    eventStore.loadEvents.mockResolvedValue([
+      row(1, 'TaskCreated', { taskId: 't1', projectId: 'p1', title: 'X', priority: 'LOW' }, { actorId: 42 }),
+    ]);
+
+    await expect(handler.execute(new GetTaskHistoryQuery(target))).rejects.toThrow('metadata de evento inválido');
   });
 
   it('deve RECONSTRUIR o estado atual a partir dos próprios eventos (não do Read Model)', async () => {

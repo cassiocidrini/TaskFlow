@@ -2,6 +2,15 @@ import type { TaskDomainEvent } from '../events/task.events';
 import type { TaskAggregate } from './task.aggregate';
 
 /**
+ * Quem está gravando. Faz parte do contrato (e não de um contexto implícito) porque o autor é dado de auditoria:
+ * esquecer de informá-lo precisa ser erro de compilação, não um evento silenciosamente sem autor.
+ */
+export interface SaveContext {
+  /** `userId` do JWT de quem emitiu o comando. */
+  actorId: string;
+}
+
+/**
  * Contrato (port) de persistência do agregado Task — Repository Pattern.
  *
  * É uma abstract class (e não interface) porque interfaces somem na compilação;
@@ -23,5 +32,5 @@ export abstract class TaskRepository {
    *
    * @throws ConcurrencyConflictError se outra requisição gravou no agregado depois do load.
    */
-  abstract save(task: TaskAggregate): Promise<TaskDomainEvent[]>;
+  abstract save(task: TaskAggregate, context: SaveContext): Promise<TaskDomainEvent[]>;
 }

@@ -1,13 +1,34 @@
+import { randomUUID } from 'node:crypto';
 import { ConflictException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { currentCorrelationId } from '../common/correlation/correlation-context';
 import { PrismaService } from '../prisma/prisma.service';
+import type { EventMetadata } from './event-metadata';
 
-/** Um evento a ser gravado: a QUAL agregado pertence, de que TIPO é e o PAYLOAD (vira JSONB). */
+/**
+ * Um evento a ser gravado: a QUAL agregado pertence, de que TIPO é, o PAYLOAD (vira JSONB) e a versão do formato
+ * desse payload (`schemaVersion`, vai para o envelope de metadados).
+ */
 export interface DomainEvent {
   aggregateId: string;
   aggregateType: string;
   eventType: string;
   payload: Record<string, unknown>;
+  schemaVersion: number;
+}
+
+/**
+ * Contexto de quem grava. `actorId` é OBRIGATÓRIO e explícito: é dado de auditoria, e um contexto implícito
+ * permitiria gravar eventos sem autor sem que ninguém percebesse.
+ */
+export interface AppendContext {
+  actorId: string;
+}
+
+/** Resultado de uma gravação: a nova versão do agregado e o envelope de cada evento, na ordem recebida. */
+export interface AppendResult {
+  version: number;
+  metadata: EventMetadata[];
 }
 
 /**
@@ -40,12 +61,12 @@ export class EventStoreService {
    * Concorrência otimista: grava o evento na versão `expectedVersion + 1`.
    *
    * @param expectedVersion versão do agregado que o chamador LEU (0 = agregado novo, sem eventos).
-   * @returns a nova versão do agregado.
+   * @returns a nova versão do agregado e o envelope gravado.
    * @throws ConcurrencyConflictError se outra gravação já ocupou essa versão
    *         (garantido pelo UNIQUE (aggregate_id, version) no banco — sem janela de corrida).
    */
-  async append(event: DomainEvent, expectedVersion: number): Promise<number> {
-    return this.appendMany([event], expectedVersion);
+  async append(event: DomainEvent, expectedVersion: number, context: AppendContext): Promise<AppendResult> {
+    return this.appendMany([event], expectedVersion, context);
   }
 
   /**
@@ -54,15 +75,33 @@ export class EventStoreService {
    * ATÔMICO: um único INSERT com N linhas — se qualquer versão já existir, o Postgres
    * desfaz o comando inteiro. Nunca deixa um agregado "meio salvo".
    *
-   * @returns a nova versão do agregado (expectedVersion se a lista estiver vazia).
+   * O envelope de cada evento é montado AQUI, no único ponto de escrita: `eventId` gerado antes do INSERT (quem
+   * gravou já sabe a identidade do evento, sem reler o banco), `actorId` do contexto explícito e `correlationId`
+   * da requisição corrente (`AsyncLocalStorage`; ausente fora de HTTP, sem inventar valor).
+   *
+   * @returns a nova versão do agregado (expectedVersion se a lista estiver vazia) e os envelopes gravados.
    */
-  async appendMany(events: readonly DomainEvent[], expectedVersion: number): Promise<number> {
+  async appendMany(
+    events: readonly DomainEvent[],
+    expectedVersion: number,
+    context: AppendContext,
+  ): Promise<AppendResult> {
     if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
       throw new Error(`expectedVersion inválida: ${expectedVersion}`);
     }
     if (events.length === 0) {
-      return expectedVersion;
+      return { version: expectedVersion, metadata: [] };
     }
+
+    const correlationId = currentCorrelationId();
+    const metadata = events.map(
+      (event): EventMetadata => ({
+        eventId: randomUUID(),
+        actorId: context.actorId,
+        ...(correlationId ? { correlationId } : {}),
+        schemaVersion: event.schemaVersion,
+      }),
+    );
 
     try {
       await this.prisma.event.createMany({
@@ -71,6 +110,7 @@ export class EventStoreService {
           aggregateType: event.aggregateType,
           eventType: event.eventType,
           payload: event.payload as Prisma.InputJsonObject,
+          metadata: { ...metadata[index] } as Prisma.InputJsonObject,
           version: expectedVersion + 1 + index,
         })),
       });
@@ -82,7 +122,7 @@ export class EventStoreService {
       throw error;
     }
 
-    return expectedVersion + events.length;
+    return { version: expectedVersion + events.length, metadata };
   }
 
   async loadEvents(aggregateId: string) {

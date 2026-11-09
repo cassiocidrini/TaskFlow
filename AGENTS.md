@@ -71,7 +71,8 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 |---|---|---|
 | `config/env.schema.ts` | Schema `zod` de TODAS as variáveis de ambiente | Variável nova entra aqui; ler via `ConfigService<Env, true>` |
 | `app.setup.ts` | Helmet, CORS, `ValidationPipe`, Swagger | Usado pelo `main.ts` **e** pelo E2E — não duplicar config HTTP |
-| `events/event-store.service.ts` | `append`/`appendMany` com `expectedVersion`, `loadEvents` | Único ponto de escrita no Event Store |
+| `events/event-store.service.ts` | `append`/`appendMany` com `expectedVersion` e `{ actorId }`, `loadEvents` | Único ponto de escrita no Event Store; monta o envelope `metadata` (`eventId`, `actorId`, `correlationId`, `schemaVersion`) |
+| `events/event-metadata.ts` | Tipo do envelope + `toEventMetadata` (zod, leitura) | Evento legado tem `metadata = {}`: campos opcionais na leitura, nunca inventados |
 | `modules/tasks/domain/` | `TaskAggregate`, contrato `TaskRepository` | **Zero imports** de Nest, Prisma ou infra |
 | `modules/tasks/infrastructure/` | `EventSourcedTaskRepository`, `toDomainEvent` | Único cast de leitura do Event Store vive aqui |
 | `modules/tasks/commands/` | Commands, handlers, `TaskCommandRunner` | Handler de ciclo de vida = 1 linha via runner |
@@ -107,13 +108,15 @@ import './tracing';  // 2º: OpenTelemetry ANTES de http/express/pg serem carreg
 
 ### Adicionar um evento novo ao ciclo de vida da tarefa (5 lugares)
 
-1. `events/task.events.ts`: interface `XData` + classe `XEvent` (construtor com **objeto nomeado**) + entrada na união `TaskDomainEvent`.
+1. `events/task.events.ts`: interface `XData` + classe `XEvent` (construtor com **objeto nomeado**) + entrada na união `TaskDomainEvent` + versão em `TASK_EVENT_SCHEMA_VERSIONS`.
 2. `domain/task.aggregate.ts`: método de comando (valida invariantes → `raise`) + `case` no `apply()`.
 3. `commands/task-command.runner.ts`: `case` no `toBusEvent()`.
 4. `infrastructure/event-sourced-task.repository.ts`: tipo em `KNOWN_EVENT_TYPES`.
 5. `events/task-lifecycle.projections.ts`: projeção idempotente (+ registrar no `tasks.module.ts`).
 
-Os `switch` são exaustivos (`never`): esquecer o passo 2 ou 3 **não compila**. Os passos 4 e 5 só falham em runtime → cubra com teste.
+Os `switch` são exaustivos (`never`) e o `TASK_EVENT_SCHEMA_VERSIONS` é um `Record` exaustivo: esquecer a versão do passo 1 ou os passos 2 e 3 **não compila**. Os passos 4 e 5 só falham em runtime → cubra com teste.
+
+Mudou o formato de um `XData` já gravado? Incremente a versão em `TASK_EVENT_SCHEMA_VERSIONS` e trate a versão antiga na leitura (*upcaster*): eventos gravados não são reescritos.
 
 ### Adicionar um comando de ciclo de vida
 
@@ -143,6 +146,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Alterar estado do agregado fora do `apply()`.
 - ❌ Publicar no `EventBus` antes de gravar no Event Store (ordem: `assertOwner → save → publish`).
 - ❌ `append` sem o `expectedVersion` lido do agregado.
+- ❌ `actorId` vindo de outro lugar que não o `userId` do JWT do comando; preencher `actorId` de evento legado (`metadata = {}`) por inferência.
 - ❌ Editar ou apagar linhas da tabela `events` (append-only; corrigir = novo evento).
 - ❌ Projeção não idempotente (usar `createMany({ skipDuplicates })` / `updateMany`).
 - ❌ Construtor de evento/command com vários parâmetros posicionais do mesmo tipo (já corrompeu o histórico uma vez: o banco de dev tem uma tarefa com título `"HIGH"`, prioridade passada na posição do título).
@@ -175,7 +179,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-`correlationId`/`actorId` nos eventos gravados · agregador de logs (Loki) · Transactional Outbox / replay de projeções · health check (`/health`) · dashboards do Grafana provisionados · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · Transactional Outbox / replay de projeções · health check (`/health`) · dashboards do Grafana provisionados · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

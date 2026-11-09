@@ -112,6 +112,8 @@ describe('TaskCommandRunner (roteiro dos comandos de ciclo de vida)', () => {
       });
 
       expect(repository.save).toHaveBeenCalledTimes(1);
+      // O autor gravado é o usuário autorizado pelo assertOwner (userId do JWT)
+      expect(repository.save).toHaveBeenCalledWith(expect.any(Object), { actorId: 'u-dono' });
       const publicados = eventBus.publish.mock.calls.map(([e]) => e);
       expect(publicados).toHaveLength(2);
       expect(publicados[0]).toBeInstanceOf(TaskAssignedEvent);

@@ -63,7 +63,8 @@ export class TaskCommandRunner {
     }
 
     // 4. Persiste (concorrência otimista: ConcurrencyConflictError já é um 409)
-    const saved = await this.repository.save(task);
+    // O autor dos eventos é quem passou pelo assertOwner acima: o userId do JWT, nunca um valor do body
+    const saved = await this.repository.save(task, { actorId: target.userId });
 
     // 5. Publica SOMENTE o que foi gravado, na ordem em que foi gravado
     for (const event of saved) {

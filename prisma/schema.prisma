@@ -50,6 +50,9 @@ model Event {
   aggregateType String @map("aggregate_type")
   eventType   String   @map("event_type")
   payload     Json
+  // Envelope da gravação (eventId, actorId, correlationId, schemaVersion), separado do fato de domínio
+  // (payload). JSONB para o envelope crescer sem migração. Eventos anteriores a esta coluna ficam com {}.
+  metadata    Json     @default("{}")
   version     Int
   createdAt   DateTime @default(now()) @map("created_at")
 

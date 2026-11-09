@@ -65,7 +65,8 @@ describe('CreateTaskHandler', () => {
         assigneeId: 'u1',
         priority: 'MEDIUM',
       },
-    }, 0); // versão esperada 0: agregado novo
+      schemaVersion: 1,
+    }, 0, { actorId: userId }); // versão esperada 0 (agregado novo); autor = userId do comando (JWT)
   });
 
   it('deve publicar um TaskCreatedEvent no EventBus', async () => {
