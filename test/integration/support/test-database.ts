@@ -7,6 +7,8 @@ import { POSTGRES_TEST_IMAGE } from '../../support/postgres-image';
 /** Banco de teste descartável: o Prisma apontando para ele e um `stop` que derruba o container. */
 export interface TestDatabase {
   prisma: PrismaClient;
+  /** URL do Postgres do container, para suítes que sobem a própria app Nest (ex.: graceful shutdown) */
+  connectionString: string;
   stop(): Promise<void>;
 }
 
@@ -39,6 +41,7 @@ export async function startTestDatabase(): Promise<TestDatabase> {
 
   return {
     prisma,
+    connectionString,
     async stop() {
       await prisma.$disconnect();
       await container.stop();

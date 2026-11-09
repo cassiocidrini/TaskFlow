@@ -39,10 +39,31 @@ async function bootstrap() {
     setupSwagger(app);
   }
 
+  // Graceful shutdown: no SIGTERM/SIGINT o Nest roda app.close() — readiness 503 e drenagem (ShutdownState) →
+  // HTTP fecha esperando as requisições em andamento → Prisma desconecta → OpenTelemetry descarrega.
+  app.enableShutdownHooks(['SIGTERM', 'SIGINT']);
+  armShutdownWatchdog(config.get('SHUTDOWN_TIMEOUT_MS', { infer: true }), logger);
+
   await app.listen(port);
   logger.log(`TaskFlow rodando em http://localhost:${port}`);
   if (!isProduction) {
     logger.log(`Swagger (documentação interativa) em http://localhost:${port}/docs`);
+  }
+}
+
+/**
+ * Watchdog do encerramento: se algum hook travar (conexão presa, requisição sem fim), força a saída com código 1
+ * depois de `timeoutMs`. Melhor a app sair sozinha, registrando o motivo, do que levar SIGKILL do orquestrador em
+ * silêncio. O timer é `unref()`: num encerramento normal ele não segura o processo vivo.
+ */
+function armShutdownWatchdog(timeoutMs: number, logger: Logger): void {
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(signal, () => {
+      setTimeout(() => {
+        logger.error(`Encerramento excedeu ${timeoutMs} ms após ${signal}: saída forçada`);
+        process.exit(1);
+      }, timeoutMs).unref();
+    });
   }
 }
 

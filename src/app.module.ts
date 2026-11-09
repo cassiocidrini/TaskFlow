@@ -5,7 +5,9 @@ import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 import { AppController } from './app.controller';
+import { TelemetryShutdownHook } from './common/lifecycle/telemetry-shutdown';
 import { buildLoggerOptions } from './common/logging/logger.options';
+import { HealthModule } from './health/health.module';
 import { AppService } from './app.service';
 import { validateEnv, type Env } from './config/env.schema';
 import { PrismaModule } from './prisma/prisma.module';
@@ -48,6 +50,7 @@ import { ProjectsModule } from './modules/projects/projects.module';
     AuthModule,
     ProjectsModule,
     TasksModule,
+    HealthModule,
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService<Env, true>) => ({
@@ -61,6 +64,8 @@ import { ProjectsModule } from './modules/projects/projects.module';
   controllers: [AppController],
   providers: [
     AppService,
+    // Encerra o OpenTelemetry no último passo do graceful shutdown (no-op nos testes, onde o tracing não sobe)
+    TelemetryShutdownHook,
     // APP_GUARD = guard GLOBAL: aplicado a toda rota sem precisar anotá-la (secure by default)
     { provide: APP_GUARD, useClass: ThrottlerGuard },
   ],

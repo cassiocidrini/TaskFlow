@@ -19,6 +19,11 @@ export function accessLogLevel(res: ServerResponse, err?: Error): 'error' | 'war
   return 'info';
 }
 
+/** `/health/live` e `/health/ready` (com ou sem query string). */
+export function isHealthCheck(url: string | undefined): boolean {
+  return url === '/health' || (url?.startsWith('/health/') ?? false) || (url?.startsWith('/health?') ?? false);
+}
+
 /**
  * Configuração do `nestjs-pino` (logs JSON, uma linha por evento).
  *
@@ -42,6 +47,9 @@ export function buildLoggerOptions(env: LoggerEnv): Params {
       genReqId: () => currentCorrelationId() ?? randomUUID(),
       customAttributeKeys: { reqId: 'correlationId' },
       quietReqLogger: true,
+      // Probes rodam a cada poucos segundos: seriam ~17 mil linhas/dia por réplica sem informação nenhuma.
+      // Uma falha de readiness continua no log, pelo warn do indicador e pelo log de erro do terminus.
+      autoLogging: { ignore: (req: IncomingMessage) => isHealthCheck(req.url) },
       customLogLevel: (_req: IncomingMessage, res: ServerResponse, err?: Error) => accessLogLevel(res, err),
       serializers: {
         req: (req: { method: string; url: string }) => ({ method: req.method, url: req.url }),

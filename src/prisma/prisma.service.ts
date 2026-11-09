@@ -1,4 +1,4 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnApplicationShutdown, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
@@ -18,7 +18,7 @@ import type { Env } from '../config/env.schema';
  * devolvendo as conexões do pool.
  */
 @Injectable()
-export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+export class PrismaService extends PrismaClient implements OnModuleInit, OnApplicationShutdown {
   /** Sem `private readonly`: numa classe derivada, parameter properties exigiriam `super()` antes do uso. */
   constructor(config: ConfigService<Env, true>) {
     const adapter = new PrismaPg({
@@ -31,7 +31,15 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     await this.$connect();
   }
 
-  async onModuleDestroy() {
+  /**
+   * Desconecta no ÚLTIMO passo do `app.close()`, depois de o servidor HTTP fechar.
+   *
+   * Antes era `onModuleDestroy`, o PRIMEIRO passo, com o HTTP ainda atendendo. Uma requisição em andamento não
+   * falhava (o Prisma reconecta sozinho na próxima query), mas reabria o pool DEPOIS do disconnect, e essa conexão
+   * só morria com o processo, sem encerramento limpo no Postgres. Desconectar depois do último uso possível fecha o
+   * pool de verdade. O teste `graceful-shutdown.spec.ts` mede isso (1 conexão sobrando na ordem antiga, 0 na nova).
+   */
+  async onApplicationShutdown() {
     await this.$disconnect();
   }
 }
