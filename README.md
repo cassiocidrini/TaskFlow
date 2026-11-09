@@ -167,6 +167,8 @@ curl -s $API/projects/$PROJECT/tasks/$TASK/history -H "$AUTH" | jq
 | `npm run infra:down` | Derruba os containers (os dados ficam nos volumes) |
 | `npm run aws:up` · `aws:down` · `aws:recreate` | LocalStack + Terraform ([Módulo 09](docs/modules/09-infraestrutura-como-codigo.md)) |
 | `npm run aws:resources` | Lista as filas SQS e os buckets S3 criados |
+| `npm run streaming:up` · `streaming:down` · `streaming:topics` | Kafka 4 (KRaft) e criação dos tópicos ([Módulo 13](docs/modules/13-mensageria-kafka.md)); fora do `npm run dev` |
+| `npm run kafka:smoke` | Produz e consome uma mensagem de teste (valida cliente e broker) |
 
 ---
 
@@ -238,7 +240,7 @@ e cancela execuções obsoletas do mesmo PR.
 Escolhas conscientes de escopo, com o próximo passo de cada uma:
 
 - **Dual-write entre Event Store e EventBus:** se o processo cair entre gravar e publicar, a projeção não é atualizada. Próximo passo: *Transactional Outbox* + comando de **replay** das projeções.
-- **EventBus em memória:** entrega em ordem dentro de um processo. Com um broker externo (SQS/SNS), as projeções precisariam guardar a versão do agregado para descartar eventos fora de ordem.
+- **EventBus em memória:** entrega em ordem dentro de um processo. O Kafka já está no compose (Módulo 13, etapa 13.1), mas a API ainda não publica nele: o caminho confiável (outbox + relay) vem nas próximas etapas. Com um broker externo, as projeções precisarão guardar a versão do agregado para descartar eventos fora de ordem.
 - **Logs:** JSON no stdout com `correlationId` e `trace_id`, mas sem agregador local (Loki).
 - **Sem alertas:** o dashboard provisionado mostra os sinais, mas nenhuma regra de alerta avisa quando o 5xx ou o p95 passam do limite.
 - **Eventos antigos sem autor:** eventos gravados antes do envelope de metadados aparecem no histórico com `actorId: null`; o autor não é inferido. O metadata ainda não chega ao `EventBus` nem às projeções.
@@ -280,7 +282,7 @@ terraform/                  # IaC (S3, SQS, SNS, IAM)
 grafana/                    # datasources e dashboard provisionados (dashboard como código)
 
 # Fora do produto: não entram no build nem na imagem de produção
-scripts/                    # ferramentas de dev: list-events.ts, dynamo/ (lab do Módulo 4)
+scripts/                    # ferramentas de dev: list-events.ts, dynamo/ (lab do Módulo 4), kafka/smoke.ts (Módulo 13)
 load/                       # testes de carga da API: k6/ e autocannon/ (Módulo 10)
 labs/node-internals/        # experimentos do runtime: event loop, streams, leaks (Módulo 11)
 ```
@@ -310,6 +312,7 @@ reproduzir, **problemas reais encontrados** e onde o resultado vive no código. 
 | [10](docs/modules/10-performance-load-testing.md) | Performance e load testing (k6) | `load/` |
 | [11](docs/modules/11-nodejs-internals.md) | Node.js internals (event loop, thread pool, streams, leaks) | `labs/node-internals/` |
 | [12](docs/modules/12-design-patterns.md) | Design patterns | ver [Padrões de projeto aplicados](#padrões-de-projeto-aplicados) |
+| [13](docs/modules/13-mensageria-kafka.md) | Mensageria e streaming com Kafka (🚧 13.1 de 13.8) | `docker-compose.yml` (profile `streaming`), `scripts/kafka/` |
 
 ---
 

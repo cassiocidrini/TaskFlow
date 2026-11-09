@@ -259,4 +259,5 @@ continuam sem Repository nem Event Sourcing de propósito.
 ---
 
 **Anterior:** [Módulo 11 — Node.js internals](11-nodejs-internals.md) ·
+**Próximo:** [Módulo 13 — Mensageria e streaming de eventos com Kafka](13-mensageria-kafka.md) ·
 **Índice:** [Trilha de estudos](README.md)
