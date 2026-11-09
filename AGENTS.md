@@ -30,6 +30,7 @@ npm run setup                           # clone novo → ambiente pronto (Linux,
 npm run dev                             # infra:up + start:dev → http://localhost:3000 · Swagger em /docs
 npm run infra:down                      # derruba os containers (infra:up:obs inclui Prometheus + Grafana)
 npm run aws:up                          # LocalStack + Terraform (aws:down · aws:recreate · aws:resources)
+npm run streaming:up                    # Kafka (profile streaming) + tópicos (streaming:down · streaming:topics · kafka:smoke)
 
 # Qualidade — rodar SEMPRE antes de commitar
 npx tsc --noEmit && npm run lint && npm run test:unit
@@ -89,8 +90,9 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 
 | Caminho | Responsabilidade | Regra |
 |---|---|---|
+| Kafka no `docker-compose.yml` (`kafka`, `kafka-init`) | Broker KRaft no profile `streaming` + contrato dos tópicos | Tópico novo = `kafka-init` (autocriação desligada); nome `<sistema>.<assunto>.v<N>` só com `.` e `-`; mensagem de teste nunca no tópico de eventos |
 | `grafana/` | Datasources e dashboard **provisionados** (montados no compose) | Mudança de dashboard = editar o JSON + PR; métrica nova no painel entra em `KNOWN_METRICS` de `test/unit/grafana-dashboard.spec.ts`; nunca agrupar por label de alta cardinalidade |
-| `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4) | Script novo de dev entra aqui, **nunca** em `src/` |
+| `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4), `kafka/smoke.ts` (Módulo 13) | Script novo de dev entra aqui, **nunca** em `src/` |
 | `load/k6/`, `load/autocannon/` | Testes de carga da API (Módulo 10) | Medem a API rodando; não são testes do Jest |
 | `labs/node-internals/` | Experimentos do runtime (Módulo 11) | Arquivos gerados (`*.txt`, ~100 MB) são ignorados pelo Git |
 
@@ -191,7 +193,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · Transactional Outbox / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · API publicando no Kafka (broker e tópicos existem; outbox, relay e consumers ainda não) · Transactional Outbox / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

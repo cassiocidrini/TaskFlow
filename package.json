@@ -21,6 +21,9 @@
     "infra:up": "docker compose up -d --wait postgres jaeger",
     "infra:up:obs": "docker compose up -d --wait postgres jaeger prometheus grafana",
     "infra:down": "docker compose down",
+    "streaming:up": "docker compose --profile streaming up -d --wait kafka && docker compose --profile streaming run --rm kafka-init",
+    "streaming:down": "docker compose --profile streaming rm --stop --force kafka",
+    "streaming:topics": "docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe",
     "aws:up": "node scripts/dev/localstack.mjs up",
     "aws:down": "node scripts/dev/localstack.mjs down",
     "aws:recreate": "node scripts/dev/localstack.mjs recreate",
@@ -37,11 +40,13 @@
     "dynamo:seed": "ts-node scripts/dynamo/seed.ts",
     "dynamo:queries": "ts-node scripts/dynamo/queries.ts",
     "dynamo:query-gsi": "ts-node scripts/dynamo/queryGsi.ts",
-    "events:list": "ts-node scripts/list-events.ts"
+    "events:list": "ts-node scripts/list-events.ts",
+    "kafka:smoke": "ts-node scripts/kafka/smoke.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1147.0",
     "@aws-sdk/lib-dynamodb": "^3.1147.0",
+    "@confluentinc/kafka-javascript": "^1.11.0",
     "@nestjs/common": "^12.0.1",
     "@nestjs/config": "^12.0.1",
     "@nestjs/core": "^12.0.1",
