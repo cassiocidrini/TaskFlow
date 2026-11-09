@@ -6,6 +6,7 @@ import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 import { AppController } from './app.controller';
 import { TelemetryShutdownHook } from './common/lifecycle/telemetry-shutdown';
+import { RouteTelemetryGuard } from './common/telemetry/route-telemetry.guard';
 import { buildLoggerOptions } from './common/logging/logger.options';
 import { HealthModule } from './health/health.module';
 import { AppService } from './app.service';
@@ -66,6 +67,9 @@ import { ProjectsModule } from './modules/projects/projects.module';
     AppService,
     // Encerra o OpenTelemetry no último passo do graceful shutdown (no-op nos testes, onde o tracing não sobe)
     TelemetryShutdownHook,
+    // PRIMEIRO guard global, de propósito: grava a rota na telemetria antes de qualquer guard poder recusar a
+    // requisição (401/429 também saem com http_route). Não é controle de acesso: sempre devolve true.
+    { provide: APP_GUARD, useClass: RouteTelemetryGuard },
     // APP_GUARD = guard GLOBAL: aplicado a toda rota sem precisar anotá-la (secure by default)
     { provide: APP_GUARD, useClass: ThrottlerGuard },
   ],

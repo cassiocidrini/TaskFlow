@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Params } from 'nestjs-pino';
+import { isHealthCheck } from '../../health/health-paths';
 import { currentCorrelationId } from '../correlation/correlation-context';
 
 /** O subconjunto do ambiente que o logger usa (facilita o teste unitário sem montar o `Env` inteiro). */
@@ -17,11 +18,6 @@ export function accessLogLevel(res: ServerResponse, err?: Error): 'error' | 'war
   if (err || res.statusCode >= 500) return 'error';
   if (res.statusCode >= 400) return 'warn';
   return 'info';
-}
-
-/** `/health/live` e `/health/ready` (com ou sem query string). */
-export function isHealthCheck(url: string | undefined): boolean {
-  return url === '/health' || (url?.startsWith('/health/') ?? false) || (url?.startsWith('/health?') ?? false);
 }
 
 /**

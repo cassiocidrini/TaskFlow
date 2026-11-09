@@ -81,7 +81,7 @@ aumentar a concorrência **não aumenta o throughput para sempre**. Quando o rec
 |---|---|
 | **k6** (Grafana Labs) | Scripts em JavaScript, **thresholds nativos** (o teste falha se o SLO for violado, ótimo para CI), percentis prontos |
 | **autocannon** | Simples, roda via `npm`; usado nos primeiros experimentos e depois substituído pelo k6 |
-| **Grafana + Prometheus** | Mostram a latência **durante** a carga, e não só o resumo final |
+| **Grafana + Prometheus** | Mostram a latência **durante** a carga, e não só o resumo final. O dashboard **TaskFlow — API** (`npm run infra:up:obs`, pasta *TaskFlow*) já sobe provisionado: p95 por rota, pool do banco e event loop lado a lado mostram se o gargalo é CPU ou I/O ([Módulo 01](01-observabilidade.md#-dashboard-como-código)) |
 
 | Na AWS | Papel |
 |---|---|

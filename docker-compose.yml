@@ -53,8 +53,17 @@ services:
       - "3001:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
+    # Dashboard como código: datasources e dashboards vêm de arquivos versionados (grafana/), somente leitura.
+    # Um ambiente novo sobe já observável, sem importar JSON na mão.
     volumes:
       - grafana_data:/var/lib/grafana
+      # Só as subpastas usadas: montar provisioning/ inteira esconderia as pastas vazias da imagem (plugins/,
+      # alerting/) e o Grafana registraria erro no boot por não encontrá-las
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
 
   localstack:
     image: localstack/localstack:2026.9.0

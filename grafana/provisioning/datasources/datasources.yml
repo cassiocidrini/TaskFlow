@@ -1,0 +1,24 @@
+# Datasources provisionados: o Grafana sobe já conectado, sem configuração manual.
+#
+# `uid` FIXO: o dashboard (grafana/dashboards/*.json) referencia o datasource pelo uid. Com uid gerado pelo Grafana,
+# cada ambiente teria um id diferente e o JSON versionado quebraria ("datasource not found").
+# `editable: false`: mudança de datasource passa por PR, como o resto da infraestrutura.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: taskflow-prometheus
+    access: proxy # o servidor do Grafana consulta; o navegador não precisa alcançar o Prometheus
+    url: http://prometheus:9090 # nome do serviço no docker-compose (mesma rede)
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s # = scrape_interval do prometheus.yml: o $__rate_interval nunca fica menor que 4 coletas
+
+  - name: Jaeger
+    type: jaeger
+    uid: taskflow-jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: false
