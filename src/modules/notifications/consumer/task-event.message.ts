@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { NonRetryableError } from '../../../common/messaging/consumer-errors';
 
 /*
  * O contrato de `taskflow.task-events.v1` como o CONSUMER de notificações o lê (Módulo 13.4).
@@ -56,8 +57,11 @@ const HANDLED_TYPES = new Set<string>([
   'TaskCompleted',
 ]);
 
-/** Mensagem que nunca vai ser processável (JSON inválido, campo obrigatório ausente): a 13.5 a manda para o DLT. */
-export class InvalidMessageError extends Error {}
+/**
+ * Mensagem que nunca vai ser processável (JSON inválido, campo obrigatório ausente). `NonRetryableError`: o runner a
+ * manda direto para o DLT, sem tentar de novo (Módulo 13.5).
+ */
+export class InvalidMessageError extends NonRetryableError {}
 
 export type ParsedMessage =
   { kind: 'event'; event: TaskEvent } | { kind: 'ignored'; reason: string };

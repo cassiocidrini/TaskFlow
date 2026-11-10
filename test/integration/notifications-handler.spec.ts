@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import type { ConsumedMessage } from '../../src/common/messaging/kafka-consumer.runner';
 import { NotificationsHandler } from '../../src/modules/notifications/consumer/notifications.handler';
+import { InvalidMessageError } from '../../src/modules/notifications/consumer/task-event.message';
 import { startTestDatabase, TestDatabase } from './support/test-database';
 
 describe('NotificationsHandler (integração)', () => {
@@ -158,9 +159,12 @@ describe('NotificationsHandler (integração)', () => {
     expect(await prisma.processedEvent.count()).toBe(0);
   });
 
-  it('mensagem malformada de um tipo tratado: falha alto (vai para o DLT na 13.5)', async () => {
-    await expect(
-      handler.handle(message('TaskAssigned', { assigneeId: 'nao-e-uuid' })),
-    ).rejects.toThrow('TaskAssigned inválido');
+  it('mensagem malformada de um tipo tratado: falha alto com InvalidMessageError (o runner a manda ao DLT)', async () => {
+    const handling = handler.handle(
+      message('TaskAssigned', { assigneeId: 'nao-e-uuid' }),
+    );
+    await expect(handling).rejects.toThrow('TaskAssigned inválido');
+    // A classe é o que decide o destino: NonRetryableError vai ao DLT sem novas tentativas
+    await expect(handling).rejects.toBeInstanceOf(InvalidMessageError);
   });
 });

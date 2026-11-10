@@ -2,8 +2,8 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.4 de 13.8** (consumer `notifications` com idempotência, e o trace atravessando a
-> outbox). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **13.5 de 13.8** (retry classificado e dead-letter topic no consumer). Cada etapa
+> acrescenta a sua parte a
 > este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`docker-compose.yml`](../../docker-compose.yml) (serviços `kafka` e `kafka-init`, profile
@@ -16,7 +16,8 @@
 > consumer em [`src/notifications-consumer.ts`](../../src/notifications-consumer.ts),
 > [`kafka-consumer.runner.ts`](../../src/common/messaging/kafka-consumer.runner.ts) e
 > [`modules/notifications/`](../../src/modules/notifications/consumer/notifications.handler.ts) ·
-> contexto de trace em [`trace-context.ts`](../../src/common/telemetry/trace-context.ts)
+> contexto de trace em [`trace-context.ts`](../../src/common/telemetry/trace-context.ts) ·
+> classificação de falhas e DLT em [`consumer-errors.ts`](../../src/common/messaging/consumer-errors.ts)
 
 ---
 
@@ -43,14 +44,14 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | **13.3** | **Relay**: processo *worker* que publica a outbox no Kafka (produtor idempotente, chave = `aggregateId`) | ✅ |
 | **13.4** | Consumer group `notifications` com **idempotência** (`processed_events` na mesma transação do efeito) | ✅ |
 | 13.4 + | **Um trace só** do request ao consumer: `traceparent` gravado na outbox e propagado no header do Kafka | ✅ |
-| 13.5 | **Retry com backoff** e **dead-letter topic** | 🔜 |
+| **13.5** | **Retry classificado** (banco fora nunca vai ao DLT) e **dead-letter topic** por consumer group | ✅ |
 | 13.6 | Consumer group `reports` (projeção `project_stats`), **replay** e painel de **lag** | 🔜 |
 | 13.7 | *(opcional)* Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda | 🔜 |
 | 13.8 | ADRs e o diagrama final | 🔜 |
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 13.4)
+## 🏗️ Arquitetura (estado atual: 13.5)
 
 ```mermaid
 flowchart LR
@@ -77,6 +78,7 @@ flowchart LR
     R -->|"lock + pendentes + published_at"| OB
     R -->|"produtor idempotente<br/>chave = taskId"| T1[("taskflow.task-events.v1<br/>3 partições · 7 dias")]
     T1 -->|"3 partições em paralelo"| C
+    C -->|"mensagem envenenada<br/>(ack antes do commit)"| DLT[("taskflow.notifications-dlt.v1<br/>3 partições · 30 dias")]
     C -->|"UMA transação:<br/>marca + efeito"| PE
     C --> NT
     C --> NO
@@ -298,7 +300,7 @@ e não como transação abortada.
 dele sai antes. Pular a mensagem problemática publicaria a v2 de uma tarefa antes da v1. O custo: uma mensagem com
 erro **permanente** (por exemplo, maior que o `message.max.bytes` do broker) trava a fila. Isso não passa em silêncio:
 `outbox_oldest_pending_age_seconds` sobe sem parar e a linha mostra `attempts` e `last_error`. O tratamento (mover a
-mensagem para uma DLQ do relay) é decisão da etapa 13.5.
+mensagem para uma DLQ do relay) foi avaliado na 13.5 e **recusado**; ver "Por que não há DLQ no relay".
 
 **Backoff exponencial:** 500 ms, 1 s, 2 s… até 30 s, zerado no primeiro sucesso. Sem isso, um Kafka caindo seria
 martelado a cada 500 ms.
@@ -371,7 +373,7 @@ o que usa:
 | Campo novo no evento | Aceito e descartado |
 | Tipo que não interessa (`TaskStatusChanged`) | `ignored`, offset commitado |
 | `eventVersion` maior que o suportado | `ignored` com aviso: notificação perdida, mas a partição não trava. Para um consumer financeiro, a escolha certa seria o contrário |
-| Malformada, de um tipo tratado | Erro: não dá para ignorar em silêncio (seria perder a notificação). Hoje trava a partição; o DLT é a 13.5 |
+| Malformada, de um tipo tratado | `InvalidMessageError`: não dá para ignorar em silêncio (seria perder a notificação). Vai ao DLT na 1ª falha (13.5) |
 
 **Projeção local, em vez de perguntar ao produtor.** O `TaskAssigned` e o `TaskCompleted` não trazem o título nem
 (no caso do `Completed`) o responsável. Consultar as tabelas da API acoplaria os dois contextos (e, entre serviços,
@@ -384,8 +386,8 @@ um membro do grupo.
 
 **Erro no processamento.** O cliente faz *seek* de volta para a mesma mensagem e a reentrega **imediatamente, em
 loop** (comportamento da biblioteca, lido no código-fonte). Com o banco fora, isso martelaria o Postgres. O runner
-espera um backoff exponencial (500 ms → 30 s) antes de devolver o erro: só aquela partição para. Uma mensagem que
-**sempre** falha trava a sua partição; limite de tentativas e dead-letter topic são a etapa 13.5.
+espera um backoff exponencial (500 ms → 30 s) antes de devolver o erro: só aquela partição para. O que acontece
+depois (tentar de novo ou desviar para o DLT) é a seção "Retry e dead-letter topic" (13.5).
 
 **Crash × saída limpa: o `session.timeout.ms`.** Medido com 200 mensagens na fila:
 
@@ -401,6 +403,122 @@ causariam rebalances em cascata.
 **Grupo novo começa do início** (`fromBeginning: true`): na primeira subida, o grupo lê tudo o que o tópico retém
 (7 dias). Com idempotência, é seguro; para notificações, pode significar avisar algo de 6 dias atrás. É decisão de
 produto, e fica registrada.
+
+### Retry e dead-letter topic (13.5)
+
+**O problema.** Até a 13.4, uma mensagem que sempre falha travava a sua partição **para sempre**: o consumer tentava
+de novo a cada 30 s, e as tarefas daquela partição (~1/3) deixavam de gerar notificação. Uma *poison pill* parava um
+terço do sistema.
+
+**A ideia central: o DLT é para mensagem envenenada, não para instabilidade.** O desenho ingênuo ("N tentativas e
+DLT") esvaziaria o tópico no DLT durante uma queda do Postgres, e a culpa não era de nenhuma mensagem. Medido com a
+classificação desligada (mutação): **6 de 40 eventos legítimos no DLT em 45 s** de banco fora, e o número cresce com a
+duração da queda. Por isso as falhas são classificadas
+([`consumer-errors.ts`](../../src/common/messaging/consumer-errors.ts)):
+
+| Classe | Como é reconhecida | O que acontece |
+|---|---|---|
+| `permanent` | O handler lança uma `NonRetryableError` (`InvalidMessageError` estende ela) | **DLT na 1ª falha**: tentar de novo dá o mesmo resultado |
+| `infrastructure` | Códigos do Prisma de banco inalcançável e o SQLSTATE do Postgres (abaixo) | **Tenta para sempre**, backoff até 30 s. **Nunca** DLT |
+| `unknown` | O resto (bug no handler, constraint inesperada) | **5 tentativas** (500 ms + 1 + 2 + 4 s de espera, ~7,5 s), depois DLT |
+
+**Como o erro de banco é reconhecido: medido, não adivinhado.** Derrubei o Postgres de quatro jeitos e anotei o que
+o Prisma 7 com adapter-pg devolve:
+
+| Cenário | Erro observado |
+|---|---|
+| Porta fechada / `docker stop` | `P1001`, com `meta.driverAdapterError.cause.kind = DatabaseNotReachable` |
+| Rede travada (`docker pause`) | `P2028` ("Unable to start a transaction in the given time") em **2 s**: não pendura |
+| Conexão derrubada no meio (`pg_terminate_backend`, failover) | `P2010` (no SQL cru), com o SQLSTATE `57P01` em `meta.driverAdapterError.cause.originalCode` |
+
+O código do Prisma muda com o **tipo** de query (P2010 só existe no SQL cru); o SQLSTATE do Postgres não. Por isso a
+classificação olha os dois: códigos `P1001/P1002/P1008/P1017/P2024/P2028` **ou** SQLSTATE da classe `08` (connection
+exception), `57P01-03` (servidor desligando ou reiniciando) e `53300` (conexões esgotadas). Os testes unitários usam
+exatamente esses formatos.
+
+**Retry bloqueante, e não tópicos de retry.** O padrão de tópicos de retry (`retry-5s`, `retry-1m`, popularizado pela
+Uber) não trava a partição: a mensagem que falha vai para outro tópico e a fila anda. Mas **quebra a ordem por chave**:
+o `TaskCompleted` passaria na frente do `TaskAssigned` que está esperando, e este consumer usa a ordem para saber a
+quem notificar. Vale quando a ordem não importa; aqui, não.
+
+**Um DLT por consumer group** (`taskflow.notifications-dlt.v1`), e não um `taskflow.task-events.v1.dlt` compartilhado.
+A falha é do **consumer**, não do evento: o grupo `reports` (13.6) pode processar normalmente a mesma mensagem. E
+reprocessar a partir de um DLT compartilhado reentregaria a mensagem a todos os grupos. Retenção de **30 dias**, maior
+que os 7 do tópico de origem: é o prazo para alguém investigar.
+
+**A mensagem no DLT é a original, intacta**, com o diagnóstico em headers:
+
+```text
+event-id:8c48fc51-…  event-type:TaskAssigned  content-type:application/json     ← os originais
+traceparent:00-ffe4f447…-01                                                      ← do span de envio ao DLT
+dlt-original-topic:taskflow.task-events.v1  dlt-original-partition:0  dlt-original-offset:303
+dlt-consumer-group:notifications  dlt-reason:permanent  dlt-attempts:1
+dlt-error-message:TaskAssigned inválido: ✖ Invalid UUID → at data.assigneeId
+dlt-failed-at:2026-11-10T18:30:02.440Z
+```
+
+`dlt-reason` é `permanent` (nenhuma tentativa resolveria) ou `exhausted` (esgotou as tentativas de uma falha
+desconhecida). O `traceparent` passa a ser o do span `publish taskflow.notifications-dlt.v1`, filho do `process`: no
+Jaeger, o desvio aparece no trace do request que gerou o evento, com `taskflow.consumer.failure_class` e
+`taskflow.consumer.result = dead_lettered` no span.
+
+**O ack do DLT vem ANTES do commit do offset**, a mesma regra da outbox:
+- DLT fora (Kafka com problema, tópico ausente) = a mensagem **não sai da partição** e é tentada de novo. Commitar sem o
+  ack a perderia. Provado no teste de streaming, e a mutação "commitar mesmo assim" é pega;
+- crash entre o ack e o commit = ela vai ao DLT de novo (at-least-once; o `event-id` deduplica quem investigar).
+
+**O trade-off honesto: o DLT troca ordem por disponibilidade.** Com um `TaskAssigned` no DLT, o `TaskCompleted`
+seguinte da mesma tarefa passa sem ele, e ninguém é notificado da conclusão (o teste de streaming verifica exatamente
+isso). Uma notificação perdida, visível no DLT, contra um terço do sistema parado. A alternativa, **estacionar a
+chave** (segurar todas as mensagens seguintes da mesma tarefa até alguém resolver), fica registrada e não
+implementada: complexidade sem caso real aqui.
+
+**O que observar no consumer:**
+
+| Sinal | Leitura |
+|---|---|
+| `kafka_consumer_messages_total{result="dead_lettered"}` | **O** alerta do DLT: `increase(...[5m]) > 0`. Cada uma é uma notificação que não aconteceu |
+| `kafka_consumer_retries_total{error_class}` | `infrastructure` subindo = banco com problema (o DLT não vai acusar); `unknown` = bug |
+| Lag do grupo | Partição parada em retry aparece como lag crescente |
+| Span `process` com `failure_class` | Jaeger: o trace da mensagem que falhou, com a exceção |
+
+Mudança na métrica da 13.4: `result="failed"` saiu de `kafka_consumer_messages_total`, que agora conta só desfechos
+(uma mensagem que falha e depois passa contava duas vezes). Tentativas que falharam vão para
+`kafka_consumer_retries_total`.
+
+### Por que não há DLQ no relay (13.5)
+
+O plano previa uma DLQ também no relay. Avaliada, foi **recusada**:
+- **quem produz a mensagem é o nosso código**, com o contrato testado campo a campo e o título limitado a 200
+  caracteres. Não há "mensagem de terceiro" para envenenar a fila;
+- **as falhas possíveis na publicação são de infraestrutura** (Kafka fora, tópico inexistente, ACL) e atingem **todas**
+  as mensagens. Uma DLQ estacionaria a outbox inteira e esconderia a falha atrás de "mensagens estacionadas";
+- **mensagem maior que o limite do broker** (1 MB) é a única falha por mensagem, impossível com o contrato atual; o
+  lugar de barrá-la é na origem.
+
+Uma DLQ no lugar errado é pior que nenhuma. O que existe: o alerta `outbox_oldest_pending_age_seconds`, o `attempts` e
+o `last_error` da linha, e o **runbook** abaixo. A decisão vira item do ADR na 13.8.
+
+**Runbook: uma linha da outbox que não sai.**
+
+```sql
+-- 1. Qual linha, e por quê (a fila para na mais antiga)
+SELECT id, event_id, event_type, attempts, left(last_error, 200) AS erro
+  FROM outbox WHERE published_at IS NULL ORDER BY id LIMIT 5;
+```
+
+2. Se o erro é de infraestrutura (timeout, broker, ACL): **não mexa na linha**; corrija a infraestrutura e o relay
+   segue sozinho.
+3. Só se a linha for comprovadamente impublicável, estacione-a à mão, deixando rastro:
+
+```sql
+UPDATE outbox
+   SET published_at = now(),
+       last_error = 'ESTACIONADA À MÃO em ' || now() || ' por <quem>: ' || coalesce(last_error, '')
+ WHERE id = <id>;
+```
+
+Nada se perde: o evento continua no Event Store (a fonte da verdade), e republicá-lo depois é o replay da 13.6.
 
 ### Um trace só através da outbox (`traceparent`)
 
@@ -707,6 +825,32 @@ Abra `http://localhost:16686/trace/<trace id>`: o `POST`, o `create` do relay e 
 queries do efeito, num trace só. No serviço `taskflow-relay`, o `publish` de cada lote aparece como trace próprio,
 com as referências `FOLLOWS_FROM` para os traces de origem.
 
+### 10. Retry e dead-letter topic (13.5)
+
+O DLT é criado pelo `kafka-init` (`npm run streaming:up`). Com API, relay e consumer rodando:
+
+```bash
+# Inspecionar o DLT, com os headers de diagnóstico
+docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic taskflow.notifications-dlt.v1 --from-beginning \
+  --formatter-property print.headers=true --formatter-property print.key=true
+
+# Quantas mensagens há no DLT, por partição
+docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-get-offsets.sh \
+  --bootstrap-server localhost:9092 --topic taskflow.notifications-dlt.v1
+
+# Desfechos e tentativas
+curl -s localhost:9467/metrics | grep -E "kafka_consumer_(messages|retries)_total"
+```
+
+**Experimento da poison pill:** publique no tópico de eventos, com a mesma chave, um `TaskCreated` válido, um
+`TaskAssigned` com `assigneeId` inválido e outro evento válido. A inválida vai ao DLT na 1ª tentativa, a partição anda
+(lag 0) e o evento de trás é processado.
+
+**Experimento do banco fora:** com o consumer rodando, `docker stop taskflow-postgres`, publique eventos válidos, espere
+~45 s e `docker start taskflow-postgres`. O log mostra as tentativas `infrastructure` passando do limite (500 ms →
+30 s), o DLT não recebe nada, e tudo é processado depois que o banco volta.
+
 ---
 
 ## ⚠️ Problemas encontrados e soluções
@@ -733,6 +877,10 @@ com as referências `FOLLOWS_FROM` para os traces de origem.
 | 18 | **(13.4)** A 1ª demo do crash "provou" nada: 30 tarefas processadas antes do `kill -9`; a 2ª deu 70 de 300 | O consumer é rápido (~20 ms por mensagem) e o **throttler** da API (100/min) recusou a maior parte da rajada | Fila montada com o consumer parado, `DISABLE_THROTTLE=true` na API e o kill disparado só depois de 50 notificações. Lição: conferir se o experimento criou mesmo a condição que pretende testar |
 | 19 | **(13.4)** Depois do `kill -9`, o consumer novo subiu e ficou parado | O broker só remove o membro morto quando a sessão expira (30 s sem heartbeat) | Esperado, e medido (30,1 s; com SIGTERM, zero). `sessionTimeout` explícito no runner, com o trade-off documentado. Na demo bagunçada, dois crashes seguidos somaram 45 s + 30 s |
 | 20 | **(13.4)** A resposta de `/me/notifications` trazia `userId`, mas o Swagger não | DTO de documentação escrito antes de olhar a resposta real | Campo adicionado ao `NotificationDto`: o contrato documentado é o que a API devolve |
+| 21 | **(13.5)** Não dava para saber, lendo a documentação, como o erro de "banco fora" chega ao consumer | Com driver adapter, o Prisma 7 embrulha o erro do `pg`, e o código muda com o cenário e o tipo de query | Experimento derrubando o Postgres de 4 jeitos (tabela em "Retry e dead-letter topic"). Classificação pelo código do Prisma **e** pelo SQLSTATE preservado em `meta.driverAdapterError.cause`; testes unitários com os formatos capturados |
+| 22 | **(13.5)** O teste "DLT indisponível" passava, mas a mutação "commitar sem o ack do DLT" **sobrevivia** | Corrida: o teste dormia 12 s e criava o DLT; o join do grupo atrasou o 1º envio, e o tópico apareceu **antes** do timeout de 10 s. O envio nunca falhou | O teste espera a falha acontecer (o log do runner) antes de criar o DLT. Com a mutação, quebra mostrando a mensagem de trás furando a fila. Lição: um teste só prova um caminho de erro se o erro **aconteceu** |
+| 23 | **(13.5)** O teste comparava o `event-id` do DLT com `undefined` | O cliente converte os headers da mensagem enviada para o formato interno **no próprio objeto** passado ao `send` | Valores copiados antes do envio |
+| 24 | **(13.5)** O header `dlt-error-message` saía em várias linhas no `kafka-console-consumer` | A mensagem de erro do zod tem quebras de linha | Espaços normalizados (uma linha só) e tamanho limitado a 500 caracteres; coberto no teste de streaming |
 
 ---
 
@@ -806,6 +954,19 @@ A leitura que a medida dá: **o gargalo de latência não é o Kafka, é o polli
 `OUTBOX_POLL_INTERVAL_MS` (mais queries ociosas) ou trocar o polling por `LISTEN/NOTIFY` ou CDC (ver "Polling, CDC ou
 LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum.
 
+**13.5 — retry e dead-letter topic** (processos em `node dist/...`)
+
+| Experimento | Resultado |
+|---|---|
+| **Poison pill** (válida, envenenada, válida, mesma chave) | A envenenada foi ao DLT na **1ª tentativa** (`permanent`), intacta, com os headers de diagnóstico; a partição andou (lag 0) e a de trás foi processada |
+| **Postgres parado 45 s** com 100 eventos chegando | **0 no DLT.** As 3 partições chegaram a **7 tentativas** (acima do limite de 5), todas `infrastructure`, com espera 500 ms → 30 s; **50 de 50** notificações depois que o banco voltou |
+| Tempo até se recuperar depois do banco voltar | **19 s** (as partições estavam no meio de uma espera de 30 s); os 100 eventos foram processados em 217 ms |
+| **Mutação:** sem a classificação de infraestrutura, mesma queda | **6 de 40** eventos legítimos no DLT em 45 s (`retries{error_class="unknown"}` = 34) |
+| **Mutação:** commitar mesmo sem o ack do DLT | O teste "DLT indisponível" quebra: a mensagem de trás fura a fila |
+| Trace do desvio no Jaeger | `process` com `failure_class=permanent` e `result=dead_lettered`; `publish taskflow.notifications-dlt.v1` como filho |
+| Testes novos | 18 unitários (classificação com os formatos reais de erro, decisão, backoff), 4 de streaming (poison pill + restart, falha desconhecida até o DLT, banco fora sem DLT, DLT indisponível sem perda) |
+| Suítes | 236 unitários · 48 integração · 44 E2E · 10 streaming (~54 s, 3 execuções estáveis) |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -819,21 +980,31 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Outbox gravada e ninguém publicando | **(13.3)** Relay em processo separado, um lote por vez (advisory lock de transação), produtor idempotente, backoff, limpeza e métricas próprias | Os eventos chegam ao Kafka em ordem por tarefa, sem acoplar a API à disponibilidade do broker |
 | Tópico sem ninguém lendo | **(13.4)** Consumer group `notifications`, idempotente, com contrato próprio e projeção local; `GET /me/notifications` na API | O primeiro efeito de verdade dos eventos fora do processo da API |
 | Três traces sem ligação: `POST`, `publish` do relay e `process` do consumer | **(13.4 +)** Um trace só, do request à notificação: `traceparent` gravado na outbox, `create` por mensagem no relay, `process` filho dele no consumer | Dá para seguir um evento pelos três processos e ver onde o tempo foi gasto (na outbox, não no Kafka) |
+| Mensagem envenenada travava a partição para sempre | **(13.5)** Falhas classificadas: contrato violado vai ao DLT na hora, banco fora tenta para sempre, o resto 5 vezes; DLT por grupo, com ack antes do commit | Uma *poison pill* não para mais 1/3 do sistema, e uma queda do banco não esvazia o tópico no DLT |
 | Um processo de telemetria (`tracing.ts` fixo) | **(13.3)** `startTelemetry` por processo; relay como `taskflow-relay` na porta 9465 | Dois processos observáveis separadamente ([Módulo 01](01-observabilidade.md)) |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
-- **Mensagem malformada trava a partição do consumer.** Fica em backoff para sempre (até 30 s entre tentativas);
-  limite de tentativas e dead-letter topic são a etapa 13.5.
+- **DLT sem reprocessamento automático.** Hoje se inspeciona com o `kafka-console-consumer`; reenviar a mensagem
+  corrigida é o *redrive*, que entra com o replay (13.6).
+- **O DLT troca ordem por disponibilidade:** as mensagens seguintes da mesma tarefa passam sem a desviada (ver "O
+  trade-off honesto"). Estacionar a chave fica registrado, não implementado.
+- **Banco fora para a partição inteira, por quanto tempo durar**, e a volta leva até 30 s (o teto do backoff). É a
+  escolha certa para notificações; o sinal é `retries{error_class="infrastructure"}` e o lag, não o DLT.
+- **`P2028` é tratado como infraestrutura**, mas também aparece num bug (usar a transação depois de encerrada). Um bug
+  assim travaria a partição em vez de ir ao DLT. Aceito: o erro aparece no log e no trace, e o caso é raro.
+- **Contagem de tentativas em memória:** um restart ou rebalance recomeça a contagem de uma falha `unknown`. Só atrasa
+  o DLT; não perde nada.
 - **`processed_events` cresce para sempre.** A marca precisa durar pelo menos a retenção do tópico (7 dias) mais a
   janela de um replay; uma limpeza por data entra junto com o replay (13.6).
 - **Fronteira entre contextos por convenção:** API e consumer usam o mesmo Postgres. Em microsserviços seriam bancos
   separados; aqui a regra (o consumer não lê as tabelas da API; a API só **lê** as notificações) está no AGENTS.md.
 - **Grupo novo lê o histórico retido:** a primeira subida de um consumer notifica eventos de até 7 dias atrás.
-- **Uma mensagem com erro permanente trava a fila** (*head-of-line blocking*, escolha consciente pela ordem). Ela fica
-  visível na métrica de idade e no `last_error`; o desvio para uma DLQ é decisão da 13.5.
+- **Uma mensagem com erro permanente trava a fila do relay** (*head-of-line blocking*, escolha consciente pela ordem).
+  Fica visível na métrica de idade e no `last_error`; sem DLQ no relay, por decisão (ver "Por que não há DLQ no
+  relay"), com runbook para estacionar a linha à mão.
 - **Vazão de um lote por vez.** Réplicas dão disponibilidade, não vazão. Particionar a outbox por faixa de chave seria
   o passo para escalar mantendo a ordem.
 - **Transação aberta durante o envio** (até 10 s com o Kafka fora). Aceitável com um lote por vez e timeout curto;
@@ -881,7 +1052,8 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - [x] Consumer idempotente: marca e efeito na mesma transação, offset depois do COMMIT (13.4)
 - [x] Leitor tolerante com contrato próprio e projeção local no consumer (13.4)
 - [x] Um trace só do request ao consumer, com o tempo na outbox visível (`traceparent` pela outbox)
-- [ ] Retry e dead-letter topic (13.5)
+- [x] Retry classificado e dead-letter topic por grupo, com ack antes do commit (13.5)
+- [x] DLQ no relay avaliada e recusada, com runbook (13.5)
 - [ ] Replay e painel de lag (13.6)
 - [ ] Kafka × SQS no mesmo sistema (13.7, opcional)
 - [ ] ADRs (13.8)

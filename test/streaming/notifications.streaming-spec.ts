@@ -26,6 +26,7 @@ import type { RelayEnv } from '../../src/config/relay-env.schema';
 import { EventStoreService } from '../../src/events/event-store.service';
 import { TaskAggregate } from '../../src/modules/tasks/domain/task.aggregate';
 import { NotificationsHandler } from '../../src/modules/notifications/consumer/notifications.handler';
+import { NOTIFICATIONS_DLT } from '../../src/modules/notifications/consumer/notifications.consumer';
 import {
   TASK_EVENTS_TOPIC,
   toTaskOutboxMessage,
@@ -70,6 +71,7 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
       brokers: kafka.brokers,
       groupId,
       topics: [TASK_EVENTS_TOPIC],
+      deadLetterTopic: NOTIFICATIONS_DLT,
       partitionsConsumedConcurrently: 3,
       logger,
       handle: async (message) => {
@@ -145,7 +147,10 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
     }).admin();
     await admin.connect();
     await admin.createTopics({
-      topics: [{ topic: TASK_EVENTS_TOPIC, numPartitions: 3 }],
+      topics: [
+        { topic: TASK_EVENTS_TOPIC, numPartitions: 3 },
+        { topic: NOTIFICATIONS_DLT, numPartitions: 3 },
+      ],
     });
     await admin.disconnect();
 
@@ -287,6 +292,7 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
       brokers: kafka.brokers,
       groupId: 'flaky-consumer', // grupo próprio: lê o tópico do início, sem afetar o `notifications`
       topics: [TASK_EVENTS_TOPIC],
+      deadLetterTopic: NOTIFICATIONS_DLT, // 2 falhas desconhecidas: abaixo do limite, nada chega lá
       partitionsConsumedConcurrently: 3,
       logger,
       handle: async (message) => {
