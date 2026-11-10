@@ -134,6 +134,10 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists \
           --topic taskflow.notifications-dlt.v1 --partitions 3 --replication-factor 1 \
           --config retention.ms=2592000000 --config cleanup.policy=delete
+        # DLT do consumer group reports (Módulo 13.6a): mesma regra, um por grupo
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists \
+          --topic taskflow.reports-dlt.v1 --partitions 3 --replication-factor 1 \
+          --config retention.ms=2592000000 --config cleanup.policy=delete
         # Tópico só do smoke test (npm run kafka:smoke): mensagem de teste nunca vai para o tópico de eventos
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists \
           --topic taskflow.smoke --partitions 1 --replication-factor 1 --config retention.ms=3600000

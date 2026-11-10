@@ -33,6 +33,7 @@ npm run aws:up                          # LocalStack + Terraform (aws:down · aw
 npm run streaming:up                    # Kafka (profile streaming) + tópicos (streaming:down · streaming:topics · kafka:smoke)
 npm run relay:dev                       # relay da outbox → Kafka (processo separado; build: npm run start:relay)
 npm run consumer:notifications:dev      # consumer group notifications (build: npm run start:consumer:notifications)
+npm run consumer:reports:dev            # consumer group reports (build: npm run start:consumer:reports)
 
 # Qualidade — rodar SEMPRE antes de commitar
 npx tsc --noEmit && npm run lint && npm run test:unit
@@ -40,7 +41,7 @@ npx tsc --noEmit && npm run lint && npm run test:unit
 # Testes com Docker (Testcontainers)
 npm run test:integration                # ~1 min
 npm run test:e2e                        # ~1,5 min
-npm run test:streaming                  # Kafka + Postgres reais (outbox → relay → tópico)
+npm run test:streaming                  # Kafka + Postgres reais (outbox → relay → tópico → consumers), ~1 min
 npm test                                # unit, integration e e2e em sequência
 
 # Banco
@@ -94,6 +95,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `common/messaging/` | `KafkaConsumerRunner` (laço genérico de consumer group), `consumer-errors.ts` (classificação de falhas e decisão retry × DLT) e `toKafkaLogger` | Offset commitado **depois** do efeito; falha `permanent` (`NonRetryableError`) → DLT na hora, `infrastructure` (banco fora) → retry para sempre, `unknown` → 5 tentativas e DLT; ack do DLT **antes** do commit; `sessionTimeout` explícito; span `process` filho do `traceparent` do header |
 | `common/telemetry/trace-context.ts` | `captureTraceContext`, `carrierFor`, `contextFromCarrier` | Contexto de trace que atravessa a outbox e o Kafka (W3C). Sempre pelo propagador global, nunca montando o `traceparent` à mão |
 | `modules/notifications/` | API: `GET /me/notifications` (só leitura). `consumer/`: `NotificationsHandler` (idempotente), contrato próprio (`task-event.message.ts`, zod), regras puras (`notification-rules.ts`), processo em `notifications-consumer.ts` | Marca em `processed_events` e efeito na **mesma** `$transaction`; o consumer **não importa** o contrato do produtor nem lê tabelas da API; a API só **lê** `notifications` |
+| `modules/reports/` | API: `GET /projects/:projectId/stats` (só leitura, `assertOwner`). `consumer/`: `ReportsHandler` (idempotência pela **versão** do agregado), contrato próprio (`task-event.message.ts`), deltas puros (`report-rules.ts`), processo em `reports-consumer.ts` | Guarda `version >=` + `FOR UPDATE` na mesma `$transaction` do delta; contador só por incremento atômico (`coluna = coluna + delta`), nunca ler-somar-gravar; upsert de `project_stats` só no `TaskCreated` (CHECK avalia a linha candidata); evento que muda o projeto da tarefa = `InvalidReportMessageError` |
 | `common/logging/logger.options.ts` | Opções do `nestjs-pino` (JSON, serializers, nível por status) | Serializers são **allowlist**: não adicione headers ao log |
 
 **Fora de `src/`** (não entram no build nem na imagem de produção; o lint cobre todos):
@@ -102,14 +104,14 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 |---|---|---|
 | Kafka no `docker-compose.yml` (`kafka`, `kafka-init`) | Broker KRaft no profile `streaming` + contrato dos tópicos | Tópico novo = `kafka-init` (autocriação desligada); nome `<sistema>.<assunto>.v<N>` só com `.` e `-`; mensagem de teste nunca no tópico de eventos; consumer group novo = DLT próprio `taskflow.<grupo>-dlt.v1` no `kafka-init` |
 | `grafana/` | Datasources e dashboard **provisionados** (montados no compose) | Mudança de dashboard = editar o JSON + PR; métrica nova no painel entra em `KNOWN_METRICS` de `test/unit/grafana-dashboard.spec.ts`; nunca agrupar por label de alta cardinalidade |
-| `prometheus.yml` | Jobs `taskflow` (9464), `taskflow-relay` (9465) e `taskflow-notifications` (9467) | Processo novo com métricas = job novo com porta própria |
+| `prometheus.yml` | Jobs `taskflow` (9464), `taskflow-relay` (9465), `taskflow-notifications` (9467) e `taskflow-reports` (9468) | Processo novo com métricas = job novo com porta própria |
 | `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4), `kafka/smoke.ts` (Módulo 13) | Script novo de dev entra aqui, **nunca** em `src/` |
 | `load/k6/`, `load/autocannon/` | Testes de carga da API (Módulo 10) | Medem a API rodando; não são testes do Jest |
 | `labs/node-internals/` | Experimentos do runtime (Módulo 11) | Arquivos gerados (`*.txt`, ~100 MB) são ignorados pelo Git |
 
 ### Padrões aplicados (e onde)
 
-CQRS (`commands/` × `queries/`) · Event Sourcing (`TaskAggregate` + Event Store) · **Repository** (`TaskRepository` → `EventSourcedTaskRepository`) · Template Method funcional (`TaskCommandRunner`) · Strategy (`task-priority.strategy.ts`) · Observer (`EventBus` → projeções) · **Transactional Outbox** (`appendMany` + tabela `outbox`, Módulo 13.2) + **relay** com advisory lock (Módulo 13.3) · **Ports & Adapters** (`MessagePublisher` → `KafkaMessagePublisher`) · **Idempotent Consumer** (`processed_events`, Módulo 13.4) · **Tolerant Reader** (contrato do consumer em zod).
+CQRS (`commands/` × `queries/`) · Event Sourcing (`TaskAggregate` + Event Store) · **Repository** (`TaskRepository` → `EventSourcedTaskRepository`) · Template Method funcional (`TaskCommandRunner`) · Strategy (`task-priority.strategy.ts`) · Observer (`EventBus` → projeções) · **Transactional Outbox** (`appendMany` + tabela `outbox`, Módulo 13.2) + **relay** com advisory lock (Módulo 13.3) · **Ports & Adapters** (`MessagePublisher` → `KafkaMessagePublisher`) · **Idempotent Consumer** (`processed_events`, Módulo 13.4; pela versão do agregado em `report_tasks`, Módulo 13.6a) · **Tolerant Reader** (contrato do consumer em zod).
 **Não existe** Factory no código — não referencie nem gere uma sem pedido explícito.
 
 ### Ordem crítica no `main.ts` (e no `relay.ts`)
@@ -174,6 +176,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Paralelizar o relay com `FOR UPDATE SKIP LOCKED` ou pular a linha que falha: quebra a ordem por tarefa.
 - ❌ Consumer com efeito fora da transação da marca em `processed_events`, ou commitando o offset antes do efeito (at-most-once).
 - ❌ Mandar para o DLT sem classificar a falha (banco fora esvaziaria o tópico no DLT), ou commitar o offset sem o ack do DLT. Mensagem que nunca vai ser processável: lance uma `NonRetryableError`.
+- ❌ Contador de projeção atualizado lendo, somando no Node e gravando (*lost update*: 20 conclusões paralelas viraram 3); use `SET coluna = coluna + delta`.
 - ❌ DLQ no relay da outbox: decidido contra no Módulo 13.5 (falhas ali são de infraestrutura e atingem todas as mensagens); use o runbook.
 - ❌ Consumer criando o span `process` sem o contexto do header (o trace do request se partiria); use o `KafkaConsumerRunner`.
 - ❌ Consumer importando código do produtor (`tasks/`) para ler a mensagem, ou consultando tabelas da API: contrato próprio + projeção local.
@@ -213,7 +216,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · consumer group `reports` (13.6) · *redrive* do DLT (13.6) · limpeza de `processed_events` · painel/alertas do relay e de lag · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · replay do Event Store (13.6b) · *redrive* do DLT (13.6) · limpeza de `processed_events` · painel/alertas do relay e de lag · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

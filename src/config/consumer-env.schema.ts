@@ -5,7 +5,8 @@ import { relayEnvSchema } from './relay-env.schema';
 const shared = envSchema.shape;
 
 /**
- * Variáveis de ambiente de um processo CONSUMER do Kafka (Módulo 13.4: `src/notifications-consumer.ts`).
+ * Variáveis de ambiente dos processos CONSUMER do Kafka (`src/notifications-consumer.ts`, Módulo 13.4, e
+ * `src/reports-consumer.ts`, Módulo 13.6a). Um schema para os dois: cada processo lê a SUA porta de métricas.
  *
  * Mesmo raciocínio do relay: schema próprio por menor privilégio (sem `JWT_SECRET`, sem variáveis HTTP). Campos
  * comuns reaproveitam a MESMA definição dos outros schemas, inclusive o `KAFKA_BROKERS` do relay.
@@ -30,6 +31,14 @@ export const consumerEnvSchema = z
       .min(1)
       .max(65_535)
       .default(9467),
+
+    /** Porta do `/metrics` do consumer de relatórios (Módulo 13.6a). */
+    REPORTS_METRICS_PORT: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(65_535)
+      .default(9468),
   })
   .refine((env) => !(env.NODE_ENV === 'production' && env.LOG_PRETTY), {
     message: 'LOG_PRETTY=true não é permitido com NODE_ENV=production',

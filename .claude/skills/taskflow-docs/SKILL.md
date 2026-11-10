@@ -62,7 +62,7 @@ assim (banco real via Testcontainers, `eventually()` para consistência eventual
 ```bash
 npx tsc --noEmit && npm run lint && npm run test:unit
 npm run build                                     # aplica o plugin do Swagger (nest-cli.json)
-node .claude/skills/taskflow-docs/scripts/probe-openapi.js            # 16 rotas (inclui /health/live e /health/ready), 5 tags, sem tag fantasma
+node .claude/skills/taskflow-docs/scripts/probe-openapi.js            # 17 rotas (inclui /health/live e /health/ready), 5 tags, sem tag fantasma
 node .claude/skills/taskflow-docs/scripts/find-undocumented.js src test terraform scripts load labs   # esperado: 0
 npm run test:e2e        # se tocou em controller/pipe/guard (Docker ligado; roda com --runInBand)
 npm run test:streaming  # se tocou em outbox, relay ou contrato de integração (sobe Kafka + Postgres)

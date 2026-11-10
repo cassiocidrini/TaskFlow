@@ -177,3 +177,54 @@ enum NotificationType {
   TASK_ASSIGNED
   TASK_COMPLETED
 }
+
+// ============================================================
+// Contexto de RELATÓRIOS (Módulo 13.6a) — dono: o consumer group `reports` do Kafka
+// ============================================================
+// Mesma fronteira do contexto de notificações: só o consumer escreve; a API só LÊ `project_stats`.
+//
+// Idempotência por VERSÃO do agregado, e não por tabela de marcas: `report_tasks.version` guarda a última versão
+// aplicada de cada tarefa, e um evento com versão menor ou igual é duplicata (ou atrasado) e não muda nada. Uma linha
+// por TAREFA, que não cresce com o número de eventos (o `processed_events` cresce).
+
+// Estado de cada tarefa, só o que o cálculo dos deltas precisa: um `TaskStatusChanged` decrementa o contador de onde
+// a tarefa SAIU, e isso só se sabe guardando o status atual
+model ReportTask {
+  taskId        String           @id @map("task_id") @db.Uuid
+  projectId     String           @map("project_id") @db.Uuid
+  status        ReportTaskStatus
+  assigneeId    String?          @map("assignee_id") @db.Uuid
+  // Instante de criação da tarefa (o `occurredAt` do TaskCreated): início do lead time
+  taskCreatedAt DateTime         @map("task_created_at")
+  // Última `aggregateVersion` aplicada: a guarda de idempotência
+  version       Int
+  updatedAt     DateTime         @updatedAt @map("updated_at")
+
+  @@map("report_tasks")
+}
+
+// Contadores por projeto, atualizados por INCREMENTO atômico (`SET pending = pending + $delta`): tarefas do mesmo
+// projeto caem em partições diferentes e atualizam esta linha em paralelo
+model ProjectStats {
+  projectId          String    @id @map("project_id") @db.Uuid
+  total              Int       @default(0)
+  pending            Int       @default(0)
+  inProgress         Int       @default(0) @map("in_progress")
+  done               Int       @default(0)
+  // Tarefas abertas (não DONE) sem responsável
+  unassignedOpen     Int       @default(0) @map("unassigned_open")
+  // Soma dos lead times (criação → conclusão) das tarefas DONE, em segundos: média = soma / done
+  leadTimeSecondsSum Float     @default(0) @map("lead_time_seconds_sum")
+  // `occurredAt` do evento mais recente aplicado: o "dados até" que a API devolve (consistência eventual visível)
+  lastEventAt        DateTime? @map("last_event_at")
+  updatedAt          DateTime  @default(now()) @map("updated_at")
+
+  @@map("project_stats")
+}
+
+// Cópia própria dos status, e não o `TaskStatus` da API: outro contexto, que só conhece o contrato do tópico
+enum ReportTaskStatus {
+  PENDING
+  IN_PROGRESS
+  DONE
+}

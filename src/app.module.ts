@@ -16,6 +16,7 @@ import { TasksModule } from './modules/tasks/tasks.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ProjectsModule } from './modules/projects/projects.module';
 import { NotificationsModule } from './modules/notifications/notifications.module';
+import { ReportsModule } from './modules/reports/reports.module';
 
 /**
  * Módulo raiz: compõe a aplicação.
@@ -53,6 +54,7 @@ import { NotificationsModule } from './modules/notifications/notifications.modul
     ProjectsModule,
     TasksModule,
     NotificationsModule,
+    ReportsModule,
     HealthModule,
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],

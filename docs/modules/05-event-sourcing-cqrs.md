@@ -390,12 +390,12 @@ real para o time.
 
 ## 🚧 Limitações e próximos passos
 
-- **Dual-write nas projeções:** se o processo cair entre gravar no Event Store e publicar no EventBus, a projeção não é atualizada. A **Transactional Outbox** já existe ([Módulo 13.2](13-mensageria-kafka.md#dual-write-o-problema-que-a-outbox-resolve-132)): cada evento ganha, na mesma transação, a sua mensagem para o Kafka. Mas as projeções internas ainda leem do `EventBus` em memória. Próximo passo: projeções consumindo do tópico (ou um *projector* com *checkpoint*) e replay.
+- **Dual-write nas projeções:** se o processo cair entre gravar no Event Store e publicar no EventBus, a projeção não é atualizada. A **Transactional Outbox** já existe ([Módulo 13.2](13-mensageria-kafka.md#dual-write-o-problema-que-a-outbox-resolve-132)): cada evento ganha, na mesma transação, a sua mensagem para o Kafka. Mas as projeções internas ainda leem do `EventBus` em memória. O caminho já tem um exemplo funcionando: o read model `project_stats` ([Módulo 13.6a](13-mensageria-kafka.md#dois-grupos-um-tópico-o-consumer-reports-136a)) é alimentado **pelo tópico**, com idempotência pela versão do agregado. Próximo passo: o `tasks_read` seguir o mesmo modelo, e replay.
 - **Replay das projeções:** falta o comando `projections:rebuild`, que esvaziaria o `tasks_read` e reaplicaria todos os eventos (e corrigiria as prioridades antigas).
 - **Snapshots:** agregados com milhares de eventos ficariam lentos para carregar; um snapshot a cada N versões resolveria.
 - **Versionamento de eventos:** cada evento já grava o `schemaVersion` do seu payload, mas ainda não existe nenhum *upcaster* (converter eventos antigos para o formato novo na leitura), porque nenhum formato mudou.
 - **Metadata fora do processo:** o envelope fica no Event Store e no histórico; o `EventBus` e as projeções ainda recebem só o payload.
-- **EventBus em memória:** entrega em ordem dentro de um processo. Com um broker externo, as projeções teriam de guardar a versão do agregado e descartar eventos fora de ordem.
+- **EventBus em memória:** entrega em ordem dentro de um processo. Com um broker externo, as projeções teriam de guardar a versão do agregado e descartar eventos fora de ordem, exatamente o que o consumer `reports` faz (`report_tasks.version`, [Módulo 13.6a](13-mensageria-kafka.md)).
 
 ---
 
