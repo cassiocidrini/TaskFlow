@@ -141,6 +141,15 @@ export class KafkaConsumerRunner {
       description:
         'Tempo de processamento de uma mensagem (efeito + idempotência), em segundos',
       unit: 's',
+      // Sem isto, o OTel usa os buckets padrão (0, 5, 10, 25… pensados para MILISSEGUNDOS): um processamento de
+      // 0,6 ms caía em "até 5 s", e o p95 do painel sairia ~4,75 s, inventado (problema 31 do Módulo 13). Limites em
+      // segundos, de 1 ms a 10 s: o caso comum (~5 ms) e o de banco lento ficam em buckets diferentes
+      advice: {
+        explicitBucketBoundaries: [
+          0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5,
+          10,
+        ],
+      },
     },
   );
 
@@ -158,6 +167,23 @@ export class KafkaConsumerRunner {
 
   constructor(private readonly options: KafkaConsumerOptions) {
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    // Séries de alerta nascem em ZERO (Módulo 13.6d). Um contador que aparece já valendo 1 não tem amostra anterior,
+    // e `increase()` devolve 0: o 1º desvio ao DLT depois de o consumer subir não dispararia o `MessageDeadLettered`.
+    // Coberto no `prometheus/alerts.test.yml`
+    this.messagesCounter.add(0, {
+      consumer_group: options.groupId,
+      result: DEAD_LETTERED,
+    });
+    for (const errorClass of [
+      'permanent',
+      'infrastructure',
+      'unknown',
+    ] satisfies FailureClass[]) {
+      this.retriesCounter.add(0, {
+        consumer_group: options.groupId,
+        error_class: errorClass,
+      });
+    }
     const kafka = new KafkaJS.Kafka({
       kafkaJS: {
         brokers: options.brokers,

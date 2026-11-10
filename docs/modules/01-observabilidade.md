@@ -340,15 +340,22 @@ grafana/
 ├── provisioning/
 │   ├── datasources/datasources.yml   # Prometheus + Jaeger, com uid FIXO
 │   └── dashboards/dashboards.yml     # provider: carrega grafana/dashboards/*.json
-└── dashboards/taskflow-api.json      # o dashboard "TaskFlow API"
+└── dashboards/
+    ├── taskflow-api.json             # o dashboard "TaskFlow API"
+    └── taskflow-messaging.json       # "TaskFlow Mensageria": outbox, consumers, lag, DLTs (Módulo 13.6d)
 ```
+
+As **regras de alerta** seguem a mesma ideia, do lado do Prometheus: `prometheus/alerts.yml`, revisadas em PR e
+testadas com `promtool test rules` no CI. Estão descritas no [Módulo 13.6d](13-mensageria-kafka.md#lag-painel-e-alertas-136d),
+inclusive as duas da API (`ApiHighErrorRate`: 5xx > 1% com tráfego mínimo, por 5 min; `ApiHighLatency`: p95 > 500 ms
+por 5 min).
 
 | Decisão | Por quê |
 |---|---|
 | `uid` fixo nos datasources (`taskflow-prometheus`) | O JSON do dashboard referencia o datasource pelo uid. Gerado pelo Grafana, seria diferente em cada ambiente e o JSON versionado quebraria |
 | `allowUiUpdates: false` e `editable: false` | O arquivo é a fonte da verdade: mudança de dashboard passa por PR, revisada como código |
 | Montar só `provisioning/datasources` e `provisioning/dashboards` | Montar a pasta `provisioning/` inteira esconde as subpastas vazias da imagem (`plugins/`, `alerting/`), e o Grafana registra erro no boot |
-| Teste do JSON no CI ([`grafana-dashboard.spec.ts`](../../test/unit/grafana-dashboard.spec.ts)) | Garante que toda consulta usa uma métrica que a API expõe e todo painel aponta para um datasource provisionado. O "No data" do problema 8 vira teste vermelho, e não descoberta ao abrir o painel |
+| Teste do JSON no CI ([`grafana-dashboard.spec.ts`](../../test/unit/grafana-dashboard.spec.ts)) | Garante que toda consulta usa uma métrica que algum processo expõe (lista conferida no `/metrics` de cada um) e todo painel aponta para um datasource provisionado. O "No data" do problema 8 vira teste vermelho, e não descoberta ao abrir o painel. Vale para todos os JSON da pasta, inclusive o de mensageria |
 
 ### Os painéis (12)
 
@@ -518,6 +525,7 @@ Problemas **reais**, na ordem em que apareceram:
 | 19 | No navegador: legenda "Value" no painel de req/s e URL `taskflow-e28094-api` | A série dos 404 não tem `http_route` (o Grafana mostra "Value"); o "—" do título virou `e28094` no slug. A verificação pela API do Grafana conferia só se havia dados, não como apareciam | `label_replace(…, "http_route", "(sem rota)", "http_route", "")` e título "TaskFlow API". Lição: um dashboard também se revisa **olhando** |
 | 20 | **(Módulo 13.3)** O relay da outbox, parado, gerava um trace a cada 500 ms no Jaeger (`pg.query:BEGIN`, `SELECT`…), cerca de 7 mil por hora sem informação | O polling roda fora de qualquer requisição: cada query virava um trace raiz | `'@opentelemetry/instrumentation-pg': { requireParentSpan: true }`. Conferido no Jaeger: o relay ocioso não gera traces de query, e o `POST /tasks` da API continua com os 9 spans de query dentro do span HTTP |
 | 21 | **(Módulo 13.3)** Uma 2ª réplica do relay no mesmo host subia normalmente, mas sem métricas | A porta de métricas já estava em uso, e o `PrometheusExporter` **não** falha nem avisa | Porta configurável (`RELAY_METRICS_PORT`). Em produção, cada réplica tem o seu IP e o padrão basta. E `up{job="taskflow-relay"}` acusa uma réplica sem coleta |
+| 22 | **(Módulo 13.6d)** O dashboard novo não aparecia no Grafana, e o da API estava com o título antigo | O bind mount do Docker aponta para a PASTA original (o inode), não para o caminho. A pasta `grafana/` foi recriada por um checkout de branch, e o container ficou preso à antiga, que não existia mais: 2.766 erros `failed to walk provisioned dashboards` no log, por um dia, sem nenhum sintoma visível (o Grafana seguia mostrando a cópia que tinha no banco) | `docker compose up -d --force-recreate grafana` (usuários e senha ficam no volume `grafana_data`). Lição: depois de trocar de branch com pastas montadas, recriar os containers; e um dashboard que "não muda" pede uma olhada no log do provisionamento |
 
 ---
 
@@ -557,6 +565,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 | Métrica HTTP sem rota e contando probes | `http_route` em toda rota conhecida (inclusive 401/429); probes fora | Dá para ver qual endpoint degrada, sem a média diluída pelos probes |
 | Sem health check; `process.exit(0)` no SIGTERM do `tracing.ts` | `/health/live` + `/health/ready` e graceful shutdown pelo ciclo de vida do Nest | O orquestrador sabe quando reiniciar e quando tirar a réplica do balanceador; deploy sem cortar requisições |
 | Trace terminando no INSERT da outbox; relay e consumer em traces soltos | Contexto W3C gravado na outbox e propagado no header do Kafka: request, relay e consumer num trace só | O trace mostra onde o tempo de um evento é gasto entre processos (medido: na outbox, não no Kafka; [Módulo 13](13-mensageria-kafka.md)) |
+| Dashboard mostrava, ninguém era avisado | 9 regras de alerta em `prometheus/alerts.yml` (API, outbox, consumers, Kafka), testadas com `promtool test rules` no CI | Alerta é código: PromQL errada quebra o build em vez de silenciar o alerta ([Módulo 13.6d](13-mensageria-kafka.md)) |
 | Um processo, `service.name` e porta fixos no `tracing.ts` | `startTelemetry({ serviceName, metricsPort })` chamado pela API (`taskflow`, 9464) e pelo relay da outbox (`taskflow-relay`, 9465); queries sem span pai fora dos traces | O relay do [Módulo 13.3](13-mensageria-kafka.md) é outro processo: precisa aparecer separado no Jaeger e no Prometheus, sem o ruído do polling |
 
 ---
@@ -566,7 +575,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 - **Probes ainda sem consumidor:** não há manifesto Kubernetes nem `HEALTHCHECK` no Dockerfile. Os probes existem e foram testados, mas nada os chama automaticamente (Módulo 02 e a troca do Dockerfile para `node:24` não-root).
 - **Coleta de logs:** os logs saem em JSON no stdout, mas nenhum agregador os coleta localmente (ex.: Loki + Promtail no compose). Hoje se lê com `docker logs`/terminal.
 - **`correlationId` fora do HTTP:** um log emitido fora de uma requisição (boot, script) sai sem `correlationId`, e um evento gravado fora dela fica sem o campo no envelope.
-- **Sem alertas:** o dashboard mostra, mas ninguém é avisado. O próximo passo são regras de alerta (ex.: 5xx > 1% por 5 min, p95 acima do SLO) provisionadas também por arquivo.
+- **Alertas sem roteamento:** as regras existem e são testadas (Módulo 13.6d), mas sem Alertmanager: disparam em `/alerts` do Prometheus e ninguém é avisado fora dele. O próximo passo é o Alertmanager com roteamento por `severity` (critical → plantão, warning → canal), e silêncio durante deploy.
 - **Jaeger v1:** as imagens do compose têm versão fixa (nunca `:latest`, para o ambiente de amanhã ser igual ao de hoje), mas o `jaegertracing/all-in-one:1.76.0` é a última linha do **v1**, já descontinuado. O próximo passo é migrar para o Jaeger v2 (`jaegertracing/jaeger`), que é construído sobre o OpenTelemetry Collector.
 - **Amostragem (*sampling*):** hoje 100% das requisições geram trace. Em produção com alto volume, amostra-se (ex.: 10%, ou 100% só das que têm erro) para controlar custo. Com a outbox, a decisão é tomada **na API** e vale para o relay e o consumer: o *flag* `sampled` viaja no `traceparent` gravado ([Módulo 13](13-mensageria-kafka.md)).
 
@@ -582,6 +591,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 - [x] Logs estruturados em JSON com `trace_id`, `span_id` e `correlationId`
 - [x] `X-Correlation-Id` validado, gerado, devolvido e propagado por `AsyncLocalStorage`
 - [x] Trace propagado através de uma fronteira assíncrona (outbox → Kafka → consumer)
+- [x] Regras de alerta como código, testadas no CI (Módulo 13.6d)
 - [x] Liveness e readiness separados, sem vazar detalhes de infraestrutura
 - [x] Graceful shutdown: drenagem com readiness 503, HTTP antes do banco, OTel por último, watchdog
 - [x] Datasources e dashboard provisionados por arquivo, validados no CI

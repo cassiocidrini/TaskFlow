@@ -76,10 +76,11 @@ afterAll    → derruba o container
 test/
 ├── setup.ts                    # DISABLE_THROTTLE=true, NODE_ENV=test (antes de tudo)
 ├── setup-slow-suites.ts        # timeout de 60 s, só para integração, E2E e streaming
-├── support/                    # imagens dos containers (as MESMAS tags do compose) e startInMemoryTracing()
-├── unit/                       # 28 arquivos, 267 testes (inclui o JSON do dashboard do Grafana)
+├── support/                    # imagens dos containers (as MESMAS tags do compose: Postgres, Kafka, Prometheus) e startInMemoryTracing()
+├── unit/                       # 28 arquivos, 272 testes (inclui o JSON do dashboard do Grafana)
 ├── integration/
 │   ├── support/test-database.ts   # startTestDatabase(): Postgres + migrações
+│   ├── alert-rules.spec.ts        # 3 testes (promtool check + test rules das regras de alerta — Módulo 13.6d)
 │   ├── event-replay.spec.ts       # 7 testes (replay pela outbox, UNIQUE parcial, lock por agregado — Módulo 13.6b)
 │   ├── event-store.spec.ts        # 18 testes
 │   ├── graceful-shutdown.spec.ts  # 3 testes (ordem do app.close() com HTTP real, Módulo 01)
@@ -267,7 +268,7 @@ aleatória o broker anunciaria a porta interna. Por isso o helper escolhe uma po
 mapeia de forma fixa: anunciado e mapeado são o mesmo `localhost:<porta>` (o problema dos "dois listeners" do
 [Módulo 13](13-mensageria-kafka.md)).
 
-**Testes que provam que pegam o bug (mutação manual).** Catorze testes do Módulo 13 foram conferidos quebrando o código
+**Testes que provam que pegam o bug (mutação manual).** Dezesseis testes do Módulo 13 foram conferidos quebrando o código
 de propósito:
 
 | Mutação | Teste que falhou | O que mostrou |
@@ -284,6 +285,8 @@ de propósito:
 | `notifications` aceitando replay (13.6b) | Streaming "reconstrução do reports" | Notifica a atribuição de uma tarefa anterior à outbox. Na 1ª versão do teste, esta mutação **sobreviveu** (problema 16) |
 | Tirar o filtro de `redrive-group` do runner (13.6c) | Streaming "redrive" | O `reports` processa a mensagem reenviada ao `notifications` |
 | Tirar a consulta a `dlt_redrives` do redrive (13.6c) | Streaming "redrive" | A 2ª execução republica de novo, e só então falha na PK |
+| Voltar a janela do `ConsumerDatabaseUnavailable` para `[1m]` (13.6d) | Integração "test rules" | O alerta deixa de disparar; o `promtool` diz qual e em que instante |
+| Nome de métrica errado no painel de mensageria (13.6d) | Unitário do dashboard | "No data" virando teste vermelho, como no painel da API |
 | Commitar o offset mesmo sem o ack do DLT (13.5) | Streaming "DLT indisponível" | A mensagem de trás fura a fila. Na 1ª versão do teste, esta mutação **sobreviveu** (problema 14) |
 
 Um teste que nunca foi visto falhando pode estar testando nada; esta é a versão barata do *mutation testing*.
@@ -317,6 +320,7 @@ e é por isso que a mutação acima foi conferida: o teste precisa ser visto fal
 | 14 | **(13.5)** O teste "DLT indisponível" passava, e a mutação "commitar sem o ack do DLT" **também passava** | O teste dormia 12 s antes de criar o tópico do DLT; o join do grupo atrasou o 1º envio, o tópico apareceu antes do timeout de 10 s, e o envio **nunca falhou** | Esperar o erro acontecer (o log do runner) em vez de dormir. A mutação passou a quebrar o teste pelo motivo certo: a mensagem de trás furando a fila |
 | 15 | **(13.6a)** No CI, `pendingStats` falhou com idade **89,999889 s** onde o teste exige ≥ 90 (instável: nunca falhou localmente) | O teste gravava `now() - 90 s` numa coluna `TIMESTAMP(3)`, e o Postgres **arredonda** ao gravar (conferido: `.000611` vira `.001`). O instante ficava até 0,5 ms no futuro; com o `SELECT` seguinte mais rápido que isso, a idade saía abaixo de 90 | `date_trunc('milliseconds', …)` no teste. O código de produção não muda: meio milissegundo numa métrica em segundos é irrelevante. Lição: teste não pode exigir precisão abaixo da coluna |
 | 16 | **(13.6b)** O teste "o notifications ignora o replay" passava também com a proteção desligada | As mensagens de replay tinham eventIds já processados, e o `processed_events` as descartava com ou sem o header `replay` | Uma tarefa gravada só no Event Store (nunca publicada) entrou no teste: é o caso em que o header é a ÚNICA barreira. Mesma lição do problema 14, por outro caminho: a mutação mostra se o teste exercita a proteção que diz proteger |
+| 17 | **(13.6d)** O teste das regras falhava escondendo o motivo ("container failed to start") | O `promtool` sai com código ≠ 0 e o Testcontainers trata isso como falha de subida, sem a saída | Rodar o `promtool` por `sh -c '...; echo promtool-exit=$?'`: o container sempre termina bem, e a saída inteira (qual alerta, esperado × obtido) vai para a mensagem do teste |
 
 ### As lições que ficam
 
@@ -336,9 +340,9 @@ e é por isso que a mutação acima foi conferida: o teste precisa ser visto fal
 |---|---:|---:|---:|
 | Primeira versão deste módulo | 13 | 8 | 12 + 1 `todo` |
 | Antes do Módulo 13 | 166 | 27 | 38 |
-| **Hoje** | **267** | **68** | **49** |
+| **Hoje** | **272** | **71** | **49** |
 
-Mais **13 testes de streaming** (Kafka real), em ~72 s com as imagens em cache (o do DLT indisponível espera um
+Mais **13 testes de streaming** (Kafka real), em ~75 s com as imagens em cache (o do DLT indisponível espera um
 timeout real de 10 s do produtor).
 
 A suíte completa (`npm test`, em sequência) leva cerca de 3 minutos numa máquina de desenvolvimento com 8 GB

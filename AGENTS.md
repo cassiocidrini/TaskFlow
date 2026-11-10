@@ -107,8 +107,9 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | Caminho | Responsabilidade | Regra |
 |---|---|---|
 | Kafka no `docker-compose.yml` (`kafka`, `kafka-init`) | Broker KRaft no profile `streaming` + contrato dos tópicos | Tópico novo = `kafka-init` (autocriação desligada); nome `<sistema>.<assunto>.v<N>` só com `.` e `-`; mensagem de teste nunca no tópico de eventos; consumer group novo = DLT próprio `taskflow.<grupo>-dlt.v1` no `kafka-init` |
-| `grafana/` | Datasources e dashboard **provisionados** (montados no compose) | Mudança de dashboard = editar o JSON + PR; métrica nova no painel entra em `KNOWN_METRICS` de `test/unit/grafana-dashboard.spec.ts`; nunca agrupar por label de alta cardinalidade |
-| `prometheus.yml` | Jobs `taskflow` (9464), `taskflow-relay` (9465), `taskflow-notifications` (9467) e `taskflow-reports` (9468) | Processo novo com métricas = job novo com porta própria |
+| `grafana/` | Datasources e dashboards **provisionados** (`taskflow-api`, `taskflow-messaging`) (montados no compose) | Mudança de dashboard = editar o JSON + PR; métrica nova no painel entra em `KNOWN_METRICS` de `test/unit/grafana-dashboard.spec.ts`; nunca agrupar por label de alta cardinalidade |
+| `prometheus.yml` | Jobs `taskflow` (9464), `taskflow-relay` (9465), `taskflow-notifications` (9467), `taskflow-reports` (9468) e `kafka` (`kafka-exporter:9308`, lag pelo broker) | Processo novo com métricas = job novo com porta própria |
+| `prometheus/alerts.yml` + `alerts.test.yml` | 9 regras de alerta e os testes delas (`promtool test rules`, rodado por `test/integration/alert-rules.spec.ts`) | Alerta novo = regra + caso de teste com `exp_annotations`; contador de alerta publicado com 0 na subida; janela de `rate()` ≥ 4× a coleta; editou? `docker restart taskflow-prometheus` |
 | `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4), `kafka/smoke.ts` (Módulo 13) | Script novo de dev entra aqui, **nunca** em `src/` |
 | `load/k6/`, `load/autocannon/` | Testes de carga da API (Módulo 10) | Medem a API rodando; não são testes do Jest |
 | `labs/node-internals/` | Experimentos do runtime (Módulo 11) | Arquivos gerados (`*.txt`, ~100 MB) são ignorados pelo Git |
@@ -184,6 +185,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Gravar na outbox fora do `appendMany`/replay sem `lockAggregateForOutbox`; consumer group novo sem decidir `acceptsReplay` (efeito colateral = `false`).
 - ❌ Redrive sem política declarada em `redrive-policy.ts`, ou para projeção com guarda de versão (o `reports`): a mensagem reenviada cairia como duplicata; o caminho é a reconstrução.
 - ❌ `PROCESSED_EVENTS_RETENTION_DAYS` menor ou igual à retenção do tópico (o schema recusa; se a retenção do tópico mudar, mude o mínimo junto).
+- ❌ Histograma customizado sem buckets explícitos (`advice.explicitBucketBoundaries`): os padrões do OTel são para ms, e o percentil de uma métrica em segundos sai inventado.
 - ❌ DLQ no relay da outbox: decidido contra no Módulo 13.5 (falhas ali são de infraestrutura e atingem todas as mensagens); use o runbook.
 - ❌ Consumer criando o span `process` sem o contexto do header (o trace do request se partiria); use o `KafkaConsumerRunner`.
 - ❌ Consumer importando código do produtor (`tasks/`) para ler a mensagem, ou consultando tabelas da API: contrato próprio + projeção local.
@@ -223,7 +225,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · painel/alertas do relay e de lag (13.6d) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · roteamento de alertas (Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 
