@@ -34,6 +34,7 @@ npm run streaming:up                    # Kafka (profile streaming) + tópicos (
 npm run relay:dev                       # relay da outbox → Kafka (processo separado; build: npm run start:relay)
 npm run consumer:notifications:dev      # consumer group notifications (build: npm run start:consumer:notifications)
 npm run consumer:reports:dev            # consumer group reports (build: npm run start:consumer:reports)
+npm run replay                          # republica o Event Store pela outbox (--aggregate <taskId>; build: start:replay)
 
 # Qualidade — rodar SEMPRE antes de commitar
 npx tsc --noEmit && npm run lint && npm run test:unit
@@ -76,7 +77,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 |---|---|---|
 | `config/env.schema.ts` | Schema `zod` de TODAS as variáveis de ambiente | Variável nova entra aqui; ler via `ConfigService<Env, true>` |
 | `app.setup.ts` | Helmet, CORS, `ValidationPipe`, Swagger | Usado pelo `main.ts` **e** pelo E2E — não duplicar config HTTP |
-| `events/event-store.service.ts` | `append`/`appendMany` com `expectedVersion`, `{ actorId }` e `{ toOutbox }`, `loadEvents` | Único ponto de escrita no Event Store; monta o envelope `metadata` (`eventId`, `actorId`, `correlationId`, `schemaVersion`); grava `events` + `outbox` numa transação, com o contexto W3C ativo em `outbox.trace_context` |
+| `events/event-store.service.ts` | `append`/`appendMany` com `expectedVersion`, `{ actorId }` e `{ toOutbox }`, `loadEvents` | Único ponto de escrita no Event Store; monta o envelope `metadata` (`eventId`, `actorId`, `correlationId`, `schemaVersion`); grava `events` + `outbox` numa transação, com o contexto W3C ativo em `outbox.trace_context`; pega o lock de escrita do agregado (`aggregate-lock.ts`) na mesma transação |
 | `events/outbox.ts` | `OutboxMapper`, `OutboxMessage`, `RecordedEvent` | Store genérico: quem traduz evento de domínio em contrato público é o módulo dono do agregado |
 | `events/event-metadata.ts` | Tipo do envelope + `toEventMetadata` (zod, leitura) | Evento legado tem `metadata = {}`: campos opcionais na leitura, nunca inventados |
 | `modules/tasks/domain/` | `TaskAggregate`, contrato `TaskRepository` | **Zero imports** de Nest, Prisma ou infra |
@@ -91,6 +92,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `common/lifecycle/` | Encerramento do OTel pelo ciclo de vida do Nest; `armShutdownWatchdog` (API e relay) | `telemetry-registry.ts` não pode ter imports (é carregado pelo `tracing.ts`, antes de tudo) |
 | `common/telemetry/start-telemetry.ts` | `startTelemetry({ serviceName, metricsPort })` | Chamado por um arquivo de bootstrap por processo (`tracing.ts` = API/9464, `relay-tracing.ts` = relay/9465); só importa OTel, zod e arquivos sem dependências |
 | `relay.ts` + `outbox-relay/` | Processo do relay (`createApplicationContext`): `OutboxRelay` (loop), `OutboxStore` (advisory lock de transação), porta `MessagePublisher` → `KafkaMessagePublisher` | Um lote por vez (lock); nunca `SKIP LOCKED` (quebra a ordem por tarefa); falha = lote inteiro volta; relay genérico, não conhece Task |
+| `replay.ts` + `replay/` | Comando `npm run replay` (`--aggregate <id>`): republica o Event Store **pela outbox** (`replay = true`), com o mesmo mapper da API e o envelope original | Todo escritor da outbox pega `lockAggregateForOutbox` antes de gravar (senão a ordem por tarefa quebra); reconstruir projeção = runbook do Módulo 13 |
 | `config/relay-env.schema.ts`, `config/consumer-env.schema.ts` | Ambiente do relay e dos consumers (sem `JWT_SECRET`) | Campo comum aos processos reaproveita `envSchema.shape.X` / `relayEnvSchema.shape.KAFKA_BROKERS` |
 | `common/messaging/` | `KafkaConsumerRunner` (laço genérico de consumer group), `consumer-errors.ts` (classificação de falhas e decisão retry × DLT) e `toKafkaLogger` | Offset commitado **depois** do efeito; falha `permanent` (`NonRetryableError`) → DLT na hora, `infrastructure` (banco fora) → retry para sempre, `unknown` → 5 tentativas e DLT; ack do DLT **antes** do commit; `sessionTimeout` explícito; span `process` filho do `traceparent` do header |
 | `common/telemetry/trace-context.ts` | `captureTraceContext`, `carrierFor`, `contextFromCarrier` | Contexto de trace que atravessa a outbox e o Kafka (W3C). Sempre pelo propagador global, nunca montando o `traceparent` à mão |
@@ -177,6 +179,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Consumer com efeito fora da transação da marca em `processed_events`, ou commitando o offset antes do efeito (at-most-once).
 - ❌ Mandar para o DLT sem classificar a falha (banco fora esvaziaria o tópico no DLT), ou commitar o offset sem o ack do DLT. Mensagem que nunca vai ser processável: lance uma `NonRetryableError`.
 - ❌ Contador de projeção atualizado lendo, somando no Node e gravando (*lost update*: 20 conclusões paralelas viraram 3); use `SET coluna = coluna + delta`.
+- ❌ Gravar na outbox fora do `appendMany`/replay sem `lockAggregateForOutbox`; consumer group novo sem decidir `acceptsReplay` (efeito colateral = `false`).
 - ❌ DLQ no relay da outbox: decidido contra no Módulo 13.5 (falhas ali são de infraestrutura e atingem todas as mensagens); use o runbook.
 - ❌ Consumer criando o span `process` sem o contexto do header (o trace do request se partiria); use o `KafkaConsumerRunner`.
 - ❌ Consumer importando código do produtor (`tasks/`) para ler a mensagem, ou consultando tabelas da API: contrato próprio + projeção local.
@@ -216,7 +219,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · replay do Event Store (13.6b) · *redrive* do DLT (13.6) · limpeza de `processed_events` · painel/alertas do relay e de lag · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · *redrive* do DLT (13.6c) · limpeza de `processed_events` · painel/alertas do relay e de lag (13.6d) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

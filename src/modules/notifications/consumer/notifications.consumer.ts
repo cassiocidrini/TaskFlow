@@ -46,6 +46,8 @@ export class NotificationsConsumer
       partitionsConsumedConcurrently: 3,
       handle: (message) => handler.handle(message),
       deadLetterTopic: NOTIFICATIONS_DLT,
+      // Efeito colateral: republicar o histórico não pode avisar de novo uma atribuição antiga
+      acceptsReplay: false,
       logger: this.logger,
     });
   }

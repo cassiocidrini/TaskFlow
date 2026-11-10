@@ -3,6 +3,7 @@ import { ConflictException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { currentCorrelationId } from '../common/correlation/correlation-context';
 import { captureTraceContext } from '../common/telemetry/trace-context';
+import { lockAggregateForOutbox } from './aggregate-lock';
 import { PrismaService } from '../prisma/prisma.service';
 import type { EventMetadata } from './event-metadata';
 import type { OutboxMapper } from './outbox';
@@ -161,9 +162,11 @@ export class EventStoreService {
       if (outbox.length === 0) {
         await insertEvents;
       } else {
-        // Transação em lote (array), e não interativa: não há leitura entre as duas escritas. Conflito de versão
-        // no primeiro INSERT desfaz também o segundo, e o erro sai como P2002 do mesmo jeito
+        // Transação em lote (array), e não interativa: não há leitura entre as escritas. Conflito de versão no
+        // INSERT dos eventos desfaz também o da outbox, e o erro sai como P2002 do mesmo jeito. O lock do agregado
+        // vem primeiro: serializa esta gravação com um replay da mesma tarefa (ver `aggregate-lock.ts`)
         await this.prisma.$transaction([
+          lockAggregateForOutbox(this.prisma, events[0].aggregateId),
           insertEvents,
           this.prisma.outboxMessage.createMany({
             data: outbox.map((message) => ({

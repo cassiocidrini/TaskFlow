@@ -2,8 +2,8 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.6a de 13.8** (consumer group `reports`, com idempotência pela versão do
-> agregado). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **13.6b de 13.8** (replay do Event Store pela outbox, e reconstrução de
+> projeção). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`docker-compose.yml`](../../docker-compose.yml) (serviços `kafka` e `kafka-init`, profile
@@ -19,7 +19,9 @@
 > contexto de trace em [`trace-context.ts`](../../src/common/telemetry/trace-context.ts) ·
 > classificação de falhas e DLT em [`consumer-errors.ts`](../../src/common/messaging/consumer-errors.ts) ·
 > relatórios em [`src/reports-consumer.ts`](../../src/reports-consumer.ts) e
-> [`modules/reports/`](../../src/modules/reports/consumer/reports.handler.ts)
+> [`modules/reports/`](../../src/modules/reports/consumer/reports.handler.ts) ·
+> replay em [`src/replay.ts`](../../src/replay.ts), [`src/replay/`](../../src/replay/task-event-replayer.ts) e
+> [`aggregate-lock.ts`](../../src/events/aggregate-lock.ts)
 
 ---
 
@@ -48,8 +50,9 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | 13.4 + | **Um trace só** do request ao consumer: `traceparent` gravado na outbox e propagado no header do Kafka | ✅ |
 | **13.5** | **Retry classificado** (banco fora nunca vai ao DLT) e **dead-letter topic** por consumer group | ✅ |
 | **13.6a** | Consumer group `reports` (projeção `project_stats`) com **idempotência pela versão** do agregado, e `GET /projects/:projectId/stats` | ✅ |
-| 13.6b | **Replay** a partir do Event Store, *redrive* do DLT e limpeza de `processed_events` | 🔜 |
-| 13.6c | `kafka-exporter`, painel de **lag** e regras de alerta | 🔜 |
+| **13.6b** | **Replay** do Event Store pela outbox (lock por agregado, header `replay`) e runbook de reconstrução de projeção | ✅ |
+| 13.6c | *Redrive* do DLT e limpeza de `processed_events` | 🔜 |
+| 13.6d | `kafka-exporter`, painel de **lag** e regras de alerta | 🔜 |
 | 13.7 | *(opcional)* Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda | 🔜 |
 | 13.8 | ADRs e o diagrama final | 🔜 |
 
@@ -244,6 +247,10 @@ se a versão 2 já estiver commitada, e o comando só calculou "versão 3" porqu
 acontece depois do commit da v2, e o id da v3 é maior. A concorrência otimista, que já existia, é o que garante a
 ordem da outbox por chave, sem lock extra.
 
+> **Atualização (13.6b):** isso vale enquanto a API é o **único** escritor da outbox. Com o replay, um segundo
+> escritor que não passa pela versão, a premissa caiu, e a ordem passou a ser garantida por um advisory lock por
+> agregado que os dois pegam (ver "Replay do Event Store").
+
 ### Alternativas à outbox, e por que não aqui
 
 | Alternativa | Como funciona | Por que não (agora) |
@@ -338,7 +345,7 @@ martelado a cada 500 ms.
 
 Regras de alerta sugeridas (o provisionamento de alertas é limitação do Módulo 01):
 `outbox_oldest_pending_age_seconds > 60` por 2 min, `up{job="taskflow-relay"} == 0` por 1 min e
-`increase(outbox_relay_failures_total[5m]) > 0`. O painel no Grafana entra junto com o de lag dos consumers (13.6c).
+`increase(outbox_relay_failures_total[5m]) > 0`. O painel no Grafana entra junto com o de lag dos consumers (13.6d).
 
 ### O consumer idempotente (13.4)
 
@@ -556,7 +563,7 @@ COMMIT
 | | `notifications` (13.4) | `reports` (13.6a) |
 |---|---|---|
 | Idempotência | Tabela de marcas por `eventId` | Versão do agregado (monotônica) |
-| Custo | Uma linha por evento, para sempre (a limpeza é a 13.6b) | Uma linha por **tarefa**, que não cresce com os eventos |
+| Custo | Uma linha por evento, para sempre (a limpeza é a 13.6c) | Uma linha por **tarefa**, que não cresce com os eventos |
 | Reconhece versão antiga chegando depois da nova | Não (o `eventId` é outro) | Sim |
 | Serve quando | O efeito não tem estado para comparar | Há estado por chave e ordem por chave |
 
@@ -600,6 +607,79 @@ deles de desempenho hoje:
    refeito por replay (13.6b), e é o caminho que as limitações do [Módulo 05](05-event-sourcing-cqrs.md) apontam para
    as projeções internas;
 3. **escala:** com milhões de tarefas, os contadores e o lead time pré-calculados evitam varrer tudo a cada leitura.
+
+### Replay do Event Store (13.6b)
+
+O tópico guarda 7 dias; o Event Store guarda tudo. O replay republica o histórico de tarefas **a partir da tabela
+`events`**, para reconstruir uma projeção, levar o histórico a um consumer group novo ou incluir as tarefas que nunca
+passaram pela outbox (as anteriores à 13.2).
+
+```bash
+npm run replay                              # o histórico inteiro (build: node dist/replay)
+npm run replay -- --aggregate <taskId>      # uma tarefa
+```
+
+**Pela outbox, e não direto no Kafka.** O replay grava linhas na outbox com `replay = true` e termina; quem publica
+é o relay, que já cuida de ordem, retry, backoff e trace. O replay não fala com o broker. Passa pelo **mesmo** mapper da
+API (`toTaskOutboxMessage`), então publica exatamente o contrato que a API publicaria. Comando operacional, por isso
+em `src/` (entra no build e na imagem), e não em `scripts/`.
+
+**O envelope é o da gravação original**: `eventId`, `actorId`, `occurredAt` e `aggregateVersion` vêm da linha de
+`events`, não de agora. A guarda de versão das projeções e a idempotência dos consumers dependem disso. Evento
+**legado** (gravado antes do envelope, Módulo 05) não tem `eventId` nem autor: usa o `id` da linha (estável, então
+dois replays geram o mesmo `eventId`) e `UNKNOWN_ACTOR_ID` (o UUID nulo, documentado no contrato).
+
+**Três problemas que o desenho resolveu:**
+
+1. **O replay quebraria a ordem por tarefa.** A ordem da outbox se apoiava na concorrência otimista, que só
+   serializa a API **com ela mesma**. O replay é um segundo escritor:
+   ```text
+   replay lê v1..v4 da tarefa X
+                           API grava v5 da tarefa X → outbox id 1000
+   replay grava v1..v4    → outbox ids 1001..1004    (o consumer receberia v5 ANTES de v1)
+   ```
+   `SERIALIZABLE` não resolveria: o `BIGSERIAL` é atribuído no INSERT, não na ordem de commit. A solução é um
+   **advisory lock de transação por agregado** ([`aggregate-lock.ts`](../../src/events/aggregate-lock.ts)) que o
+   `appendMany` e o replay pegam antes de gravar. Custa uma instrução por gravação da API, sem disputa no caso comum.
+   Os testes provam que, com o lock de uma tarefa preso, **a API e o replay dessa tarefa esperam** (e tarefas
+   diferentes não). Eles não provocam a inversão em si; provam que os dois escritores não gravam a mesma tarefa ao
+   mesmo tempo, que é a condição para ela acontecer. Mutação: sem o lock em qualquer um dos dois, o teste quebra.
+
+2. **O replay não pode disparar efeitos.** Republicar o histórico faria o `notifications` avisar de novo uma
+   atribuição de meses atrás. A linha de replay vira o header `replay: true`, e cada consumer group **declara**
+   `acceptsReplay` no runner (obrigatório: grupo novo precisa decidir). O `reports` (projeção) aplica; o
+   `notifications` (efeito) commita sem processar (`result="ignored_replay"`). Detalhe que só a mutação mostrou: as
+   mensagens de replay de eventos já processados seriam barradas pelo `processed_events` de qualquer jeito; o header
+   só faz diferença para eventos que o `notifications` **nunca viu**, como os anteriores à outbox. É esse o caso que o
+   teste usa, e com o `notifications` aceitando replay ele notifica uma atribuição antiga.
+
+3. **O `UNIQUE (event_id)` da outbox impediria o replay** de republicar um evento que ainda está lá (as publicadas
+   ficam 72 h). Virou um índice **parcial**, `WHERE NOT replay`: a API continua sem poder gravar o mesmo evento duas
+   vezes (testado), e o replay pode repetir.
+
+**Lotes.** 50 tarefas por transação (`--batch-size`), com os locks pegos em ordem fixa (dois replays simultâneos não se
+travam; a API pega um lock só). Paginação por chave (`aggregate_id > último`), estável com tarefas sendo criadas
+durante o replay.
+
+**Por que não existe `--missing` ("só o que nunca foi publicado").** A limpeza do relay apaga as linhas publicadas
+depois de 72 h, então "nunca esteve na outbox" não é decidível pela outbox. Republicar tudo é seguro (os consumers são
+idempotentes) e é o que a reconstrução precisa.
+
+### Runbook: reconstruir uma projeção a partir do Event Store
+
+O replay sozinho não refaz o `reports`: a guarda de versão diz "já tenho a v4", e reenviar v1..v4 cai como duplicata.
+Reconstruir é este procedimento:
+
+1. parar o consumer da projeção;
+2. limpar as tabelas dela (`TRUNCATE report_tasks, project_stats`);
+3. `npm run replay` (com o relay rodando);
+4. subir o consumer. Ele retoma do offset commitado e lê as mensagens de replay; as de antes do replay que ainda não
+   tinha lido caem como `unknown_task` (a tarefa sumiu na limpeza) e o replay as cobre.
+
+Não depende mais da retenção do tópico. Executado no banco de desenvolvimento (resultados em "Resultados obtidos"): os 6
+projetos reais ficaram **idênticos**, 2 projetos com tarefas anteriores à outbox entraram pela primeira vez, e **72
+projetos fantasmas sumiram**: só existiam em eventos que os scripts das demos injetaram direto no tópico, sem passar
+pelo Event Store. É o "Event Store como fonte da verdade" acontecendo de fato.
 
 ### Um trace só através da outbox (`traceparent`)
 
@@ -959,10 +1039,21 @@ for g in notifications reports; do
     --bootstrap-server localhost:9092 --describe --group $g
 done
 
-# Reconstruir a projeção do zero a partir do que o tópico retém (7 dias): pare o consumer e então
-docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
-  --bootstrap-server localhost:9092 --delete --group reports
-# TRUNCATE report_tasks, project_stats; e suba o consumer de novo (grupo novo lê do início)
+```
+
+### 12. Replay e reconstrução da projeção (13.6b)
+
+Com o relay e os dois consumers rodando, siga o runbook "Reconstruir uma projeção a partir do Event Store":
+
+```bash
+kill -TERM <pid do consumer reports>                     # 1. parar (SIGTERM: sai do grupo na hora)
+docker exec taskflow-postgres psql -U <usuario-do-.env> -d taskflow_db \
+  -c 'TRUNCATE report_tasks, project_stats'              # 2. limpar
+npm run replay                                           # 3. replay → outbox → relay
+npm run consumer:reports:dev                             # 4. subir
+
+curl -s localhost:9468/metrics | grep kafka_consumer_messages_total   # reports: processed
+curl -s localhost:9467/metrics | grep ignored_replay                  # notifications: leu e ignorou
 ```
 
 ---
@@ -997,6 +1088,9 @@ docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-consumer-grou
 | 24 | **(13.5)** O header `dlt-error-message` saía em várias linhas no `kafka-console-consumer` | A mensagem de erro do zod tem quebras de linha | Espaços normalizados (uma linha só) e tamanho limitado a 500 caracteres; coberto no teste de streaming |
 | 25 | **(13.6a)** No primeiro teste, todo evento depois do `TaskCreated` falhava com `violates check constraint` | O upsert único (`INSERT … VALUES ($delta) ON CONFLICT DO UPDATE`) mandava o delta negativo na linha candidata, e o Postgres avalia o CHECK **antes** de resolver o `ON CONFLICT` | Upsert só no `TaskCreated` (deltas sempre positivos); os outros eventos fazem `UPDATE` puro, e a linha ausente vira erro. O CHECK pegou um defeito do próprio desenho no primeiro teste |
 | 26 | **(13.6a)** Na 1ª subida sobre o tópico de desenvolvimento: 33 falhas `unknown`, 6 mensagens no DLT por esgotamento e as partições presas ~7,5 s por mensagem | O script da demo da 13.5 gerava um `projectId` aleatório **por evento**: o `TaskAssigned` de uma tarefa dizia outro projeto que o `TaskCreated`. O handler confiava no projeto de cada evento e não achava a linha | Evento que contradiz o projeto guardado da tarefa é `InvalidReportMessageError` (DLT na 1ª falha). Refeita do zero: 70 mensagens assim foram ao DLT sem nenhuma nova tentativa, e o grupo zerou o lag em 3,4 s. O dado era lixo de demo; a premissa não verificada era real |
+| 27 | **(13.6b)** O primeiro desenho do replay quebraria a ordem por tarefa | A ordem da outbox se apoiava na concorrência otimista, que só serializa a API consigo mesma; o replay é um segundo escritor | Advisory lock de transação por agregado no `appendMany` e no replay. `SERIALIZABLE` foi descartado: o `BIGSERIAL` é atribuído no INSERT, não na ordem de commit |
+| 28 | **(13.6b)** O replay não conseguiria republicar um evento ainda presente na outbox | `UNIQUE (event_id)`, criado para a API nunca gravar o mesmo evento duas vezes | Índice único **parcial** (`WHERE NOT replay`). O `migrate dev` parou pedindo confirmação interativa (recriar um índice único); a migração saiu do `prisma migrate diff`, e um diff seguinte vazio confirmou que não há drift |
+| 29 | **(13.6b)** O teste "o notifications ignora o replay" passava também com o `notifications` aceitando replay | As mensagens de replay tinham eventIds já processados: o `processed_events` as barrava, com ou sem o header | Uma tarefa gravada só no Event Store (anterior à outbox) entrou no teste; com a mutação, o `notifications` notifica a atribuição dela. Mesma lição do problema 22: o teste precisa exercitar o caso em que a proteção é a ÚNICA barreira |
 
 ---
 
@@ -1097,6 +1191,19 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Testes novos | 19 unitários (deltas de cada transição, invariante do ciclo, leitor tolerante, ambiente), 9 de integração (guarda de versão, concorrência nos dois níveis, tarefa desconhecida, projeto trocado, `asOf`, CHECK), 5 E2E (rota, dono × intruso, projeto vazio), 1 de streaming (dois grupos e republicação) |
 | Suítes | 255 unitários · 57 integração · 49 E2E · 11 streaming (~61 s, 3 execuções estáveis) |
 
+**13.6b — replay e reconstrução** (banco de desenvolvimento, processos em `node dist/...`)
+
+| Experimento | Resultado |
+|---|---|
+| `npm run start:replay` (histórico inteiro) | **869 eventos de 863 tarefas** gravados na outbox em **457 ms**; o relay publicou tudo em 1,3 s |
+| Runbook de reconstrução do `reports` | Lag 0 em **4,8 s** desde o início do replay; **869 `processed`** |
+| O `notifications` diante do mesmo replay | **869 `ignored_replay`**, nenhuma notificação nova (880 antes e depois) |
+| Projeção antes × depois | **6 projetos reais idênticos** (contadores, lead time e `asOf`); **2 novos** (tarefas anteriores à outbox, uma delas o evento legado sem envelope); **72 fantasmas eliminados** (só existiam em eventos injetados direto no tópico pelos scripts das demos) |
+| **Mutação:** sem o lock no `appendMany` / no replay | O teste correspondente quebra: a gravação não espera o lock preso |
+| **Mutação:** `notifications` aceitando replay | Notifica a atribuição da tarefa anterior à outbox (4 → 5 notificações) |
+| Testes novos | 6 unitários (tradução do histórico, header do relay), 7 de integração (ordem e eventIds, republicar de novo, UNIQUE parcial, lotes, evento legado, lock na API e no replay), 1 de streaming (reconstrução com uma tarefa anterior à outbox) |
+| Suítes | 261 unitários · 64 integração · 49 E2E · 12 streaming (~62 s, 3 execuções estáveis) |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -1112,19 +1219,25 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Três traces sem ligação: `POST`, `publish` do relay e `process` do consumer | **(13.4 +)** Um trace só, do request à notificação: `traceparent` gravado na outbox, `create` por mensagem no relay, `process` filho dele no consumer | Dá para seguir um evento pelos três processos e ver onde o tempo foi gasto (na outbox, não no Kafka) |
 | Mensagem envenenada travava a partição para sempre | **(13.5)** Falhas classificadas: contrato violado vai ao DLT na hora, banco fora tenta para sempre, o resto 5 vezes; DLT por grupo, com ack antes do commit | Uma *poison pill* não para mais 1/3 do sistema, e uma queda do banco não esvazia o tópico no DLT |
 | Um consumer group no tópico | **(13.6a)** Dois grupos, `notifications` e `reports`, cada um com offset, processo, DLT e forma de idempotência próprios; `GET /projects/:projectId/stats` | O primeiro read model alimentado pelo tópico, reconstruível, com a idempotência pela versão do agregado |
+| Projeção reconstruível só a partir do que o tópico retém (7 dias) | **(13.6b)** `npm run replay` republica o Event Store pela outbox, com lock por agregado e header `replay`; runbook de reconstrução | O Event Store vira, na prática, a fonte de qualquer read model; o tópico é transporte |
 | Um processo de telemetria (`tracing.ts` fixo) | **(13.3)** `startTelemetry` por processo; relay como `taskflow-relay` na porta 9465 | Dois processos observáveis separadamente ([Módulo 01](01-observabilidade.md)) |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
-- **Tarefas anteriores à outbox ficam fora dos relatórios** (`unknown_task`): o `TaskCreated` delas nunca foi
-  publicado. O replay do Event Store (13.6b) resolve.
-- **Reconstruir a projeção depende da retenção do tópico (7 dias)** enquanto não houver replay do Event Store (13.6b).
+- **Tarefas anteriores à outbox ficam fora dos relatórios até um replay**: o `TaskCreated` delas nunca foi publicado
+  pela API. O runbook de reconstrução as inclui.
+- **Replay republica tudo:** não há "só o que falta" (ver "Por que não existe `--missing`"), e um histórico grande
+  passa inteiro pelo tópico. O próximo passo seria replay por período ou por projeto.
+- **Reconstruir exige parar o consumer da projeção** durante o replay: os números ficam fora do ar (ou parciais) até o
+  lag zerar. A alternativa sem indisponibilidade é construir a projeção nova em tabelas paralelas com outro grupo e
+  trocar no fim (*blue-green* de projeção).
+- **O lock por agregado custa uma instrução por gravação da API**, mesmo sem replay rodando.
 - **`project_stats` é uma linha quente por projeto:** em escala, um projeto muito ativo serializa os UPDATEs nela.
   O próximo passo seria contadores particionados (N linhas por projeto, somadas na leitura).
 - **DLT sem reprocessamento automático.** Hoje se inspeciona com o `kafka-console-consumer`; reenviar a mensagem
-  corrigida é o *redrive*, que entra com o replay (13.6b).
+  corrigida é o *redrive* (13.6c).
 - **O DLT troca ordem por disponibilidade:** as mensagens seguintes da mesma tarefa passam sem a desviada (ver "O
   trade-off honesto"). Estacionar a chave fica registrado, não implementado.
 - **Banco fora para a partição inteira, por quanto tempo durar**, e a volta leva até 30 s (o teto do backoff). É a
@@ -1134,7 +1247,7 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - **Contagem de tentativas em memória:** um restart ou rebalance recomeça a contagem de uma falha `unknown`. Só atrasa
   o DLT; não perde nada.
 - **`processed_events` cresce para sempre.** A marca precisa durar pelo menos a retenção do tópico (7 dias) mais a
-  janela de um replay; uma limpeza por data entra junto com o replay (13.6b).
+  janela de um replay; a limpeza por data é a 13.6c.
 - **Fronteira entre contextos por convenção:** API e consumer usam o mesmo Postgres. Em microsserviços seriam bancos
   separados; aqui a regra (o consumer não lê as tabelas da API; a API só **lê** as notificações) está no AGENTS.md.
 - **Grupo novo lê o histórico retido:** a primeira subida de um consumer notifica eventos de até 7 dias atrás.
@@ -1159,8 +1272,6 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
   a projeção, o read model fica desatualizado (o dual-write do [Módulo 05](05-event-sourcing-cqrs.md)). A outbox
   resolve o caminho do **Kafka**, não esse. O caminho natural seria a projeção consumir do tópico, como os consumer
   groups `notifications` e `reports` já fazem.
-- **Eventos gravados antes da 13.2 não estão na outbox.** Publicá-los é um replay a partir da tabela `events`
-  (etapa 13.6b).
 - **`partialIndexes` é preview feature do Prisma.** Se mudar de forma numa versão futura, o índice vai para o SQL da
   migração com uma exceção documentada para o drift.
 - **Um nó só:** RF 1, sem ISR; perder o broker é perder o log. É ambiente de desenvolvimento.
@@ -1191,8 +1302,9 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - [x] Retry classificado e dead-letter topic por grupo, com ack antes do commit (13.5)
 - [x] DLQ no relay avaliada e recusada, com runbook (13.5)
 - [x] Segundo consumer group no mesmo tópico, com idempotência pela versão do agregado e concorrência provada (13.6a)
-- [ ] Replay, *redrive* do DLT e limpeza de `processed_events` (13.6b)
-- [ ] Painel de lag e alertas (13.6c)
+- [x] Replay do Event Store pela outbox, sem quebrar a ordem por tarefa nem disparar efeitos, e runbook de reconstrução (13.6b)
+- [ ] *Redrive* do DLT e limpeza de `processed_events` (13.6c)
+- [ ] Painel de lag e alertas (13.6d)
 - [ ] Kafka × SQS no mesmo sistema (13.7, opcional)
 - [ ] ADRs (13.8)
 

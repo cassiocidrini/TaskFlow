@@ -70,11 +70,13 @@ model Event {
 // dos eventos do Event Store. Ou os dois existem, ou nenhum: sem dual-write. Um relay (13.3) lê as pendentes e
 // publica; at-least-once, com `event_id` como chave de idempotência dos consumers.
 model OutboxMessage {
-  // BIGSERIAL: ordem de leitura do relay. Entre transações concorrentes o id NÃO segue a ordem de commit, mas
-  // para a MESMA tarefa as gravações são serializadas pela concorrência otimista, então a ordem por chave vale.
+  // BIGSERIAL: ordem de leitura do relay. Entre transações concorrentes o id NÃO segue a ordem de commit, mas para a
+  // MESMA tarefa todo escritor da outbox (API e replay) pega o advisory lock do agregado na transação, então a ordem
+  // por chave vale (Módulo 13.6b; antes, só a concorrência otimista da API garantia isso)
   id          BigInt    @id @default(autoincrement())
-  // O mesmo `metadata.eventId` do Event Store: liga a mensagem ao evento e impede publicar o mesmo evento 2x
-  eventId     String    @unique @map("event_id") @db.Uuid
+  // O mesmo `metadata.eventId` do Event Store: liga a mensagem ao evento. Único só entre as linhas da API (índice
+  // parcial abaixo): a API nunca grava o mesmo evento 2x, e o replay pode republicar o que ainda está na outbox
+  eventId     String    @map("event_id") @db.Uuid
   // Destino e chave já resolvidos na gravação: o relay fica genérico (não conhece Task)
   topic       String
   messageKey  String    @map("message_key")
@@ -90,9 +92,13 @@ model OutboxMessage {
   // Contexto de trace W3C (`traceparent`/`tracestate`) de quem gravou o evento: o relay o continua e o põe nos
   // headers da mensagem, e o trace atravessa a outbox (Módulo 13). NULL = gravado fora de um span (scripts, seed)
   traceContext Json?    @map("trace_context")
+  // Republicação do histórico (`npm run replay`, Módulo 13.6b). Vira o header `replay: true`: projeções aplicam,
+  // consumers de efeito (notificações) ignoram
+  replay       Boolean  @default(false)
 
   // Parcial: o relay só procura pendentes, e o índice não cresce com o que já foi publicado
   @@index([id], map: "outbox_pending_idx", where: raw("published_at IS NULL"))
+  @@unique([eventId], map: "outbox_event_id_key", where: raw("NOT replay"))
   @@map("outbox")
 }
 

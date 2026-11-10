@@ -24,6 +24,13 @@ import type {
 export const TASK_EVENTS_TOPIC = 'taskflow.task-events.v1';
 
 /**
+ * `actorId` de um evento LEGADO, gravado antes do envelope de metadados existir (Módulo 05), quando republicado pelo
+ * replay (Módulo 13.6b). O contrato exige um autor; para esses eventos ele é desconhecido, e o UUID nulo diz isso de
+ * forma explícita e válida (passa no `z.uuid()` dos consumers), em vez de inventar um autor ou omitir o campo.
+ */
+export const UNKNOWN_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
+
+/**
  * Versão do formato do `data` de cada tipo, NO CONTRATO PÚBLICO. Independente do `schemaVersion` do domínio:
  * um upcaster interno não muda o que o consumer recebe, e vice-versa. Mudança compatível (campo opcional novo)
  * mantém a versão; incompatível incrementa, e o consumer decide pelo `eventVersion` como ler.

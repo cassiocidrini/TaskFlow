@@ -111,6 +111,7 @@ describe('Retry e dead-letter topic (streaming)', () => {
       brokers: kafka.brokers,
       topics: [options.topic],
       deadLetterTopic: options.dlt,
+      acceptsReplay: true,
       partitionsConsumedConcurrently: 3,
       logger,
       ...options,
