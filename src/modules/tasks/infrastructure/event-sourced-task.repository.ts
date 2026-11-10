@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import type { Event as StoredEvent } from '@prisma/client';
-import { EventStoreService } from '../../../events/event-store.service';
+import { EventStoreService, type DomainEvent } from '../../../events/event-store.service';
 import { TaskAggregate } from '../domain/task.aggregate';
 import { TaskRepository, type SaveContext } from '../domain/task.repository';
+import { toTaskOutboxMessage } from '../events/task.integration-events';
 import { TASK_EVENT_SCHEMA_VERSIONS, type TaskDomainEvent } from '../events/task.events';
 
 const AGGREGATE_TYPE = 'Task';
@@ -23,7 +24,8 @@ const KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<TaskDomainEvent['type']>(
  *
  * - `load`: lê o stream do agregado e o reconstrói com `TaskAggregate.fromHistory` (replay).
  * - `save`: grava os eventos pendentes num ÚNICO `INSERT` atômico (`appendMany`), com
- *   `expectedVersion = task.version` — a concorrência otimista que transforma uma corrida em 409.
+ *   `expectedVersion = task.version` — a concorrência otimista que transforma uma corrida em 409. Na mesma
+ *   transação, cada evento vira um evento de INTEGRAÇÃO na outbox (Módulo 13.2), com o `projectId` da tarefa.
  */
 @Injectable()
 export class EventSourcedTaskRepository extends TaskRepository {
@@ -46,18 +48,22 @@ export class EventSourcedTaskRepository extends TaskRepository {
       return []; // nada mudou (ex.: comando idempotente) — não toca no banco
     }
 
-    // Um único INSERT atômico; conflito de versão → ConcurrencyConflictError (409)
-    await this.eventStore.appendMany(
-      events.map((event) => ({
+    const stored = events.map(
+      (event): DomainEvent => ({
         aggregateId: task.id,
         aggregateType: AGGREGATE_TYPE,
         eventType: event.type,
         payload: { ...event.data },
         schemaVersion: TASK_EVENT_SCHEMA_VERSIONS[event.type],
-      })),
-      task.version,
-      { actorId: context.actorId },
+      }),
     );
+    // O Event Store devolve ao mapper o MESMO objeto que recebeu: daí se volta ao evento tipado, sem cast do payload
+    const typedByStored = new Map(stored.map((storedEvent, index) => [storedEvent, events[index]]));
+
+    // Eventos + outbox numa transação; conflito de versão → ConcurrencyConflictError (409) e nenhuma das duas
+    await this.eventStore.appendMany(stored, task.version, { actorId: context.actorId }, {
+      toOutbox: ({ event, ...recorded }) => toTaskOutboxMessage(typedByStored.get(event)!, recorded, task.projectId),
+    });
 
     return events;
   }

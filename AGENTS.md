@@ -72,12 +72,13 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 |---|---|---|
 | `config/env.schema.ts` | Schema `zod` de TODAS as variáveis de ambiente | Variável nova entra aqui; ler via `ConfigService<Env, true>` |
 | `app.setup.ts` | Helmet, CORS, `ValidationPipe`, Swagger | Usado pelo `main.ts` **e** pelo E2E — não duplicar config HTTP |
-| `events/event-store.service.ts` | `append`/`appendMany` com `expectedVersion` e `{ actorId }`, `loadEvents` | Único ponto de escrita no Event Store; monta o envelope `metadata` (`eventId`, `actorId`, `correlationId`, `schemaVersion`) |
+| `events/event-store.service.ts` | `append`/`appendMany` com `expectedVersion`, `{ actorId }` e `{ toOutbox }`, `loadEvents` | Único ponto de escrita no Event Store; monta o envelope `metadata` (`eventId`, `actorId`, `correlationId`, `schemaVersion`); grava `events` + `outbox` numa transação |
+| `events/outbox.ts` | `OutboxMapper`, `OutboxMessage`, `RecordedEvent` | Store genérico: quem traduz evento de domínio em contrato público é o módulo dono do agregado |
 | `events/event-metadata.ts` | Tipo do envelope + `toEventMetadata` (zod, leitura) | Evento legado tem `metadata = {}`: campos opcionais na leitura, nunca inventados |
 | `modules/tasks/domain/` | `TaskAggregate`, contrato `TaskRepository` | **Zero imports** de Nest, Prisma ou infra |
 | `modules/tasks/infrastructure/` | `EventSourcedTaskRepository`, `toDomainEvent` | Único cast de leitura do Event Store vive aqui |
 | `modules/tasks/commands/` | Commands, handlers, `TaskCommandRunner` | Handler de ciclo de vida = 1 linha via runner |
-| `modules/tasks/events/` | Eventos de domínio + projeções (`@EventsHandler`) | Projeções **idempotentes** |
+| `modules/tasks/events/` | Eventos de domínio + projeções (`@EventsHandler`) + `task.integration-events.ts` (contrato público do tópico) | Projeções **idempotentes**; contrato de integração mapeado **campo a campo** (nunca `...spread` do payload de domínio) |
 | `modules/projects/` | CRUD de projetos + `assertOwner` | Ponto único de autorização por projeto |
 | `common/dto/pagination.dto.ts` | Paginação por cursor (`limit ≤ 100`) | Reusar em toda listagem |
 | `common/correlation/` | `X-Correlation-Id` (1º middleware) + `AsyncLocalStorage` | Ler o id com `currentCorrelationId()`, nunca de parâmetro ou header |
@@ -98,7 +99,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 
 ### Padrões aplicados (e onde)
 
-CQRS (`commands/` × `queries/`) · Event Sourcing (`TaskAggregate` + Event Store) · **Repository** (`TaskRepository` → `EventSourcedTaskRepository`) · Template Method funcional (`TaskCommandRunner`) · Strategy (`task-priority.strategy.ts`) · Observer (`EventBus` → projeções).
+CQRS (`commands/` × `queries/`) · Event Sourcing (`TaskAggregate` + Event Store) · **Repository** (`TaskRepository` → `EventSourcedTaskRepository`) · Template Method funcional (`TaskCommandRunner`) · Strategy (`task-priority.strategy.ts`) · Observer (`EventBus` → projeções) · **Transactional Outbox** (`appendMany` + tabela `outbox`, Módulo 13.2).
 **Não existe** Factory no código — não referencie nem gere uma sem pedido explícito.
 
 ### Ordem crítica no `main.ts`
@@ -116,15 +117,16 @@ O `tracing.ts` também só pode importar arquivos sem dependências de bibliotec
 
 ## 🧩 Receitas
 
-### Adicionar um evento novo ao ciclo de vida da tarefa (5 lugares)
+### Adicionar um evento novo ao ciclo de vida da tarefa (6 lugares)
 
 1. `events/task.events.ts`: interface `XData` + classe `XEvent` (construtor com **objeto nomeado**) + entrada na união `TaskDomainEvent` + versão em `TASK_EVENT_SCHEMA_VERSIONS`.
 2. `domain/task.aggregate.ts`: método de comando (valida invariantes → `raise`) + `case` no `apply()`.
 3. `commands/task-command.runner.ts`: `case` no `toBusEvent()`.
 4. `infrastructure/event-sourced-task.repository.ts`: tipo em `KNOWN_EVENT_TYPES`.
 5. `events/task-lifecycle.projections.ts`: projeção idempotente (+ registrar no `tasks.module.ts`).
+6. `events/task.integration-events.ts`: interface `XIntegrationData` (só o que o consumer precisa) + `case` no `toTaskIntegrationEvent` + versão em `TASK_INTEGRATION_EVENT_VERSIONS`. É o contrato **público** do tópico: campo a campo, sem `...spread`.
 
-Os `switch` são exaustivos (`never`) e o `TASK_EVENT_SCHEMA_VERSIONS` é um `Record` exaustivo: esquecer a versão do passo 1 ou os passos 2 e 3 **não compila**. Os passos 4 e 5 só falham em runtime → cubra com teste.
+Os `switch` são exaustivos (`never`) e os `Record` de versão são exaustivos: esquecer as versões dos passos 1 e 6 ou os passos 2, 3 e 6 **não compila**. Os passos 4 e 5 só falham em runtime → cubra com teste.
 
 Mudou o formato de um `XData` já gravado? Incremente a versão em `TASK_EVENT_SCHEMA_VERSIONS` e trate a versão antiga na leitura (*upcaster*): eventos gravados não são reescritos.
 
@@ -193,7 +195,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · API publicando no Kafka (broker e tópicos existem; outbox, relay e consumers ainda não) · Transactional Outbox / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · API publicando no Kafka (broker, tópicos e outbox existem; relay e consumers ainda não: as linhas da `outbox` ficam com `published_at NULL`) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

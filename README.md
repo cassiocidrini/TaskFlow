@@ -239,8 +239,8 @@ e cancela execuções obsoletas do mesmo PR.
 
 Escolhas conscientes de escopo, com o próximo passo de cada uma:
 
-- **Dual-write entre Event Store e EventBus:** se o processo cair entre gravar e publicar, a projeção não é atualizada. Próximo passo: *Transactional Outbox* + comando de **replay** das projeções.
-- **EventBus em memória:** entrega em ordem dentro de um processo. O Kafka já está no compose (Módulo 13, etapa 13.1), mas a API ainda não publica nele: o caminho confiável (outbox + relay) vem nas próximas etapas. Com um broker externo, as projeções precisarão guardar a versão do agregado para descartar eventos fora de ordem.
+- **Dual-write entre Event Store e EventBus (projeções internas):** se o processo cair entre gravar e publicar, a projeção não é atualizada. A *Transactional Outbox* já existe (Módulo 13.2), mas cobre o caminho do Kafka; as projeções continuam no `EventBus` em memória. Próximo passo: projeções consumindo do tópico + comando de **replay**.
+- **EventBus em memória:** entrega em ordem dentro de um processo. O Kafka já está no compose (Módulo 13, etapa 13.1) e cada evento já é gravado na `outbox` na mesma transação do Event Store (13.2), mas ainda não há relay: nada é publicado no Kafka até a etapa 13.3. Com um broker externo, as projeções precisarão guardar a versão do agregado para descartar eventos fora de ordem.
 - **Logs:** JSON no stdout com `correlationId` e `trace_id`, mas sem agregador local (Loki).
 - **Sem alertas:** o dashboard provisionado mostra os sinais, mas nenhuma regra de alerta avisa quando o 5xx ou o p95 passam do limite.
 - **Eventos antigos sem autor:** eventos gravados antes do envelope de metadados aparecem no histórico com `actorId: null`; o autor não é inferido. O metadata ainda não chega ao `EventBus` nem às projeções.

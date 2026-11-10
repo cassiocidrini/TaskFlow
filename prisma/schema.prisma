@@ -1,5 +1,8 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  // partialIndexes: o índice das pendentes da outbox (WHERE published_at IS NULL) declarado AQUI. Criado só no
+  // SQL da migração, o `migrate dev` o veria como drift e geraria um DROP INDEX na migração seguinte.
+  previewFeatures = ["partialIndexes"]
 }
 
 datasource db {
@@ -61,6 +64,33 @@ model Event {
   // anterior: o índice único atende as mesmas consultas (WHERE aggregate_id ORDER BY version).
   @@unique([aggregateId, version])
   @@map("events")
+}
+
+// Transactional Outbox (Módulo 13.2): o evento de INTEGRAÇÃO a publicar no Kafka, gravado na MESMA transação
+// dos eventos do Event Store. Ou os dois existem, ou nenhum: sem dual-write. Um relay (13.3) lê as pendentes e
+// publica; at-least-once, com `event_id` como chave de idempotência dos consumers.
+model OutboxMessage {
+  // BIGSERIAL: ordem de leitura do relay. Entre transações concorrentes o id NÃO segue a ordem de commit, mas
+  // para a MESMA tarefa as gravações são serializadas pela concorrência otimista, então a ordem por chave vale.
+  id          BigInt    @id @default(autoincrement())
+  // O mesmo `metadata.eventId` do Event Store: liga a mensagem ao evento e impede publicar o mesmo evento 2x
+  eventId     String    @unique @map("event_id") @db.Uuid
+  // Destino e chave já resolvidos na gravação: o relay fica genérico (não conhece Task)
+  topic       String
+  messageKey  String    @map("message_key")
+  eventType   String    @map("event_type")
+  // O contrato PÚBLICO (envelope + data), não o payload interno do Event Store
+  payload     Json
+  createdAt   DateTime  @default(now()) @map("created_at")
+  // NULL = pendente. Diferente da tabela `events`, a outbox é mutável: é fila de trabalho, não histórico
+  publishedAt DateTime? @map("published_at")
+  // Diagnóstico de uma linha travada (relay, 13.3)
+  attempts    Int       @default(0)
+  lastError   String?   @map("last_error")
+
+  // Parcial: o relay só procura pendentes, e o índice não cresce com o que já foi publicado
+  @@index([id], map: "outbox_pending_idx", where: raw("published_at IS NULL"))
+  @@map("outbox")
 }
 
 model TaskRead {

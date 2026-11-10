@@ -8,6 +8,8 @@
  * - Paginação "sem repetição nem buracos" e ciclo de vida completo, com 409 em tarefa concluída.
  * - Auditoria: cada evento do histórico traz o autor (userId do JWT) e o `X-Correlation-Id` da requisição que o
  *   gerou — a prova de que o envelope de metadados atravessa HTTP → comando → Event Store → leitura.
+ * - Outbox (Módulo 13.2): cada evento gravado por QUALQUER rota (inclusive a criação, que não passa pelo
+ *   repositório) tem a sua mensagem na outbox, com o mesmo `eventId`, chave = taskId e ordem por versão.
  *
  * Testes com consistência eventual: rode 3 vezes antes de confiar.
  */
@@ -86,6 +88,7 @@ describe('Tasks (e2e)', () => {
       await http().post(tasksUrl()).set(intruder.auth).send({ title: 'Invasão' }).expect(404);
 
       expect(await ctx.prisma.event.count()).toBe(0); // append-only: nada indevido entrou
+      expect(await ctx.prisma.outboxMessage.count()).toBe(0); // e nada sairia para o Kafka
     });
 
     it('intruso NÃO deve ler o histórico de tarefa alheia', async () => {
@@ -254,6 +257,44 @@ describe('Tasks (e2e)', () => {
         expect.objectContaining({ type: 'TaskStatusChanged', actorId: owner.userId, correlationId: 'iniciar-002' }),
       ]);
       expect(history[0].eventId).not.toEqual(history[1].eventId);
+    });
+  });
+
+  // ============================================================
+  // Outbox (Módulo 13.2): o que vai para o Kafka é exatamente o que foi gravado
+  // ============================================================
+  describe('outbox', () => {
+    it('cada evento do ciclo de vida tem a sua mensagem na outbox, na ordem e com o mesmo eventId', async () => {
+      const res = await http()
+        .post(tasksUrl())
+        .set(owner.auth)
+        .set('X-Correlation-Id', 'outbox-001')
+        .send({ title: 'Publicar no Kafka' })
+        .expect(201);
+      const taskId = res.body.taskId as string;
+      const taskUrl = `${tasksUrl()}/${taskId}`;
+      await http().patch(`${taskUrl}/assignee`).set(owner.auth).send({ assigneeId: owner.userId }).expect(200);
+      await http().post(`${taskUrl}/complete`).set(owner.auth).expect(200);
+      await http().post(`${taskUrl}/complete`).set(owner.auth).expect(409); // recusado: não pode gerar mensagem
+
+      // Leitura direta, sem eventually(): a outbox é gravada na MESMA transação, já existe quando o 2xx sai
+      const history = (await http().get(`${taskUrl}/history`).set(owner.auth).expect(200)).body.history;
+      const outbox = await ctx.prisma.outboxMessage.findMany({ orderBy: { id: 'asc' } });
+
+      expect(outbox.map((m) => [m.eventType, m.topic, m.messageKey, m.publishedAt])).toEqual([
+        ['TaskCreated', 'taskflow.task-events.v1', taskId, null],
+        ['TaskAssigned', 'taskflow.task-events.v1', taskId, null],
+        ['TaskCompleted', 'taskflow.task-events.v1', taskId, null],
+      ]);
+      expect(outbox.map((m) => m.eventId)).toEqual(history.map((h: { eventId: string }) => h.eventId));
+      expect(outbox.map((m) => (m.payload as { aggregateVersion: number }).aggregateVersion)).toEqual([1, 2, 3]);
+      expect(outbox[0].payload).toMatchObject({
+        eventType: 'TaskCreated',
+        projectId,
+        actorId: owner.userId,
+        correlationId: 'outbox-001',
+        data: { title: 'Publicar no Kafka', priority: 'MEDIUM' },
+      });
     });
   });
 });

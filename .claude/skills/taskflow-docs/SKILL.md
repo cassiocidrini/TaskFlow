@@ -24,7 +24,8 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
    anti-IDOR do `projectId` da tarefa, `userId` só do JWT), A02/A07 (bcrypt, HS256 fixo, segredo ≥ 32), A05 (Helmet,
    CORS, Swagger fora de produção), API4 (`limit` ≤ 100, throttler).
 6. **Limitações conhecidas ficam documentadas ao lado do código, não escondidas.** As atuais (mantenha coerente com o
-   README e `docs/modules/`): Strategy com `new` e `DeadlinePriorityStrategy` sem uso; dual-write sem outbox;
+   README e `docs/modules/`): Strategy com `new` e `DeadlinePriorityStrategy` sem uso; dual-write nas projeções
+   (`EventBus` em memória; a outbox do Módulo 13.2 cobre só o Kafka); outbox sem relay (nada publicado ainda);
    throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; probes `/health` sem consumidor
    (sem manifesto Kubernetes nem `HEALTHCHECK`); Dockerfile em `node:20` e como root. Ao corrigir uma, tire-a daqui no MESMO PR.
 
@@ -45,8 +46,9 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
 
 ## Ao adicionar um evento ou comando (receitas do AGENTS.md)
 
-Os "5 lugares" do evento também ganham documentação: a interface `Data` (o contrato persistido — mudar quebra o
-histórico) e a classe `Event` em `task.events.ts`; o `apply` do agregado; a projeção (por que é idempotente); e a
+Os "6 lugares" do evento também ganham documentação: a interface `Data` (o contrato persistido — mudar quebra o
+histórico) e a classe `Event` em `task.events.ts`; o `apply` do agregado; a projeção (por que é idempotente); o
+contrato de integração em `task.integration-events.ts` (público: mudar quebra consumers de outros serviços); e a
 rota no Swagger com o 409 se a transição puder ser recusada.
 
 ## Testes

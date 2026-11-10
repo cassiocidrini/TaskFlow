@@ -1,12 +1,16 @@
 # Módulo 13 — Mensageria e streaming de eventos com Kafka
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 09/11/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.1 de 13.8** (infraestrutura do broker). Cada etapa acrescenta a sua parte
-> a este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
+> **Status:** 🚧 em construção, etapa **13.2 de 13.8** (Transactional Outbox). Cada etapa acrescenta a sua parte a
+> este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`docker-compose.yml`](../../docker-compose.yml) (serviços `kafka` e `kafka-init`, profile
-> `streaming`) · [`scripts/kafka/smoke.ts`](../../scripts/kafka/smoke.ts)
+> `streaming`) · [`scripts/kafka/smoke.ts`](../../scripts/kafka/smoke.ts) ·
+> [`event-store.service.ts`](../../src/events/event-store.service.ts) (`appendMany` com outbox) ·
+> [`outbox.ts`](../../src/events/outbox.ts) ·
+> [`task.integration-events.ts`](../../src/modules/tasks/events/task.integration-events.ts) (o contrato público) ·
+> tabela `outbox` em [`schema.prisma`](../../prisma/schema.prisma)
 
 ---
 
@@ -29,7 +33,7 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | Etapa | O que entrega | Status |
 |---|---|:-:|
 | **13.1** | Broker Kafka 4 (KRaft) no compose, tópico `taskflow.task-events.v1`, smoke test do cliente | ✅ |
-| 13.2 | **Transactional Outbox**: o evento de integração gravado na **mesma transação** do Event Store | 🔜 |
+| **13.2** | **Transactional Outbox**: o evento de integração gravado na **mesma transação** do Event Store | ✅ |
 | 13.3 | **Relay**: processo *worker* que publica o outbox no Kafka (produtor idempotente, chave = `aggregateId`) | 🔜 |
 | 13.4 | Consumer group `notifications` com **idempotência** (`processed_events` na mesma transação do efeito) | 🔜 |
 | 13.5 | **Retry com backoff** e **dead-letter topic** | 🔜 |
@@ -39,14 +43,21 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 13.1)
+## 🏗️ Arquitetura (estado atual: 13.2)
 
 ```mermaid
 flowchart LR
     subgraph host["Host (sua máquina)"]
         SMOKE["npm run kafka:smoke<br/>(scripts/kafka/smoke.ts)"]
-        API["TaskFlow API<br/>(ainda NÃO usa Kafka)"]
+        API["TaskFlow API"]
     end
+    subgraph pg["PostgreSQL — UMA transação"]
+        EV[("events<br/>(fonte da verdade)")]
+        OB[("outbox<br/>published_at NULL")]
+    end
+    API -->|"appendMany"| EV
+    API -->|"mesmo COMMIT"| OB
+    OB -.->|"relay (13.3)<br/>ainda não existe"| K
     subgraph docker["docker compose --profile streaming"]
         K["kafka :9092 / :29092<br/>broker + controller (KRaft)"]
         INIT["kafka-init<br/>(roda uma vez e sai)"]
@@ -57,7 +68,9 @@ flowchart LR
     INIT -.->|"cria"| T2[("taskflow.smoke<br/>1 partição · 1 hora")]
 ```
 
-Ao fim do módulo, o desenho será: `API → (mesma transação) events + outbox → relay → Kafka → consumer groups`.
+Hoje a API já grava, a cada comando, o evento de integração na outbox. Ninguém lê essa tabela ainda: o relay que
+publica no Kafka é a etapa 13.3. Ao fim do módulo: `API → (mesma transação) events + outbox → relay → Kafka →
+consumer groups`.
 
 ---
 
@@ -118,6 +131,96 @@ confirmada. Com **1 nó** isso é impossível (RF 1), e este ambiente existe par
 
 O critério que vai para o ADR (13.8): **Kafka para fatos** (algo aconteceu, e quem quiser reage, inclusive no
 futuro); **SQS para trabalho** (alguém precisa fazer isto uma vez).
+
+### Dual-write: o problema que a outbox resolve (13.2)
+
+Publicar um evento "logo depois de gravar" parece simples:
+
+```ts
+await eventStore.appendMany(events, version, ctx); // COMMIT no Postgres
+await producer.send({ topic, messages });           // Kafka
+```
+
+São **duas escritas em dois sistemas**, sem transação que cubra as duas (*dual-write*). Toda ordem falha de algum
+jeito:
+
+| Ordem | O que dá errado |
+|---|---|
+| Grava, depois publica | O processo cai (deploy, OOM, SIGKILL) entre o COMMIT e o `send`, ou o broker está fora: o evento existe e **nunca é publicado**. Perda silenciosa |
+| Publica, depois grava | O INSERT falha (o 409 de concorrência, por exemplo): os consumers recebem um evento que **nunca aconteceu** |
+| "Faz retry do `send`" | Resolve a falha passageira do broker, não o crash do processo: o retry morre junto |
+
+**Transactional Outbox:** em vez de publicar, a aplicação **grava a mensagem numa tabela `outbox` na mesma
+transação** dos eventos. O banco garante: ou os dois existem, ou nenhum. Um processo separado (o *relay*, 13.3) lê a
+outbox e publica, marcando o que já saiu. Se o relay cair no meio, ele publica de novo ao voltar.
+
+O resultado é **at-least-once**: nunca se perde, mas **pode duplicar** (o relay publicou e caiu antes de marcar).
+Por isso cada mensagem leva o `eventId`, e os consumers deduplicam por ele (13.4). "Exactly-once" de ponta a ponta,
+na prática, é **at-least-once + consumer idempotente**.
+
+### Evento de domínio × evento de integração
+
+| | Evento de domínio (`task.events.ts`) | Evento de integração (`task.integration-events.ts`) |
+|---|---|---|
+| Quem lê | Só este serviço: o agregado o reaplica no replay | Outros serviços, pelo tópico |
+| Onde vive | `events.payload` (Event Store) | `outbox.payload` → `value` da mensagem no Kafka |
+| Como evolui | `schemaVersion` + *upcaster* na leitura; nada externo quebra | Contrato público: mudança compatível mantém a versão, incompatível incrementa `eventVersion` ou vira `taskflow.task-events.v2` |
+| Conteúdo | O mínimo para reconstruir o estado | O que um consumer precisa **sem consultar o nosso banco** |
+
+Publicar o payload de domínio direto seria transformar um detalhe interno em contrato: qualquer refatoração do
+agregado quebraria quem consome. Por isso o mapeamento é **explícito, campo a campo** (sem `...spread`) e com
+`switch` exaustivo: um campo novo no domínio não vaza para o tópico sozinho, e um evento novo sem contrato não
+compila.
+
+O formato publicado (envelope + `data`), real, tirado da outbox:
+
+```json
+{
+  "eventId": "24dd5249-4eda-4246-a1fc-65bad9635c83",
+  "eventType": "TaskCompleted",
+  "eventVersion": 1,
+  "occurredAt": "2026-11-10T10:42:47.567Z",
+  "aggregateId": "0ade7afd-eb89-4f81-976f-f32b35004ee6",
+  "aggregateVersion": 3,
+  "projectId": "6a06bac1-8e24-43b0-9522-da0602ccdfa3",
+  "actorId": "73e214eb-d13c-47b6-9b0c-1173b9efbb69",
+  "correlationId": "fef54fb5-9717-4289-a0d6-105b096f5056",
+  "data": { "completedAt": "2026-11-10T10:42:47.567Z" }
+}
+```
+
+| Campo | Para que o consumer usa |
+|---|---|
+| `eventId` | Chave de idempotência: "já processei este?" (13.4). É o mesmo `metadata.eventId` do Event Store |
+| `eventType` + `eventVersion` | Rotear e escolher como ler o `data`. `eventVersion` é do **contrato**, independente do `schemaVersion` interno |
+| `aggregateId` + `aggregateVersion` | Ordem: o consumer detecta evento repetido ou atrasado ("já estou na versão 3, ignoro a 2") — 13.6 |
+| `projectId` | Contexto. O `TaskCompleted` de domínio **não tem** `projectId`; sem ele, um consumer de relatório por projeto teria que consultar a nossa API para cada evento |
+| `actorId`, `correlationId` | Auditoria e rastreio da requisição de origem (Módulo 01) nos logs do consumer |
+| `occurredAt` | Quando foi gravado. É o **mesmo instante** de `events.created_at` (um `new Date()` só, explícito, para os dois) |
+
+`taskId` não se repete no `data`: é o `aggregateId`. Os nomes seguem os conceitos do **CloudEvents** (`id`, `type`,
+`time`, `subject`) sem adotar a especificação inteira; adotá-la é uma evolução possível se houver integração com
+ferramentas que a falem.
+
+### Por que a ordem por tarefa se mantém com um `BIGSERIAL`
+
+O relay vai ler `WHERE published_at IS NULL ORDER BY id`. Ids de sequência **não** seguem a ordem de commit entre
+transações concorrentes: a transação A pega o id 10, a B pega o 11, e a B commita primeiro. Para tarefas
+**diferentes**, isso não importa (não há ordem entre elas, e elas caem em partições diferentes).
+
+Para a **mesma** tarefa, isso não acontece: a gravação da versão 3 só passa no `UNIQUE (aggregate_id, version)`
+se a versão 2 já estiver commitada, e o comando só calculou "versão 3" porque **leu** a 2. Então o `nextval` da v3
+acontece depois do commit da v2, e o id da v3 é maior. A concorrência otimista, que já existia, é o que garante a
+ordem da outbox por chave, sem lock extra.
+
+### Alternativas à outbox, e por que não aqui
+
+| Alternativa | Como funciona | Por que não (agora) |
+|---|---|---|
+| **Event Store como outbox** | O relay lê a própria tabela `events` com um cursor | Marcar o que já foi publicado exigiria `UPDATE` numa tabela **append-only**; um cursor por `created_at`/`id` (UUID) **pula** eventos que commitam fora de ordem; e o formato interno viraria contrato público |
+| **CDC (Debezium)** | Lê o WAL do Postgres e publica cada INSERT na outbox (ou em `events`) | Sem polling e com latência menor: é o padrão em escala. Custa mais um sistema para operar (Kafka Connect + Debezium) e slot de replicação para vigiar. A tabela `outbox` continua igual: CDC troca só o **relay** |
+| **Transação distribuída (XA/2PC)** | Postgres e Kafka na mesma transação | O Kafka não participa de XA; e 2PC acopla a disponibilidade dos dois sistemas |
+| **Listen/Notify** | `NOTIFY` no commit acorda o relay | Otimização de latência do polling, não substituto: notificação se perde com o relay fora do ar. Pode entrar junto do polling |
 
 ---
 
@@ -208,6 +311,58 @@ taskflow.smoke  taskflow.smoke  0          2               2               0
 
 `CURRENT-OFFSET = 2` com a última mensagem no offset 1: o offset commitado é o **próximo a ler**, não o último lido.
 
+### 6. A outbox (13.2)
+
+Não precisa de Kafka: a outbox é gravada no Postgres a cada comando, com o broker de pé ou não.
+
+```bash
+npm run dev    # ou: npm run build && node dist/main
+# crie, mova e conclua uma tarefa pela API (Swagger em /docs), e então:
+docker exec taskflow-postgres psql -U <usuario-do-.env> -d taskflow_db \
+  -c "SELECT id, event_type, message_key, published_at FROM outbox ORDER BY id;"
+```
+
+```text
+ id |    event_type     |             message_key              | published_at
+----+-------------------+--------------------------------------+--------------
+  1 | TaskCreated       | 0ade7afd-eb89-4f81-976f-f32b35004ee6 |
+  2 | TaskStatusChanged | 0ade7afd-eb89-4f81-976f-f32b35004ee6 |
+  3 | TaskCompleted     | 0ade7afd-eb89-4f81-976f-f32b35004ee6 |
+```
+
+Um segundo `POST /complete` na mesma tarefa recebe 409 e **não** cria linha: a regra recusou o comando antes de
+gravar. Um conflito de concorrência também não cria (a transação inteira é desfeita; provado no teste de
+integração com 10 gravações simultâneas).
+
+**A tabela** ([`schema.prisma`](../../prisma/schema.prisma), migração `20261110103709_add_outbox`):
+
+| Coluna | Por quê |
+|---|---|
+| `id BIGSERIAL` | Ordem de leitura do relay (ver "Por que a ordem por tarefa se mantém") |
+| `event_id UUID UNIQUE` | O `metadata.eventId` do Event Store. Liga a mensagem ao evento e impede duas mensagens para o mesmo evento |
+| `topic`, `message_key` | Destino e chave resolvidos na gravação: o relay é genérico, não conhece Task |
+| `event_type` | Vai virar header da mensagem: o consumer filtra sem fazer parse do corpo |
+| `payload JSONB` | O evento de **integração** (o contrato público), não o payload do Event Store |
+| `published_at` | `NULL` = pendente. A outbox é **mutável**: é fila de trabalho, não histórico |
+| `attempts`, `last_error` | Diagnóstico de uma linha que o relay não consegue publicar (13.3) |
+| Índice parcial `outbox_pending_idx (id) WHERE published_at IS NULL` | A consulta do relay toca só as pendentes, e o índice não cresce com o que já foi publicado. O `EXPLAIN` confirma: `Bitmap Index Scan on outbox_pending_idx` |
+
+**Onde a outbox é ligada.** O `EventStoreService` é compartilhado e não conhece Task. Quem sabe traduzir um evento
+de tarefa no contrato público é o módulo de tarefas, então ele entrega ao store uma função (`OutboxMapper`):
+
+```ts
+await eventStore.appendMany(stored, task.version, { actorId }, {
+  toOutbox: ({ event, ...recorded }) => toTaskOutboxMessage(typed(event), recorded, task.projectId),
+});
+```
+
+O store monta o envelope (`eventId`, autor, correlação), chama o mapper e grava `events` + `outbox` numa
+`prisma.$transaction([...])` em lote. É em lote, e não interativa, porque não há leitura entre as duas escritas. O
+`eventId` da linha vem **do envelope**, nunca do mapper: não há como gravar uma mensagem com identidade diferente da
+do evento que a originou. Os dois pontos que gravam eventos de tarefa ligam o mapper: o
+`EventSourcedTaskRepository` (ciclo de vida) e o `CreateTaskHandler` (criação, que grava sem passar pelo
+repositório; ver problema 6).
+
 ---
 
 ## ⚠️ Problemas encontrados e soluções
@@ -219,10 +374,16 @@ taskflow.smoke  taskflow.smoke  0          2               2               0
 | 3 | `Failed to acquire idempotence PID … Coordinator load in progress: retrying` no 1º produtor | Logo após o boot, o coordenador de transações ainda está carregando; o produtor **idempotente** precisa dele para obter um *producer id* | Benigno: o cliente tenta de novo sozinho, e a mensagem foi entregue. Só acontece no primeiro produtor depois do boot |
 | 4 | 1ª execução do smoke em 3,8 s; a 2ª em 336 ms | O *join* de um consumer group novo (descoberta do coordenador, rebalance, atribuição) levou ~2,9 s | Esperado, e documentado. Num consumer de longa duração isso acontece uma vez, na subida |
 | 5 | O cliente imprimia cada conexão e rebalance como um objeto no console | O `logLevel` padrão do cliente é INFO | `logLevel: KafkaJS.logLevel.WARN` |
+| 6 | **(13.2)** O primeiro desenho ligava a outbox só no repositório, e a criação de tarefa teria ficado de fora do Kafka | O `CreateTaskHandler` grava o `TaskCreated` direto no Event Store (não há agregado para carregar), sem passar pelo `EventSourcedTaskRepository` | Mapper ligado também no handler. Um E2E percorre a API (criar → atribuir → concluir) e exige uma linha na outbox por evento do histórico, com os mesmos `eventId`. Conferido: sem a linha no handler, esse E2E falha apontando o `TaskCreated` ausente |
+| 7 | **(13.2)** Índice parcial não existe no schema do Prisma por padrão | Criado só no SQL da migração, o `migrate dev` o veria como *drift* e geraria um `DROP INDEX` na migração seguinte | Preview feature `partialIndexes` do Prisma 7 e `@@index(..., where: raw("published_at IS NULL"))`. Conferido: um `migrate dev --create-only` depois da migração gera uma migração **vazia** (sem drift) |
+| 8 | **(13.2)** Na outbox, as chaves do JSON aparecem em outra ordem (`data` primeiro) | O JSONB guarda o objeto normalizado, sem a ordem de inserção das chaves | Nenhuma: JSON não tem ordem de campos, e o consumer não pode depender dela. Fica como regra do contrato |
+| 9 | **(13.2)** `events.created_at` e o `occurredAt` publicado divergiriam por milissegundos | O `created_at` vinha do `DEFAULT now()` do banco, e o evento de integração usaria o relógio da aplicação | Um instante só (`recordedAt`), gerado no `appendMany` e gravado explicitamente nos dois. Coberto por teste de integração |
 
 ---
 
-## 📊 Resultados obtidos (13.1)
+## 📊 Resultados obtidos
+
+**13.1 — broker**
 
 | Medida | Valor |
 |---|---|
@@ -232,6 +393,17 @@ taskflow.smoke  taskflow.smoke  0          2               2               0
 | Smoke test, execuções seguintes | 336 ms a 864 ms |
 | Persistência | Após `streaming:down` + `streaming:up`, tópicos e offsets mantidos |
 
+**13.2 — outbox**
+
+| Medida | Valor |
+|---|---|
+| Testes novos | 9 unitários (contrato campo a campo, sem vazamento, opcionais ausentes; mapper no repositório e no handler), 7 de integração (atomicidade, 10 gravações concorrentes, mesmo instante, índice parcial), 1 E2E (API → outbox) |
+| Suítes | 175 unitários · 34 integração · 39 E2E, todos verdes |
+| Conflito de versão (409) | 0 linhas em `events` **e** em `outbox` para o lote recusado |
+| 10 gravações simultâneas na mesma versão | 1 mensagem na outbox, com o `eventId` da vencedora |
+| Demo pela API (criar → iniciar → concluir → concluir de novo) | 3 linhas, chave = `taskId`, `aggregateVersion` 1, 2, 3; o 2º concluir (409) não gerou linha |
+| Consulta do relay (`WHERE published_at IS NULL ORDER BY id`) | Usa o `outbox_pending_idx` |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -240,18 +412,30 @@ taskflow.smoke  taskflow.smoke  0          2               2               0
 |---|---|---|
 | `EventBus` em memória como único meio de entregar eventos | Broker Kafka disponível no compose, ainda **não** usado pela API | A infraestrutura entra e é validada antes do código que depende dela |
 | SQS/SNS provisionados no Terraform e sem uso | Inalterado | O papel do SQS (fila de trabalho) entra na etapa 13.7 |
+| Nenhum registro do que deveria sair do serviço | **(13.2)** Tabela `outbox` gravada na mesma transação dos eventos, com o contrato público `taskflow.task-events.v1` | Sem dual-write: o que for publicado será exatamente o que foi gravado |
+| Payload do Event Store como único formato de evento | **(13.2)** Evento de domínio (interno) × evento de integração (público), com mapeamento explícito | O agregado pode evoluir sem quebrar consumers |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
-- **A API ainda não publica nada no Kafka.** Os eventos continuam indo só para o `EventBus` em memória. O caminho
-  confiável (outbox + relay) é o objetivo das etapas 13.2 e 13.3.
+- **A API ainda não publica nada no Kafka.** A outbox é gravada (13.2), mas ninguém a lê: as linhas acumulam com
+  `published_at NULL` até o relay da etapa 13.3. A limpeza das linhas já publicadas também entra na 13.3.
+- **As projeções internas continuam no `EventBus` em memória**, depois do commit. Se o processo cair entre o commit e
+  a projeção, o read model fica desatualizado (o dual-write do [Módulo 05](05-event-sourcing-cqrs.md)). A outbox
+  resolve o caminho do **Kafka**, não esse. O caminho natural seria a projeção consumir do tópico, como os consumer
+  groups das etapas 13.4 e 13.6.
+- **Eventos gravados antes da 13.2 não estão na outbox.** Publicá-los é um replay a partir da tabela `events`
+  (etapa 13.6).
+- **`partialIndexes` é preview feature do Prisma.** Se mudar de forma numa versão futura, o índice vai para o SQL da
+  migração com uma exceção documentada para o drift.
 - **Um nó só:** RF 1, sem ISR; perder o broker é perder o log. É ambiente de desenvolvimento.
 - **Sem segurança no broker:** `PLAINTEXT`, sem TLS nem SASL. Em produção: TLS + autenticação (SASL/SCRAM ou mTLS)
   e ACL por tópico e grupo.
-- **Sem schema registry:** o formato da mensagem será um contrato TypeScript versionado no código (13.2). Um registry
-  (Avro/Protobuf) valida a compatibilidade no próprio broker.
+- **Sem schema registry:** o formato da mensagem é um contrato TypeScript versionado no código
+  ([`task.integration-events.ts`](../../src/modules/tasks/events/task.integration-events.ts)), protegido por testes
+  unitários. Um registry (Avro/Protobuf/JSON Schema) validaria a compatibilidade no próprio broker, para qualquer
+  produtor.
 - **Tópicos criados pelo compose:** em produção, o contrato do tópico ficaria em IaC (ex.: provider Kafka do
   Terraform), revisado em PR como o resto da infraestrutura.
 
@@ -263,7 +447,8 @@ taskflow.smoke  taskflow.smoke  0          2               2               0
 - [x] Listeners separados para host e containers
 - [x] Tópico de eventos criado explicitamente (sem autocriação), com partições e retenção no contrato
 - [x] Smoke test do cliente (admin, producer idempotente, consumer group)
-- [ ] Transactional Outbox (13.2)
+- [x] Transactional Outbox na mesma transação do Event Store (13.2)
+- [x] Evento de integração separado do evento de domínio, com contrato versionado (13.2)
 - [ ] Relay para o Kafka (13.3)
 - [ ] Consumer idempotente (13.4)
 - [ ] Retry e dead-letter topic (13.5)

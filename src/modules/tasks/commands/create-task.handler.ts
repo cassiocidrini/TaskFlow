@@ -2,6 +2,7 @@ import { CommandHandler, ICommandHandler, EventBus } from '@nestjs/cqrs';
 import { randomUUID } from 'crypto';
 import { CreateTaskCommand } from './create-task.command';
 import { EventStoreService } from '../../../events/event-store.service';
+import { toTaskOutboxMessage } from '../events/task.integration-events';
 import { TASK_EVENT_SCHEMA_VERSIONS, TaskCreatedEvent, type TaskCreatedData } from '../events/task.events';
 import { KeywordPriorityStrategy } from '../strategies/task-priority.strategy';
 import { ProjectsService } from '../../projects/projects.service';
@@ -13,7 +14,8 @@ import { ProjectsService } from '../../projects/projects.service';
  * 1. **`assertOwner`** — autorização ANTES de qualquer efeito. O Event Store é append-only: um evento gravado
  *    indevidamente nunca mais sai (OWASP A01).
  * 2. **`append(…, 0)`** — grava `TaskCreated` esperando a versão 0 (agregado novo). O `UNIQUE (aggregate_id, version)`
- *    garante que dois `TaskCreated` para o mesmo ID nunca coexistam.
+ *    garante que dois `TaskCreated` para o mesmo ID nunca coexistam. Na mesma transação, o evento de integração
+ *    vai para a outbox (Módulo 13.2): este handler grava fora do repositório, então liga o mapper ele mesmo.
  * 3. **`publish`** — só DEPOIS de gravar: nunca se publica o que não foi persistido.
  *
  * É anterior ao {@link TaskCommandRunner} porque não há agregado para carregar — a tarefa ainda não existe.
@@ -62,6 +64,7 @@ export class CreateTaskHandler implements ICommandHandler<CreateTaskCommand> {
       },
       0, // agregado NOVO: esperamos encontrá-lo sem nenhum evento (versão 0)
       { actorId: command.userId }, // userId do JWT (o controller nunca o lê do body)
+      { toOutbox: (recorded) => toTaskOutboxMessage({ type: 'TaskCreated', data }, recorded, data.projectId) },
     );
 
     this.eventBus.publish(new TaskCreatedEvent(data));

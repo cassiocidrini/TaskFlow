@@ -74,7 +74,7 @@ conteúdo, um lugar para manter.
 |---|---|
 | Comandos (dev, testes, banco) | A IA roda o comando certo, com as flags certas |
 | **Onde fica cada coisa**, com a regra de cada pasta | Ex.: "`domain/` não importa infraestrutura" |
-| **Receitas** ("adicionar um evento novo: 5 lugares") | Conhecimento que não dá para deduzir lendo um arquivo só |
+| **Receitas** ("adicionar um evento novo: 6 lugares") | Conhecimento que não dá para deduzir lendo um arquivo só |
 | **NÃO FAÇA**, específico do projeto | Ex.: "`userId` só do JWT, nunca do body" |
 | **O que AINDA NÃO existe** | Sem isso, a IA assume que existe e gera código que referencia algo inexistente |
 | Checklist antes de propor código | Autorização, testes, migração revisada |
