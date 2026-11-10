@@ -259,6 +259,11 @@ próprios e **não recebem** o `JWT_SECRET` ([`relay-env.schema.ts`](../../src/c
 [`consumer-env.schema.ts`](../../src/config/consumer-env.schema.ts)): um vazamento de ambiente num worker não
 entrega o segredo que assina tokens.
 
+**6e. Trilha de auditoria de operação (OWASP A09, falhas de log e monitoramento).** Reenviar mensagens do DLT muda
+o que acontece no sistema (gera notificações). O `npm run redrive` ([Módulo 13.6c](13-mensageria-kafka.md)) grava em
+`dlt_redrives` o que foi reenviado, o motivo, **quem pediu** (`--by`, ou o usuário do sistema operacional) e quando, e
+tem `--dry-run` para revisar antes. Uma operação manual sem rastro é exatamente o que uma auditoria de fintech aponta.
+
 **7. Autorização antes de qualquer efeito.** Num Event Store *append-only*, um evento gravado indevidamente **nunca
 mais sai**. Por isso a verificação vem **antes** do `append`, e um teste prova que, sem permissão, **zero eventos**
 são gravados.

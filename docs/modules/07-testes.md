@@ -77,7 +77,7 @@ test/
 ├── setup.ts                    # DISABLE_THROTTLE=true, NODE_ENV=test (antes de tudo)
 ├── setup-slow-suites.ts        # timeout de 60 s, só para integração, E2E e streaming
 ├── support/                    # imagens dos containers (as MESMAS tags do compose) e startInMemoryTracing()
-├── unit/                       # 27 arquivos, 261 testes (inclui o JSON do dashboard do Grafana)
+├── unit/                       # 28 arquivos, 267 testes (inclui o JSON do dashboard do Grafana)
 ├── integration/
 │   ├── support/test-database.ts   # startTestDatabase(): Postgres + migrações
 │   ├── event-replay.spec.ts       # 7 testes (replay pela outbox, UNIQUE parcial, lock por agregado — Módulo 13.6b)
@@ -86,6 +86,7 @@ test/
 │   ├── notifications-handler.spec.ts # 6 testes (idempotência do consumer, Módulo 13.4)
 │   ├── outbox.spec.ts             # 9 testes (atomicidade events + outbox, Módulo 13.2; trace_context)
 │   ├── outbox-relay.spec.ts       # 6 testes (lock, duas réplicas, falha, limpeza — Módulo 13.3)
+│   ├── processed-events-cleaner.spec.ts # 4 testes (limpeza por data, em lotes — Módulo 13.6c)
 │   ├── projections.spec.ts        # 6 testes
 │   └── reports-handler.spec.ts    # 9 testes (guarda de versão, concorrência nos dois níveis, CHECK — Módulo 13.6a)
 ├── e2e/
@@ -100,6 +101,7 @@ test/
 │   ├── support/kafka-container.ts # startTestKafka(): apache/kafka real, porta anunciada = porta mapeada
 │   ├── dead-letter.streaming-spec.ts   # 4 testes (poison pill, falha desconhecida, banco fora, DLT fora — Módulo 13.5)
 │   ├── outbox-relay.streaming-spec.ts  # 2 testes (outbox → relay → Kafka → consumer, Módulo 13.3)
+│   ├── redrive.streaming-spec.ts       # 1 teste (bug → DLT → correção → redrive, auditoria — Módulo 13.6c)
 │   ├── notifications.streaming-spec.ts # 4 testes (republicação, restart, falha com backoff, um trace só — Módulo 13.4)
 │   └── reports.streaming-spec.ts       # 2 testes (dois grupos no mesmo tópico, republicação; reconstrução pelo replay — 13.6a/b)
 └── load/                       # k6 e experimentos (NÃO são testes do Jest)
@@ -265,7 +267,7 @@ aleatória o broker anunciaria a porta interna. Por isso o helper escolhe uma po
 mapeia de forma fixa: anunciado e mapeado são o mesmo `localhost:<porta>` (o problema dos "dois listeners" do
 [Módulo 13](13-mensageria-kafka.md)).
 
-**Testes que provam que pegam o bug (mutação manual).** Doze testes do Módulo 13 foram conferidos quebrando o código
+**Testes que provam que pegam o bug (mutação manual).** Catorze testes do Módulo 13 foram conferidos quebrando o código
 de propósito:
 
 | Mutação | Teste que falhou | O que mostrou |
@@ -280,6 +282,8 @@ de propósito:
 | Tirar o `FOR UPDATE` do `reports` (13.6a) | Integração "5 entregas simultâneas" | O `-1` aplicado duas vezes; quem barra é o CHECK do banco |
 | Tirar o lock por agregado do `appendMany` ou do replay (13.6b) | Integração "com o lock preso, a gravação ESPERA" | A gravação não espera: API e replay poderiam intercalar na mesma tarefa |
 | `notifications` aceitando replay (13.6b) | Streaming "reconstrução do reports" | Notifica a atribuição de uma tarefa anterior à outbox. Na 1ª versão do teste, esta mutação **sobreviveu** (problema 16) |
+| Tirar o filtro de `redrive-group` do runner (13.6c) | Streaming "redrive" | O `reports` processa a mensagem reenviada ao `notifications` |
+| Tirar a consulta a `dlt_redrives` do redrive (13.6c) | Streaming "redrive" | A 2ª execução republica de novo, e só então falha na PK |
 | Commitar o offset mesmo sem o ack do DLT (13.5) | Streaming "DLT indisponível" | A mensagem de trás fura a fila. Na 1ª versão do teste, esta mutação **sobreviveu** (problema 14) |
 
 Um teste que nunca foi visto falhando pode estar testando nada; esta é a versão barata do *mutation testing*.
@@ -332,9 +336,9 @@ e é por isso que a mutação acima foi conferida: o teste precisa ser visto fal
 |---|---:|---:|---:|
 | Primeira versão deste módulo | 13 | 8 | 12 + 1 `todo` |
 | Antes do Módulo 13 | 166 | 27 | 38 |
-| **Hoje** | **261** | **64** | **49** |
+| **Hoje** | **267** | **68** | **49** |
 
-Mais **12 testes de streaming** (Kafka real), em ~62 s com as imagens em cache (o do DLT indisponível espera um
+Mais **13 testes de streaming** (Kafka real), em ~72 s com as imagens em cache (o do DLT indisponível espera um
 timeout real de 10 s do produtor).
 
 A suíte completa (`npm test`, em sequência) leva cerca de 3 minutos numa máquina de desenvolvimento com 8 GB

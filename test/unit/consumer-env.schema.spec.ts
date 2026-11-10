@@ -17,6 +17,19 @@ describe('consumerEnvSchema', () => {
     });
   });
 
+  it('retenção de processed_events: 14 dias por padrão, e RECUSA ≤ 7 (a retenção do tópico)', () => {
+    expect(validateConsumerEnv(minimo).PROCESSED_EVENTS_RETENTION_DAYS).toBe(
+      14,
+    );
+    expect(
+      validateConsumerEnv({ ...minimo, PROCESSED_EVENTS_RETENTION_DAYS: '8' })
+        .PROCESSED_EVENTS_RETENTION_DAYS,
+    ).toBe(8);
+    expect(() =>
+      validateConsumerEnv({ ...minimo, PROCESSED_EVENTS_RETENTION_DAYS: '7' }),
+    ).toThrow('maior que a retenção do tópico');
+  });
+
   it('deve recusar broker sem porta (mesma regra do relay)', () => {
     expect(() =>
       validateConsumerEnv({ ...minimo, KAFKA_BROKERS: 'kafka' }),

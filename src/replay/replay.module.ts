@@ -7,7 +7,7 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { TaskEventReplayer } from './task-event-replayer';
 
 /**
- * Módulo do comando de replay (`src/replay.ts`). Ambiente do RELAY, e não um schema novo: o replay escreve na mesma
+ * Módulo dos comandos operacionais de mensageria: replay (`src/replay.ts`) e redrive (`src/redrive.ts`). Ambiente do RELAY, e não um schema novo: o replay escreve na mesma
  * outbox que o relay lê, com o mesmo banco e sem segredo de token (menor privilégio, como os workers).
  */
 @Module({

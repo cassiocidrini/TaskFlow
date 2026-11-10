@@ -40,6 +40,15 @@ export const DEAD_LETTERED = 'dead_lettered';
 /** Resultado de uma mensagem de replay num grupo que não aceita replay: commitada sem chamar o `handle`. */
 export const IGNORED_REPLAY = 'ignored_replay';
 
+/**
+ * Resultado de uma mensagem reenviada do DLT para OUTRO grupo (header `redrive-group`, Módulo 13.6c): o redrive
+ * republica no tópico de origem, que todos os grupos leem, mas só o grupo que falhou deve processar.
+ */
+export const IGNORED_REDRIVE = 'ignored_redrive';
+
+/** Header que o `npm run redrive` põe na mensagem reenviada: o único grupo que deve processá-la. */
+export const REDRIVE_GROUP_HEADER = 'redrive-group';
+
 export interface KafkaConsumerOptions {
   brokers: string[];
   /** Consumer group: cada grupo lê o tópico INTEIRO, independente dos outros, e guarda o próprio offset. */
@@ -258,6 +267,11 @@ export class KafkaConsumerRunner {
           ) {
             span.setAttribute('taskflow.consumer.result', IGNORED_REPLAY);
             return { kind: 'done', result: IGNORED_REPLAY };
+          }
+          const redriveGroup = consumed.headers[REDRIVE_GROUP_HEADER];
+          if (redriveGroup !== undefined && redriveGroup !== group) {
+            span.setAttribute('taskflow.consumer.result', IGNORED_REDRIVE);
+            return { kind: 'done', result: IGNORED_REDRIVE };
           }
           const handled = await this.options.handle(consumed);
           span.setAttribute('taskflow.consumer.result', handled);
