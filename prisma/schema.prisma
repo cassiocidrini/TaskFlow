@@ -122,3 +122,55 @@ enum TaskStatus {
   IN_PROGRESS
   DONE
 }
+// ============================================================
+// Contexto de NOTIFICAÇÕES (Módulo 13.4) — dono: o consumer group `notifications` do Kafka
+// ============================================================
+// Fronteira por convenção: estas tabelas só são escritas pelo consumer, e o consumer NÃO lê nem escreve nas tabelas
+// da API. Em microsserviços, seriam outro banco; aqui o mesmo Postgres, com a regra documentada no AGENTS.md.
+
+// Idempotência do consumer: "este grupo já processou este evento?". Gravado na MESMA transação do efeito; uma
+// reentrega (o Kafka é at-least-once) bate na PK e o efeito não se repete. A PK inclui o grupo: cada consumer group
+// deduplica por conta própria (o `reports` da 13.6 processa o mesmo evento, independente deste).
+model ProcessedEvent {
+  consumerGroup String   @map("consumer_group")
+  eventId       String   @map("event_id") @db.Uuid
+  processedAt   DateTime @default(now()) @map("processed_at")
+
+  @@id([consumerGroup, eventId])
+  @@map("processed_events")
+}
+
+// Projeção LOCAL do consumer (taskId → título e responsável atual), alimentada pelos próprios eventos. O
+// `TaskAssigned` e o `TaskCompleted` não trazem o título: em vez de consultar as tabelas da API, o consumer guarda o
+// que precisa. A ordem por chave no Kafka garante que o `TaskCreated` chega antes dos outros eventos da tarefa.
+model NotificationTask {
+  taskId     String   @id @map("task_id") @db.Uuid
+  projectId  String   @map("project_id") @db.Uuid
+  title      String
+  assigneeId String?  @map("assignee_id") @db.Uuid
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("notification_tasks")
+}
+
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  // Destinatário. Sem FK para `User`: é outro contexto (o id chega pelo evento)
+  userId    String           @map("user_id") @db.Uuid
+  type      NotificationType
+  taskId    String           @map("task_id") @db.Uuid
+  projectId String           @map("project_id") @db.Uuid
+  message   String
+  // Evento de origem: rastreabilidade ("de onde veio esta notificação?")
+  eventId   String           @map("event_id") @db.Uuid
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  // A listagem `GET /me/notifications`: do usuário, mais recentes primeiro, `id` como desempate do cursor
+  @@index([userId, createdAt(sort: Desc), id(sort: Desc)])
+  @@map("notifications")
+}
+
+enum NotificationType {
+  TASK_ASSIGNED
+  TASK_COMPLETED
+}

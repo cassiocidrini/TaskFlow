@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.3 de 13.8** (relay da outbox para o Kafka). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **13.4 de 13.8** (consumer `notifications` com idempotência). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`docker-compose.yml`](../../docker-compose.yml) (serviços `kafka` e `kafka-init`, profile
@@ -11,7 +11,10 @@
 > [`outbox.ts`](../../src/events/outbox.ts) ·
 > [`task.integration-events.ts`](../../src/modules/tasks/events/task.integration-events.ts) (o contrato público) ·
 > tabela `outbox` em [`schema.prisma`](../../prisma/schema.prisma) ·
-> relay em [`src/relay.ts`](../../src/relay.ts) e [`src/outbox-relay/`](../../src/outbox-relay/outbox-relay.service.ts)
+> relay em [`src/relay.ts`](../../src/relay.ts) e [`src/outbox-relay/`](../../src/outbox-relay/outbox-relay.service.ts) ·
+> consumer em [`src/notifications-consumer.ts`](../../src/notifications-consumer.ts),
+> [`kafka-consumer.runner.ts`](../../src/common/messaging/kafka-consumer.runner.ts) e
+> [`modules/notifications/`](../../src/modules/notifications/consumer/notifications.handler.ts)
 
 ---
 
@@ -36,7 +39,7 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | **13.1** | Broker Kafka 4 (KRaft) no compose, tópico `taskflow.task-events.v1`, smoke test do cliente | ✅ |
 | **13.2** | **Transactional Outbox**: o evento de integração gravado na **mesma transação** do Event Store | ✅ |
 | **13.3** | **Relay**: processo *worker* que publica a outbox no Kafka (produtor idempotente, chave = `aggregateId`) | ✅ |
-| 13.4 | Consumer group `notifications` com **idempotência** (`processed_events` na mesma transação do efeito) | 🔜 |
+| **13.4** | Consumer group `notifications` com **idempotência** (`processed_events` na mesma transação do efeito) | ✅ |
 | 13.5 | **Retry com backoff** e **dead-letter topic** | 🔜 |
 | 13.6 | Consumer group `reports` (projeção `project_stats`), **replay** e painel de **lag** | 🔜 |
 | 13.7 | *(opcional)* Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda | 🔜 |
@@ -44,35 +47,44 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 13.3)
+## 🏗️ Arquitetura (estado atual: 13.4)
 
 ```mermaid
 flowchart LR
-    subgraph api["Processo da API (npm run dev)"]
+    subgraph api["Processo da API"]
         API["TaskFlow API<br/>:3000 · métricas :9464"]
     end
     subgraph pg["PostgreSQL"]
         EV[("events<br/>(fonte da verdade)")]
-        OB[("outbox<br/>published_at")]
+        OB[("outbox")]
+        subgraph nctx["contexto de notificações"]
+            PE[("processed_events")]
+            NT[("notification_tasks<br/>(projeção local)")]
+            NO[("notifications")]
+        end
     end
-    subgraph relay["Processo do relay (npm run relay:dev) — 1 ou mais réplicas"]
+    subgraph relay["Processo do relay (1+ réplicas)"]
         R["OutboxRelay<br/>métricas :9465"]
+    end
+    subgraph cons["Processo do consumer (group notifications)"]
+        C["NotificationsConsumer<br/>métricas :9467"]
     end
     API -->|"appendMany: UMA transação"| EV
     API -->|"mesmo COMMIT"| OB
-    R -->|"advisory lock + SELECT pendentes<br/>+ UPDATE published_at"| OB
-    R -->|"produtor idempotente<br/>chave = taskId"| T1
-    subgraph docker["docker compose --profile streaming"]
-        K["kafka :9092 / :29092<br/>broker + controller (KRaft)"]
-        T1[("taskflow.task-events.v1<br/>3 partições · 7 dias")]
-    end
-    K --- T1
-    T1 -.->|"consumer groups<br/>(13.4 em diante)"| C["notifications · reports"]
+    R -->|"lock + pendentes + published_at"| OB
+    R -->|"produtor idempotente<br/>chave = taskId"| T1[("taskflow.task-events.v1<br/>3 partições · 7 dias")]
+    T1 -->|"3 partições em paralelo"| C
+    C -->|"UMA transação:<br/>marca + efeito"| PE
+    C --> NT
+    C --> NO
+    API -.->|"GET /me/notifications<br/>(só leitura)"| NO
+    T1 -.->|"13.6"| REP["group reports"]
 ```
 
-A API **não fala com o Kafka**: grava o evento e a mensagem na mesma transação e responde. O relay, um processo
-separado, leva a outbox até o tópico. Com o Kafka fora do ar, a API continua respondendo normalmente e as mensagens
-esperam na outbox (demonstrado em "Resultados"). Os consumer groups entram a partir da etapa 13.4.
+A API **não fala com o Kafka** em nenhuma direção: grava evento e outbox na mesma transação, e lê as notificações
+que o consumer gravou. Relay e consumer são processos separados, cada um com a sua porta de métricas e o seu
+`service.name` no Jaeger. As tabelas do contexto de notificações só são escritas pelo consumer, e o consumer não lê
+as tabelas da API (fronteira por convenção; ver "Limitações").
 
 ---
 
@@ -310,6 +322,81 @@ Regras de alerta sugeridas (o provisionamento de alertas é limitação do Módu
 `outbox_oldest_pending_age_seconds > 60` por 2 min, `up{job="taskflow-relay"} == 0` por 1 min e
 `increase(outbox_relay_failures_total[5m]) > 0`. O painel no Grafana entra junto com o de lag dos consumers (13.6).
 
+### O consumer idempotente (13.4)
+
+**At-least-once + consumer idempotente = efeito exatamente uma vez.** O Kafka entrega a mesma mensagem mais de uma
+vez em situações normais: o relay republica depois de perder o COMMIT (13.3), um consumer cai depois do efeito e
+antes de commitar o offset, um rebalance devolve a partição a outro membro no meio do processamento. Em vez de
+tentar impedir a duplicata na entrega (impossível sem transação distribuída), o consumer a **reconhece**:
+
+```sql
+BEGIN;
+INSERT INTO processed_events (consumer_group, event_id) VALUES ('notifications', $1)
+  ON CONFLICT DO NOTHING;            -- 0 linhas = já processado: COMMIT e sai
+-- o efeito: atualiza a projeção local e cria a notificação
+COMMIT;
+-- só agora: commit do offset no Kafka
+```
+
+| Escolha | Por quê |
+|---|---|
+| Marca e efeito na **mesma transação** | Marca sem efeito = notificação perdida para sempre; efeito sem marca = notificação duplicada na reentrega. É o dual-write da 13.2, agora do lado do consumer. Prova: com a marca fora da transação, o teste "efeito falhou" mostra o evento marcado e nenhuma notificação |
+| PK `(consumer_group, event_id)` | Cada grupo deduplica sozinho: o `reports` (13.6) processa o mesmo evento por conta própria |
+| Duas entregas **simultâneas** | O 2º `INSERT` espera o lock da PK até o 1º COMMIT e então não insere nada. Testado com 5 entregas paralelas: 1 `processed`, 4 `duplicate` |
+| Offset commitado **depois** do COMMIT | Crash no meio = reentrega, que a marca absorve. Commitar **antes** seria *at-most-once*: um crash perderia o evento sem ninguém saber |
+| `processed_events` em vez de um `UNIQUE` na tabela de efeito | Quando o efeito é um INSERT, um `UNIQUE(event_id)` também deduplicaria. A tabela de marcas generaliza para efeitos que não são INSERT (atualizar um saldo, chamar uma API externa com chave de idempotência) |
+
+**Semânticas de entrega, para fixar:**
+
+| Semântica | Como se obtém | Risco |
+|---|---|---|
+| At-most-once | Commitar o offset antes de processar | Perde mensagens num crash |
+| At-least-once | Commitar o offset depois de processar | Duplica numa reentrega |
+| "Exactly-once" de ponta a ponta | At-least-once + efeito idempotente (o que está aqui) | Nenhum, se a marca e o efeito forem atômicos |
+| Transações do Kafka (EOS) | `transactional.id` + `read_committed` | Só vale de Kafka para Kafka (*consume-transform-produce*); um efeito no Postgres continua precisando de idempotência |
+
+**Leitor tolerante e contrato copiado.** O consumer **não importa** o contrato do produtor
+(`task.integration-events.ts`): tem a própria cópia, validada com zod
+([`task-event.message.ts`](../../src/modules/notifications/consumer/task-event.message.ts)). Um serviço consumidor de
+verdade não depende do código de quem publica (mudar o produtor quebraria o build do consumer). Ele também valida só
+o que usa:
+
+| Mensagem | Tratamento |
+|---|---|
+| Campo novo no evento | Aceito e descartado |
+| Tipo que não interessa (`TaskStatusChanged`) | `ignored`, offset commitado |
+| `eventVersion` maior que o suportado | `ignored` com aviso: notificação perdida, mas a partição não trava. Para um consumer financeiro, a escolha certa seria o contrário |
+| Malformada, de um tipo tratado | Erro: não dá para ignorar em silêncio (seria perder a notificação). Hoje trava a partição; o DLT é a 13.5 |
+
+**Projeção local, em vez de perguntar ao produtor.** O `TaskAssigned` e o `TaskCompleted` não trazem o título nem
+(no caso do `Completed`) o responsável. Consultar as tabelas da API acoplaria os dois contextos (e, entre serviços,
+seria uma chamada síncrona a cada mensagem). O consumer guarda o que precisa em `notification_tasks`, alimentada pelos
+próprios eventos. Funciona porque a **ordem por chave** garante o `TaskCreated` antes dos outros eventos da tarefa.
+
+**Paralelismo e ordem.** As 3 partições são processadas em paralelo (`partitionsConsumedConcurrently: 3`); dentro de
+cada uma, uma mensagem por vez. Mais de 3 réplicas do consumer ficariam ociosas: cada partição é lida por no máximo
+um membro do grupo.
+
+**Erro no processamento.** O cliente faz *seek* de volta para a mesma mensagem e a reentrega **imediatamente, em
+loop** (comportamento da biblioteca, lido no código-fonte). Com o banco fora, isso martelaria o Postgres. O runner
+espera um backoff exponencial (500 ms → 30 s) antes de devolver o erro: só aquela partição para. Uma mensagem que
+**sempre** falha trava a sua partição; limite de tentativas e dead-letter topic são a etapa 13.5.
+
+**Crash × saída limpa: o `session.timeout.ms`.** Medido com 200 mensagens na fila:
+
+| Como o consumer saiu | O que o broker sabe | Pausa no processamento |
+|---|---|---|
+| SIGTERM (deploy, Ctrl+C) | O consumer avisa ao sair (`LeaveGroup`) | **Nenhuma**: o substituto assumiu na hora |
+| `kill -9` (crash, OOM) | Nada, até a sessão expirar sem heartbeat | **30,1 s**: as partições ficam com um membro morto |
+
+O valor (30 s, o padrão da camada KafkaJS da Confluent; a librdkafka pura usa 45 s) está **explícito** no runner.
+Menor = failover mais rápido, mas uma pausa longa de GC ou um processamento lento derrubariam um membro saudável e
+causariam rebalances em cascata.
+
+**Grupo novo começa do início** (`fromBeginning: true`): na primeira subida, o grupo lê tudo o que o tópico retém
+(7 dias). Com idempotência, é seguro; para notificações, pode significar avisar algo de 6 dias atrás. É decisão de
+produto, e fica registrada.
+
 ---
 
 ## 📋 Como reproduzir
@@ -509,6 +596,46 @@ RELAY_METRICS_PORT=9466 npm run relay:dev
 # Graceful shutdown: Ctrl+C (SIGTERM) termina o lote em andamento e desconecta o produtor
 ```
 
+### 8. O consumer de notificações (13.4)
+
+```bash
+npm run streaming:up
+npm run dev                          # API
+npm run relay:dev                    # relay
+npm run consumer:notifications:dev   # consumer (build: npm run start:consumer:notifications)
+```
+
+Com dois usuários: o primeiro cria uma tarefa com `assigneeId` do segundo e a conclui. O segundo vê:
+
+```bash
+curl -s localhost:3000/me/notifications -H "authorization: Bearer $TOKEN_DO_SEGUNDO"
+```
+
+```json
+{
+  "items": [
+    { "type": "TASK_COMPLETED", "message": "A tarefa \"Conciliar pagamentos\" foi concluída", "eventId": "1d6ce92d-…", "…": "…" },
+    { "type": "TASK_ASSIGNED",  "message": "Você foi atribuído à tarefa \"Conciliar pagamentos\"", "eventId": "a4e2ef64-…", "…": "…" }
+  ],
+  "nextCursor": null
+}
+```
+
+O primeiro usuário recebe `{"items":[]}`: ninguém é notificado da própria ação.
+
+```bash
+# Lag do grupo (CURRENT-OFFSET = próxima mensagem a ler)
+docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --describe --group notifications
+
+# Resultado por mensagem
+curl -s localhost:9467/metrics | grep kafka_consumer_messages
+```
+
+**Experimento do crash** (os números estão em "Resultados"): com o consumer parado, crie 200 tarefas atribuídas a
+alguém (com a API sob `DISABLE_THROTTLE=true`, senão o throttler recusa a rajada); suba o consumer, dê `kill -9` no
+meio da fila e suba de novo. Repita com SIGTERM no lugar do `kill -9` e compare as pausas.
+
 ---
 
 ## ⚠️ Problemas encontrados e soluções
@@ -531,6 +658,10 @@ RELAY_METRICS_PORT=9466 npm run relay:dev
 | 14 | **(13.3)** A 2ª réplica no mesmo host subiu sem métricas, sem erro nenhum | Porta 9465 ocupada; o exporter não avisa | `RELAY_METRICS_PORT` (problema 21 do Módulo 01) |
 | 15 | **(13.3)** O `KafkaContainer` do Testcontainers não sobe a imagem `apache/kafka` | O módulo só conhece as imagens da Confluent | `GenericContainer` com porta do host escolhida antes e anunciada pelo broker ([Módulo 07](07-testes.md)) |
 | 16 | **(13.3)** Idade da fila e corte da limpeza poderiam sair deslocados pelo fuso | As colunas são `TIMESTAMP` sem fuso (UTC, gravado pelo Prisma); o `now()` é convertido pelo `TimeZone` da sessão | Contas no SQL com `now() AT TIME ZONE 'UTC'`, cobertas por teste de integração |
+| 17 | **(13.4)** Mensagem que falha seria reprocessada em loop, sem pausa | O cliente faz *seek* para a mesma mensagem e a reentrega imediatamente (lido em `_consumer.js`: "the same message may be reprocessed") | Backoff exponencial por partição no runner antes de devolver o erro. Testado: 2 falhas + sucesso = 3 tentativas, e a mensagem seguinte da tarefa esperou |
+| 18 | **(13.4)** A 1ª demo do crash "provou" nada: 30 tarefas processadas antes do `kill -9`; a 2ª deu 70 de 300 | O consumer é rápido (~20 ms por mensagem) e o **throttler** da API (100/min) recusou a maior parte da rajada | Fila montada com o consumer parado, `DISABLE_THROTTLE=true` na API e o kill disparado só depois de 50 notificações. Lição: conferir se o experimento criou mesmo a condição que pretende testar |
+| 19 | **(13.4)** Depois do `kill -9`, o consumer novo subiu e ficou parado | O broker só remove o membro morto quando a sessão expira (30 s sem heartbeat) | Esperado, e medido (30,1 s; com SIGTERM, zero). `sessionTimeout` explícito no runner, com o trade-off documentado. Na demo bagunçada, dois crashes seguidos somaram 45 s + 30 s |
+| 20 | **(13.4)** A resposta de `/me/notifications` trazia `userId`, mas o Swagger não | DTO de documentação escrito antes de olhar a resposta real | Campo adicionado ao `NotificationDto`: o contrato documentado é o que a API devolve |
 
 ---
 
@@ -571,6 +702,20 @@ RELAY_METRICS_PORT=9466 npm run relay:dev
 | Testes novos | 19 unitários (loop, backoff, falha, busy, shutdown, headers, schema do ambiente), 6 de integração (lock, duas réplicas, falha, limpeza, métrica da fila), 2 de streaming (ponta a ponta com Kafka real; at-least-once com o mesmo `event-id`) |
 | Suítes | 194 unitários · 40 integração · 39 E2E · 2 streaming (~7 s) |
 
+**13.4 — consumer `notifications`** (processos em `node dist/...`)
+
+| Experimento | Resultado |
+|---|---|
+| Ponta a ponta (criar com responsável → concluir) | 2 notificações para o responsável, 0 para quem agiu; ~300 ms do COMMIT do evento até a notificação, dos quais ~280 ms esperando o polling do relay |
+| 1ª subida do grupo sobre o tópico de desenvolvimento | 52 `processed`, 1 `ignored` (`TaskStatusChanged`) e **1 `duplicate`**: a mensagem republicada de propósito na 13.3, reconhecida pela idempotência num dado real |
+| Fila de 300 + `kill -9` com 80 processadas | 300 de 300 notificações, **0 duplicadas**; o consumer novo processou 220 e encontrou **1 `duplicate`** (a mensagem em processamento no crash: gravada, offset não commitado, reentregue) |
+| Fila de 200 + SIGTERM no meio | 200 de 200, nenhuma pausa > 1 s; o consumer saiu do grupo em 2 ms |
+| Fila de 200 + `kill -9` no meio | 200 de 200, 0 duplicadas, **uma pausa de 30,1 s** (session timeout) |
+| Lag depois de processar | 0 nas 3 partições |
+| Mutação: marca em `processed_events` fora da transação | O teste "efeito falhou" quebra: evento marcado, notificação perdida |
+| Testes novos | 20 unitários (regras, leitor tolerante, ambiente), 6 de integração (duplicata, 5 entregas simultâneas, atomicidade com o efeito derrubado no banco), 5 E2E (`/me/notifications`), 3 de streaming (pipeline com republicação, restart sem reprocessar, falha com backoff sem furar a ordem) |
+| Suítes | 214 unitários · 46 integração · 44 E2E · 5 streaming (~18 s) |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -582,22 +727,29 @@ RELAY_METRICS_PORT=9466 npm run relay:dev
 | Nenhum registro do que deveria sair do serviço | **(13.2)** Tabela `outbox` gravada na mesma transação dos eventos, com o contrato público `taskflow.task-events.v1` | Sem dual-write: o que for publicado será exatamente o que foi gravado |
 | Payload do Event Store como único formato de evento | **(13.2)** Evento de domínio (interno) × evento de integração (público), com mapeamento explícito | O agregado pode evoluir sem quebrar consumers |
 | Outbox gravada e ninguém publicando | **(13.3)** Relay em processo separado, um lote por vez (advisory lock de transação), produtor idempotente, backoff, limpeza e métricas próprias | Os eventos chegam ao Kafka em ordem por tarefa, sem acoplar a API à disponibilidade do broker |
+| Tópico sem ninguém lendo | **(13.4)** Consumer group `notifications`, idempotente, com contrato próprio e projeção local; `GET /me/notifications` na API | O primeiro efeito de verdade dos eventos fora do processo da API |
 | Um processo de telemetria (`tracing.ts` fixo) | **(13.3)** `startTelemetry` por processo; relay como `taskflow-relay` na porta 9465 | Dois processos observáveis separadamente ([Módulo 01](01-observabilidade.md)) |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
-- **Ninguém consome o tópico ainda.** Os eventos chegam ao Kafka (13.3); os consumer groups com deduplicação são a
-  etapa 13.4.
+- **Mensagem malformada trava a partição do consumer.** Fica em backoff para sempre (até 30 s entre tentativas);
+  limite de tentativas e dead-letter topic são a etapa 13.5.
+- **`processed_events` cresce para sempre.** A marca precisa durar pelo menos a retenção do tópico (7 dias) mais a
+  janela de um replay; uma limpeza por data entra junto com o replay (13.6).
+- **Fronteira entre contextos por convenção:** API e consumer usam o mesmo Postgres. Em microsserviços seriam bancos
+  separados; aqui a regra (o consumer não lê as tabelas da API; a API só **lê** as notificações) está no AGENTS.md.
+- **Grupo novo lê o histórico retido:** a primeira subida de um consumer notifica eventos de até 7 dias atrás.
 - **Uma mensagem com erro permanente trava a fila** (*head-of-line blocking*, escolha consciente pela ordem). Ela fica
   visível na métrica de idade e no `last_error`; o desvio para uma DLQ é decisão da 13.5.
 - **Vazão de um lote por vez.** Réplicas dão disponibilidade, não vazão. Particionar a outbox por faixa de chave seria
   o passo para escalar mantendo a ordem.
 - **Transação aberta durante o envio** (até 10 s com o Kafka fora). Aceitável com um lote por vez e timeout curto;
   com muitas réplicas, cada uma seguraria uma conexão do pool esperando o lock só por instantes (`try`, não espera).
-- **Trace interrompido:** o span `publish` não é filho do `POST` que gravou o evento. O `correlationId` atravessa (header);
-  o `traceparent`, não, porque exigiria guardar o contexto do trace na outbox. Avaliado na 13.4, quando houver consumer.
+- **Trace interrompido:** o span `publish` e o `process` do consumer não são filhos do `POST` que gravou o evento. O
+  `correlationId` atravessa (header e atributo do span); o `traceparent`, não, porque exigiria guardar o contexto do
+  trace na outbox. Decidido na 13.4: PR próprio, logo depois desta etapa.
 - **Sem health check do worker:** o relay não tem HTTP. Num orquestrador, o sinal seria o `up` da métrica ou um probe
   de exec; entra junto com a decisão sobre Kubernetes.
 - **Limpeza sem índice em `published_at`:** o DELETE varre as linhas publicadas (no máximo 72 h de eventos). Com
@@ -632,7 +784,8 @@ RELAY_METRICS_PORT=9466 npm run relay:dev
 - [x] Evento de integração separado do evento de domínio, com contrato versionado (13.2)
 - [x] Relay em processo separado, com ordem por tarefa, failover e graceful shutdown (13.3)
 - [x] Métricas e traces do relay; suíte de streaming com Kafka real no CI (13.3)
-- [ ] Consumer idempotente (13.4)
+- [x] Consumer idempotente: marca e efeito na mesma transação, offset depois do COMMIT (13.4)
+- [x] Leitor tolerante com contrato próprio e projeção local no consumer (13.4)
 - [ ] Retry e dead-letter topic (13.5)
 - [ ] Replay e painel de lag (13.6)
 - [ ] Kafka × SQS no mesmo sistema (13.7, opcional)

@@ -19,6 +19,8 @@
     "start:prod": "node dist/main",
     "relay:dev": "ts-node src/relay.ts",
     "start:relay": "node dist/relay",
+    "consumer:notifications:dev": "ts-node src/notifications-consumer.ts",
+    "start:consumer:notifications": "node dist/notifications-consumer",
     "dev": "npm run infra:up && npm run start:dev",
     "infra:up": "docker compose up -d --wait postgres jaeger",
     "infra:up:obs": "docker compose up -d --wait postgres jaeger prometheus grafana",

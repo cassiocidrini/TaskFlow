@@ -13,7 +13,7 @@ Montar uma esteira de **Integração Contínua** que valida **todo** push e pull
 
 - tipos (`tsc --noEmit`), lint (`oxlint`) e build;
 - testes **unitários**, de **integração** e **E2E**, os dois últimos contra **PostgreSQL real** (Testcontainers);
-- **merge bloqueado** se qualquer verificação falhar (Branch Protection).
+- **merge bloqueado** se qualquer verificação falhar (Ruleset da `main`).
 
 **Por que importa:** CI é a primeira linha de defesa contra regressões. Ele também é o que torna seguro trabalhar
 em equipe: ninguém precisa "confiar" que o colega rodou os testes, porque o pipeline prova.
@@ -157,20 +157,31 @@ O `.env` está no `.gitignore`, então **o runner não o tem**. Duas consequênc
 
 ---
 
-## 🔒 Branch Protection
+## 🔒 Proteção da `main` (Ruleset)
 
-Em **Settings → Branches → regra da `main`**:
+A proteção é um **Ruleset** (*Settings → Rules → Rulesets*), o formato que o GitHub recomenda no lugar da "regra
+clássica" de Branch Protection. A configuração, como a API do GitHub a devolve
+(`gh api repos/{owner}/{repo}/rulesets/<id>`):
 
 ```text
-✅ Require a pull request before merging
-✅ Require status checks to pass before merging
-   Status checks obrigatórios:
-     • Tipos, lint, unitários e build
-     • Testes de integração (Testcontainers)
-     • Testes E2E (Testcontainers)
-✅ Require branches to be up to date before merging
-✅ Do not allow bypassing the above settings
+Ruleset "main" · enforcement: active · bypass: ninguém · alvo: ~DEFAULT_BRANCH
+✅ Restrict deletions                       (deletion)
+✅ Block force pushes                       (non_fast_forward)
+✅ Require a pull request before merging    (pull_request, 0 aprovações: projeto de uma pessoa só)
+✅ Require status checks to pass            (required_status_checks, strict = branch atualizada com a main)
+   • Tipos, lint, unitários e build
+   • Testes de integração (Testcontainers)
+   • Testes E2E (Testcontainers)
+   • Testes de streaming (Kafka + Postgres, Testcontainers)
 ```
+
+> ⚠️ **Achado em 10/11/2026:** ao incluir o 4º check, a tela de Branch Protection estava **vazia** e a API respondia
+> `Branch not protected`. A regra descrita nas versões anteriores deste módulo não existia (não dá para saber desde
+> quando), e a `main` aceitava push direto. O Ruleset acima foi criado nesse dia.
+> Lição: configuração fora do código também precisa ser **verificada**, não só documentada; o `gh api` torna isso um
+> comando.
+>
+> **0 aprovações** é deliberado: com 1, o próprio autor não consegue aprovar o PR e o merge trava. Num time, 1 ou 2.
 
 | Ação | Resultado |
 |---|---|
@@ -259,7 +270,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - [x] Jobs paralelos: qualidade, integração, E2E e streaming (Kafka real, Módulo 13.3)
 - [x] Testes com PostgreSQL real no CI (Testcontainers)
 - [x] `permissions` mínimas e cancelamento de runs obsoletos
-- [x] Branch Protection exigindo os checks (o `streaming` entra na lista após o 1º run)
+- [x] Ruleset na `main`: PR obrigatório, 4 checks, sem bypass, sem force push (verificado pela API do GitHub)
 - [x] Badge do CI no README
 - [ ] CD (deploy automatizado)
 - [ ] Dependabot / CodeQL / actions fixadas por SHA

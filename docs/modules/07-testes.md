@@ -77,11 +77,12 @@ test/
 ├── setup.ts                    # DISABLE_THROTTLE=true, NODE_ENV=test (antes de tudo)
 ├── setup-slow-suites.ts        # timeout de 60 s, só para integração, E2E e streaming
 ├── support/                    # imagens dos containers de teste: as MESMAS tags do compose
-├── unit/                       # 20 arquivos, 194 testes (inclui o JSON do dashboard do Grafana)
+├── unit/                       # 23 arquivos, 214 testes (inclui o JSON do dashboard do Grafana)
 ├── integration/
 │   ├── support/test-database.ts   # startTestDatabase(): Postgres + migrações
 │   ├── event-store.spec.ts        # 18 testes
 │   ├── graceful-shutdown.spec.ts  # 3 testes (ordem do app.close() com HTTP real, Módulo 01)
+│   ├── notifications-handler.spec.ts # 6 testes (idempotência do consumer, Módulo 13.4)
 │   ├── outbox.spec.ts             # 7 testes (atomicidade events + outbox, Módulo 13.2)
 │   ├── outbox-relay.spec.ts       # 6 testes (lock, duas réplicas, falha, limpeza — Módulo 13.3)
 │   └── projections.spec.ts        # 6 testes
@@ -90,10 +91,12 @@ test/
 │   ├── auth.e2e-spec.ts           # 12 testes
 │   ├── correlation.e2e-spec.ts    # 5 testes (X-Correlation-Id, Módulo 01)
 │   ├── health.e2e-spec.ts         # 3 testes (probes sem token, Módulo 01)
+│   ├── notifications.e2e-spec.ts  # 5 testes (GET /me/notifications, Módulo 13.4)
 │   └── tasks.e2e-spec.ts          # 19 testes (inclui API → outbox, Módulo 13.2)
 ├── streaming/
 │   ├── support/kafka-container.ts # startTestKafka(): apache/kafka real, porta anunciada = porta mapeada
-│   └── outbox-relay.streaming-spec.ts  # 2 testes (outbox → relay → Kafka → consumer, Módulo 13.3)
+│   ├── outbox-relay.streaming-spec.ts  # 2 testes (outbox → relay → Kafka → consumer, Módulo 13.3)
+│   └── notifications.streaming-spec.ts # 3 testes (republicação, restart, falha com backoff, Módulo 13.4)
 └── load/                       # k6 e experimentos (NÃO são testes do Jest)
 ```
 
@@ -264,6 +267,7 @@ de propósito:
 |---|---|---|
 | Tirar o mapper da outbox do `CreateTaskHandler` (13.2) | E2E `outbox` | O `TaskCreated` some da outbox |
 | Trocar o advisory lock do relay por `SELECT true` (13.3) | Integração "duas réplicas simultâneas" | **400 envios para 200 eventos**: cada mensagem publicada duas vezes |
+| Gravar a marca de `processed_events` fora da transação do efeito (13.4) | Integração "efeito falhou" | Evento marcado e nenhuma notificação: perdida para sempre |
 
 Um teste que nunca foi visto falhando pode estar testando nada; esta é a versão barata do *mutation testing*.
 
@@ -303,9 +307,9 @@ Um teste que nunca foi visto falhando pode estar testando nada; esta é a versã
 |---|---:|---:|---:|
 | Primeira versão deste módulo | 13 | 8 | 12 + 1 `todo` |
 | Antes do Módulo 13 | 166 | 27 | 38 |
-| **Hoje** | **194** | **40** | **39** |
+| **Hoje** | **214** | **46** | **44** |
 
-Mais **2 testes de streaming** (Kafka real), em ~7 s com as imagens em cache.
+Mais **5 testes de streaming** (Kafka real), em ~18 s com as imagens em cache.
 
 A suíte completa (`npm test`, em sequência) leva cerca de 3 minutos numa máquina de desenvolvimento com 8 GB
 reservados ao Docker. No CI, as quatro suítes rodam em VMs separadas e em paralelo.
