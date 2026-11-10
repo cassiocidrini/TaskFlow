@@ -295,9 +295,10 @@ descartáveis, os eventos não.
 
 ## 2.8 Estendendo o domínio
 
-Adicionar um evento novo exige mexer em **6 lugares** (união de tipos, `schemaVersion` em
-`TASK_EVENT_SCHEMA_VERSIONS`, `apply` do agregado, `toBusEvent`, lista de tipos conhecidos do repositório e
-projeção). Três deles o compilador cobra sozinho (`never` e o `Record` exaustivo); os outros exigem teste. A receita completa está no [`AGENTS.md`](../../AGENTS.md#adicionar-um-evento-novo-ao-ciclo-de-vida-da-tarefa-5-lugares).
+Adicionar um evento novo exige mexer em **7 lugares** (união de tipos, `schemaVersion` em
+`TASK_EVENT_SCHEMA_VERSIONS`, `apply` do agregado, `toBusEvent`, lista de tipos conhecidos do repositório,
+projeção e o contrato de integração em `task.integration-events.ts`, do [Módulo 13](13-mensageria-kafka.md)).
+Quatro deles o compilador cobra sozinho (`never` e os `Record` exaustivos); os outros exigem teste. A receita completa está no [`AGENTS.md`](../../AGENTS.md#adicionar-um-evento-novo-ao-ciclo-de-vida-da-tarefa-6-lugares).
 
 ---
 
@@ -389,7 +390,7 @@ real para o time.
 
 ## 🚧 Limitações e próximos passos
 
-- **Dual-write:** se o processo cair entre gravar no Event Store e publicar no EventBus, a projeção não é atualizada. Próximo passo: **Transactional Outbox**, com um *projector* lendo a tabela `events` por posição e guardando um *checkpoint*.
+- **Dual-write nas projeções:** se o processo cair entre gravar no Event Store e publicar no EventBus, a projeção não é atualizada. A **Transactional Outbox** já existe ([Módulo 13.2](13-mensageria-kafka.md#dual-write-o-problema-que-a-outbox-resolve-132)): cada evento ganha, na mesma transação, a sua mensagem para o Kafka. Mas as projeções internas ainda leem do `EventBus` em memória. Próximo passo: projeções consumindo do tópico (ou um *projector* com *checkpoint*) e replay.
 - **Replay das projeções:** falta o comando `projections:rebuild`, que esvaziaria o `tasks_read` e reaplicaria todos os eventos (e corrigiria as prioridades antigas).
 - **Snapshots:** agregados com milhares de eventos ficariam lentos para carregar; um snapshot a cada N versões resolveria.
 - **Versionamento de eventos:** cada evento já grava o `schemaVersion` do seu payload, mas ainda não existe nenhum *upcaster* (converter eventos antigos para o formato novo na leitura), porque nenhum formato mudou.
@@ -407,7 +408,8 @@ real para o time.
 - [x] Roteiro único dos comandos (autorização, regra, persistência, publicação)
 - [x] Projeções idempotentes, testadas contra o banco real
 - [x] Histórico consultável pela API, com estado reconstruído
-- [ ] Transactional Outbox e replay das projeções
+- [x] Transactional Outbox para os eventos que saem do serviço ([Módulo 13.2](13-mensageria-kafka.md))
+- [ ] Projeções fora do `EventBus` em memória e replay das projeções
 - [x] Envelope de metadados (`eventId`, `actorId`, `correlationId`, `schemaVersion`) com legado honesto
 - [ ] Snapshots e *upcasters* de eventos
 

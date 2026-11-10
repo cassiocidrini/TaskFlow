@@ -3,13 +3,19 @@
  *
  * Protege: a reidratação do agregado, a falha ALTA diante de um tipo de evento desconhecido no stream (melhor do
  * que um agregado silenciosamente inconsistente), o `save` com `expectedVersion = task.version` (concorrência
- * otimista) e o no-op quando não há eventos pendentes.
+ * otimista), o no-op quando não há eventos pendentes e o mapper da outbox: cada evento salvo vira o evento de
+ * INTEGRAÇÃO certo, com o `projectId` do agregado (Módulo 13.2; o efeito transacional é provado na integração).
  *
  * Instanciado com `new` (sem `Test.createTestingModule`): a dependência entra pelo construtor e o container do
  * Nest só seria peso.
  */
 import { EventSourcedTaskRepository } from '../../src/modules/tasks/infrastructure/event-sourced-task.repository';
-import { ConcurrencyConflictError, EventStoreService } from '../../src/events/event-store.service';
+import {
+  ConcurrencyConflictError,
+  EventStoreService,
+  type AppendOptions,
+  type DomainEvent,
+} from '../../src/events/event-store.service';
 import { TaskAggregate } from '../../src/modules/tasks/domain/task.aggregate';
 
 describe('EventSourcedTaskRepository', () => {
@@ -102,8 +108,44 @@ describe('EventSourcedTaskRepository', () => {
         ],
         1, // o agregado foi lido na versão 1
         { actorId: 'user-1' }, // o autor chega ao Event Store sem ser alterado
+        { toOutbox: expect.any(Function) }, // a outbox é sempre ligada para a tarefa
       );
       expect(saved.map((e) => e.type)).toEqual(['TaskAssigned', 'TaskStatusChanged']);
+    });
+
+    it('deve entregar ao Event Store um mapper que gera o evento de integração com o projectId da tarefa', async () => {
+      const task = TaskAggregate.fromHistory([
+        { type: 'TaskCreated', data: { taskId: 't1', projectId: 'p1', title: 'Tarefa', priority: 'MEDIUM' } },
+      ]);
+      task.complete(new Date('2026-11-10T12:00:00.000Z'));
+
+      await repository.save(task, { actorId: 'user-1' });
+
+      // Simula o Event Store: chama o mapper com o MESMO objeto de evento que recebeu
+      const [[stored], , , options] = eventStore.appendMany.mock.calls[0] as [
+        DomainEvent[],
+        number,
+        unknown,
+        AppendOptions,
+      ];
+      const message = options.toOutbox!({
+        event: stored,
+        metadata: { eventId: 'ev-1', actorId: 'user-1', schemaVersion: 1 },
+        aggregateVersion: 2,
+        recordedAt: new Date('2026-11-10T12:00:01.000Z'),
+      });
+
+      expect(message).toEqual({
+        topic: 'taskflow.task-events.v1',
+        key: 't1',
+        eventType: 'TaskCompleted',
+        payload: expect.objectContaining({
+          eventId: 'ev-1',
+          projectId: 'p1', // o TaskCompleted de domínio não tem projectId: veio do agregado
+          aggregateVersion: 2,
+          data: { completedAt: '2026-11-10T12:00:00.000Z' },
+        }),
+      });
     });
 
     it('NÃO deve tocar no banco quando não há eventos pendentes (comando idempotente)', async () => {

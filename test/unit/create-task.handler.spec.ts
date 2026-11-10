@@ -4,7 +4,8 @@
  * Protege a ORDEM, que aqui é regra de negócio: `assertOwner → append → publish`. Autorização antes de qualquer
  * efeito (o Event Store é append-only: um evento indevido nunca mais sai — OWASP A01) e publicação só depois de
  * persistir. Também prova: zero efeitos quando o projeto não é do usuário, evento GRAVADO = evento PUBLICADO
- * (eram montados separadamente e divergiam) e a prioridade/prazo atravessando o fluxo.
+ * (eram montados separadamente e divergiam), a prioridade/prazo atravessando o fluxo e a outbox ligada (o
+ * `TaskCreated` grava fora do repositório, então seria fácil ele ficar fora do Kafka — Módulo 13.2).
  */
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
@@ -66,7 +67,27 @@ describe('CreateTaskHandler', () => {
         priority: 'MEDIUM',
       },
       schemaVersion: 1,
-    }, 0, { actorId: userId }); // versão esperada 0 (agregado novo); autor = userId do comando (JWT)
+    }, 0, { actorId: userId }, { toOutbox: expect.any(Function) }); // versão 0 (agregado novo); autor = userId do JWT
+  });
+
+  it('deve ligar a outbox: o TaskCreated vira evento de integração no tópico, com chave = taskId', async () => {
+    const taskId = await handler.execute(new CreateTaskCommand(userId, 'p1', 'Minha tarefa'));
+
+    // Simula o Event Store chamando o mapper depois de montar o envelope
+    const [stored, , , options] = eventStore.append.mock.calls[0];
+    const message = options.toOutbox({
+      event: stored,
+      metadata: { eventId: 'ev-1', actorId: userId, schemaVersion: 1 },
+      aggregateVersion: 1,
+      recordedAt: new Date('2026-11-10T12:00:00.000Z'),
+    });
+
+    expect(message).toEqual({
+      topic: 'taskflow.task-events.v1',
+      key: taskId,
+      eventType: 'TaskCreated',
+      payload: expect.objectContaining({ eventId: 'ev-1', aggregateId: taskId, projectId: 'p1', aggregateVersion: 1 }),
+    });
   });
 
   it('deve publicar um TaskCreatedEvent no EventBus', async () => {
