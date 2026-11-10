@@ -12,7 +12,13 @@ import {
   SpanStatusCode,
   trace,
   type BatchObservableCallback,
+  type Link,
 } from '@opentelemetry/api';
+import {
+  carrierFor,
+  contextFromCarrier,
+  type TraceCarrier,
+} from '../common/telemetry/trace-context';
 import type { RelayEnv } from '../config/relay-env.schema';
 import { MessagePublisher, type OutgoingMessage } from './message-publisher';
 import { OutboxStore } from './outbox.store';
@@ -221,13 +227,22 @@ export class OutboxRelay implements OnApplicationBootstrap, OnModuleDestroy {
     }
   }
 
+  /**
+   * Spans de PRODUCER na forma que a convenção de mensageria do OTel define para envio em LOTE:
+   * - um `create <tópico>` por mensagem, FILHO do contexto gravado na outbox (o trace do `POST` que gerou o evento).
+   *   É o contexto DELE que vai no header `traceparent`, e o consumer continua dali. O espaço entre o fim do
+   *   request e o início do `create` é o tempo que o evento ficou parado na outbox;
+   * - um `publish <tópico>` pelo lote, com LINKS para os `create`. Um span não pode ser filho de N traces
+   *   diferentes (cada mensagem do lote veio de um request), então ele só os referencia.
+   */
   private async publishWithSpan(rows: readonly OutboxRow[]): Promise<void> {
-    // Span de PRODUCER (convenção semântica de mensageria do OTel): aparece no Jaeger como "publish <tópico>"
+    const created = rows.map((row) => this.createMessage(row));
     const topics = [...new Set(rows.map((row) => row.topic))];
     await this.tracer.startActiveSpan(
       `publish ${topics.join(',')}`,
       {
         kind: SpanKind.PRODUCER,
+        links: created.flatMap(({ link }) => (link ? [link] : [])),
         attributes: {
           'messaging.system': 'kafka',
           'messaging.operation.type': 'send',
@@ -237,7 +252,7 @@ export class OutboxRelay implements OnApplicationBootstrap, OnModuleDestroy {
       },
       async (span) => {
         try {
-          await this.publisher.publish(rows.map(toOutgoingMessage));
+          await this.publisher.publish(created.map(({ message }) => message));
         } catch (error) {
           span.recordException(error as Error);
           span.setStatus({
@@ -250,6 +265,40 @@ export class OutboxRelay implements OnApplicationBootstrap, OnModuleDestroy {
         }
       },
     );
+  }
+
+  /**
+   * Monta a mensagem e, se a linha trouxe contexto de trace, o span `create` dela. Linha sem contexto (gravada fora
+   * de um span, ou antes da coluna existir) sai sem `traceparent`: um `create` raiz por mensagem seria só ruído.
+   * Numa republicação (falha do lote, ou crash antes do COMMIT), cada tentativa gera um `create` novo no mesmo
+   * trace: as tentativas ficam visíveis no Jaeger.
+   */
+  private createMessage(row: OutboxRow): {
+    message: OutgoingMessage;
+    link?: Link;
+  } {
+    if (!row.traceContext) {
+      return { message: toOutgoingMessage(row) };
+    }
+    const span = this.tracer.startSpan(
+      `create ${row.topic}`,
+      {
+        kind: SpanKind.PRODUCER,
+        attributes: {
+          'messaging.system': 'kafka',
+          'messaging.operation.type': 'create',
+          'messaging.destination.name': row.topic,
+          'messaging.message.id': row.eventId,
+        },
+      },
+      contextFromCarrier(row.traceContext as Record<string, unknown>),
+    );
+    // Criar a mensagem é instantâneo: o span marca o ponto do trace de onde o consumer continua
+    span.end();
+    return {
+      message: toOutgoingMessage(row, carrierFor(span)),
+      link: { context: span.spanContext() },
+    };
   }
 
   /** Métricas e logs SÓ de transições (falhou / voltou), para o log não repetir a mesma linha a cada 500 ms. */
@@ -304,8 +353,14 @@ export class OutboxRelay implements OnApplicationBootstrap, OnModuleDestroy {
  * Linha da outbox → mensagem do broker. Os headers repetem o essencial do envelope para o consumer rotear, filtrar
  * e logar SEM fazer parse do corpo. O `correlation-id` sai do envelope do contrato quando existir (eventos nascidos
  * fora de HTTP não têm).
+ *
+ * `traceCarrier` = headers W3C (`traceparent`, `tracestate`) do span `create`: o mesmo nome de header do HTTP, que
+ * a instrumentação de qualquer consumer (Java, Go, outra biblioteca Node) já sabe ler.
  */
-export function toOutgoingMessage(row: OutboxRow): OutgoingMessage {
+export function toOutgoingMessage(
+  row: OutboxRow,
+  traceCarrier: TraceCarrier = {},
+): OutgoingMessage {
   const payload = row.payload as Record<string, unknown>;
   const headers: Record<string, string> = {
     'event-id': row.eventId,
@@ -315,6 +370,7 @@ export function toOutgoingMessage(row: OutboxRow): OutgoingMessage {
   if (typeof payload.correlationId === 'string') {
     headers['correlation-id'] = payload.correlationId;
   }
+  Object.assign(headers, traceCarrier);
   return {
     topic: row.topic,
     key: row.messageKey,

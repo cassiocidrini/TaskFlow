@@ -1,6 +1,7 @@
 import type { Logger } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { metrics, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
+import { contextFromCarrier } from '../telemetry/trace-context';
 import { toKafkaLogger } from './kafka-logger';
 
 /** Uma mensagem lida do Kafka, já com chave, corpo e headers como texto. */
@@ -147,7 +148,12 @@ export class KafkaConsumerRunner {
     const group = this.options.groupId;
     const started = performance.now();
 
-    // Span de CONSUMER (convenção de mensageria do OTel): as queries do efeito aparecem como filhas dele
+    // Span de CONSUMER (convenção de mensageria do OTel): as queries do efeito aparecem como filhas dele.
+    // PAI = o contexto do header `traceparent` (o span `create` do relay), e não um link: com uma mensagem por vez,
+    // ser filho põe o consumer no MESMO trace do request que gerou o evento, que é o que se quer abrir no Jaeger.
+    // Link é para quando um span processa N mensagens de traces diferentes (consumo em lote). Sem header, o span
+    // vira raiz, como antes
+    const parent = contextFromCarrier(consumed.headers);
     const result = await this.tracer
       .startActiveSpan(
         `process ${topic}`,
@@ -164,6 +170,7 @@ export class KafkaConsumerRunner {
             'taskflow.correlation_id': consumed.headers['correlation-id'] ?? '',
           },
         },
+        parent,
         async (span) => {
           try {
             const handled = await this.options.handle(consumed);

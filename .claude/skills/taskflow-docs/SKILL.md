@@ -26,7 +26,7 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
 6. **Limitações conhecidas ficam documentadas ao lado do código, não escondidas.** As atuais (mantenha coerente com o
    README e `docs/modules/`): Strategy com `new` e `DeadlinePriorityStrategy` sem uso; dual-write nas projeções
    (`EventBus` em memória; a outbox do Módulo 13.2 cobre só o Kafka); relay e consumer sem DLQ/DLT
-   (mensagem ruim trava a fila/partição) e sem `traceparent`; `processed_events` sem limpeza;
+   (mensagem ruim trava a fila/partição); `processed_events` sem limpeza;
    throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; probes `/health` sem consumidor
    (sem manifesto Kubernetes nem `HEALTHCHECK`); Dockerfile em `node:20` e como root. Ao corrigir uma, tire-a daqui no MESMO PR.
 

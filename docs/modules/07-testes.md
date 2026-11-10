@@ -76,14 +76,14 @@ afterAll    → derruba o container
 test/
 ├── setup.ts                    # DISABLE_THROTTLE=true, NODE_ENV=test (antes de tudo)
 ├── setup-slow-suites.ts        # timeout de 60 s, só para integração, E2E e streaming
-├── support/                    # imagens dos containers de teste: as MESMAS tags do compose
-├── unit/                       # 23 arquivos, 214 testes (inclui o JSON do dashboard do Grafana)
+├── support/                    # imagens dos containers (as MESMAS tags do compose) e startInMemoryTracing()
+├── unit/                       # 23 arquivos, 218 testes (inclui o JSON do dashboard do Grafana)
 ├── integration/
 │   ├── support/test-database.ts   # startTestDatabase(): Postgres + migrações
 │   ├── event-store.spec.ts        # 18 testes
 │   ├── graceful-shutdown.spec.ts  # 3 testes (ordem do app.close() com HTTP real, Módulo 01)
 │   ├── notifications-handler.spec.ts # 6 testes (idempotência do consumer, Módulo 13.4)
-│   ├── outbox.spec.ts             # 7 testes (atomicidade events + outbox, Módulo 13.2)
+│   ├── outbox.spec.ts             # 9 testes (atomicidade events + outbox, Módulo 13.2; trace_context)
 │   ├── outbox-relay.spec.ts       # 6 testes (lock, duas réplicas, falha, limpeza — Módulo 13.3)
 │   └── projections.spec.ts        # 6 testes
 ├── e2e/
@@ -96,7 +96,7 @@ test/
 ├── streaming/
 │   ├── support/kafka-container.ts # startTestKafka(): apache/kafka real, porta anunciada = porta mapeada
 │   ├── outbox-relay.streaming-spec.ts  # 2 testes (outbox → relay → Kafka → consumer, Módulo 13.3)
-│   └── notifications.streaming-spec.ts # 3 testes (republicação, restart, falha com backoff, Módulo 13.4)
+│   └── notifications.streaming-spec.ts # 4 testes (republicação, restart, falha com backoff, um trace só — Módulo 13.4)
 └── load/                       # k6 e experimentos (NÃO são testes do Jest)
 ```
 
@@ -260,7 +260,7 @@ aleatória o broker anunciaria a porta interna. Por isso o helper escolhe uma po
 mapeia de forma fixa: anunciado e mapeado são o mesmo `localhost:<porta>` (o problema dos "dois listeners" do
 [Módulo 13](13-mensageria-kafka.md)).
 
-**Testes que provam que pegam o bug (mutação manual).** Dois testes do Módulo 13 foram conferidos quebrando o código
+**Testes que provam que pegam o bug (mutação manual).** Quatro testes do Módulo 13 foram conferidos quebrando o código
 de propósito:
 
 | Mutação | Teste que falhou | O que mostrou |
@@ -268,8 +268,16 @@ de propósito:
 | Tirar o mapper da outbox do `CreateTaskHandler` (13.2) | E2E `outbox` | O `TaskCreated` some da outbox |
 | Trocar o advisory lock do relay por `SELECT true` (13.3) | Integração "duas réplicas simultâneas" | **400 envios para 200 eventos**: cada mensagem publicada duas vezes |
 | Gravar a marca de `processed_events` fora da transação do efeito (13.4) | Integração "efeito falhou" | Evento marcado e nenhuma notificação: perdida para sempre |
+| Criar o span `process` do consumer sem o contexto do header (trace pela outbox) | Streaming "um trace só" | O consumer cai num trace novo: `traceId` diferente do request |
 
 Um teste que nunca foi visto falhando pode estar testando nada; esta é a versão barata do *mutation testing*.
+
+**Testando traces.** [`startInMemoryTracing()`](../../test/support/in-memory-tracing.ts) registra o SDK de trace com
+os spans em memória, e o teste lê o que teria ido para o Jaeger (pai, `traceId`, links). Ele registra as **três**
+peças globais que o `NodeSDK` registra em produção: tracer provider, propagador W3C e context manager com
+`AsyncLocalStorage`. Faltando o propagador, `inject`/`extract` são no-op; faltando o context manager,
+`startActiveSpan` não deixa o span ativo para o código chamado. Nos dois casos o código "funciona" sem propagar nada,
+e é por isso que a mutação acima foi conferida: o teste precisa ser visto falhando.
 
 ---
 
@@ -307,9 +315,9 @@ Um teste que nunca foi visto falhando pode estar testando nada; esta é a versã
 |---|---:|---:|---:|
 | Primeira versão deste módulo | 13 | 8 | 12 + 1 `todo` |
 | Antes do Módulo 13 | 166 | 27 | 38 |
-| **Hoje** | **214** | **46** | **44** |
+| **Hoje** | **218** | **48** | **44** |
 
-Mais **5 testes de streaming** (Kafka real), em ~18 s com as imagens em cache.
+Mais **6 testes de streaming** (Kafka real), em ~19 s com as imagens em cache.
 
 A suíte completa (`npm test`, em sequência) leva cerca de 3 minutos numa máquina de desenvolvimento com 8 GB
 reservados ao Docker. No CI, as quatro suítes rodam em VMs separadas e em paralelo.
@@ -335,7 +343,7 @@ reservados ao Docker. No CI, as quatro suítes rodam em VMs separadas e em paral
 - [x] Consistência eventual com `eventually()`
 - [x] Helpers de teste sem setup duplicado
 - [x] Suítes pesadas estáveis em máquina modesta (`--runInBand`, timeout correto)
-- [x] Mutação manual nos testes críticos da outbox e do relay
+- [x] Mutação manual nos testes críticos da outbox, do relay, do consumer e do trace
 - [ ] Cobertura no PR, testes de contrato e mutation testing automatizado (Stryker)
 
 ---

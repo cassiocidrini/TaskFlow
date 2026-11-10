@@ -7,11 +7,14 @@
  *   republica depois de perder o COMMIT — o at-least-once da 13.3);
  * - mensagem que falha volta (com backoff) e é processada uma vez quando passa, sem que as seguintes da partição
  *   passem na frente;
- * - consumer reiniciado continua do offset commitado: não reprocessa o que já fez.
+ * - consumer reiniciado continua do offset commitado: não reprocessa o que já fez;
+ * - o trace atravessa a outbox e o Kafka: o span `process` do consumer fica no MESMO trace do request que gravou o
+ *   evento, filho do `create` do relay (o header `traceparent` de verdade, passando pelo broker real).
  */
 import { randomUUID } from 'node:crypto';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 import { Logger } from '@nestjs/common';
+import { trace } from '@opentelemetry/api';
 import type { ConfigService } from '@nestjs/config';
 import type { PrismaClient } from '@prisma/client';
 import {
@@ -36,6 +39,10 @@ import {
   startTestDatabase,
   type TestDatabase,
 } from '../integration/support/test-database';
+import {
+  startInMemoryTracing,
+  type InMemoryTracing,
+} from '../support/in-memory-tracing';
 import { startTestKafka, type TestKafka } from './support/kafka-container';
 
 describe('Evento → Kafka → consumer de notificações (streaming)', () => {
@@ -46,6 +53,7 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
   let publisher: KafkaMessagePublisher;
   let relay: OutboxRelay;
   let handler: NotificationsHandler;
+  let tracing: InMemoryTracing;
 
   const OWNER = randomUUID();
   const ANA = randomUUID();
@@ -126,6 +134,7 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
   };
 
   beforeAll(async () => {
+    tracing = startInMemoryTracing();
     [db, kafka] = await Promise.all([startTestDatabase(), startTestKafka()]);
     prisma = db.prisma;
     eventStore = new EventStoreService(prisma as never);
@@ -164,6 +173,7 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
 
   afterAll(async () => {
     await publisher?.beforeApplicationShutdown();
+    await tracing?.stop();
     await Promise.all([db?.stop(), kafka?.stop()]);
   });
 
@@ -227,6 +237,47 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
 
     // Depois do restart, só passaram os 2 eventos da tarefa nova: nada reprocessado
     expect(results.slice(seen).map((r) => r.taskId)).toEqual([after, after]);
+  });
+
+  it('um trace só, do request ao consumer: process filho do create, create filho do request', async () => {
+    await startConsumer();
+    // O "request": o mesmo span ativo que a instrumentação HTTP abre na API
+    const { origin, taskId } = await trace
+      .getTracer('test')
+      .startActiveSpan('POST /projects/:projectId/tasks', async (span) => {
+        const id = await createAndComplete();
+        span.end();
+        return { origin: span.spanContext(), taskId: id };
+      });
+    await drainOutbox();
+
+    const eventIds = (
+      await prisma.outboxMessage.findMany({ where: { messageKey: taskId } })
+    ).map((row) => row.eventId);
+    const spansOf = (name: string) =>
+      tracing
+        .named(name)
+        .filter((s) =>
+          eventIds.includes(String(s.attributes['messaging.message.id'])),
+        );
+    await waitFor(
+      () => spansOf(`process ${TASK_EVENTS_TOPIC}`).length === 2,
+      'os spans do consumer',
+    );
+
+    const creates = spansOf(`create ${TASK_EVENTS_TOPIC}`);
+    const processes = spansOf(`process ${TASK_EVENTS_TOPIC}`);
+    expect(creates).toHaveLength(2);
+    for (const create of creates) {
+      expect(create.spanContext().traceId).toBe(origin.traceId);
+      expect(create.parentSpanContext?.spanId).toBe(origin.spanId);
+    }
+    for (const consumed of processes) {
+      expect(consumed.spanContext().traceId).toBe(origin.traceId); // MESMO trace do request
+      expect(creates.map((c) => c.spanContext().spanId)).toContain(
+        consumed.parentSpanContext?.spanId, // continua do create, pelo header que passou no broker
+      );
+    }
   });
 
   it('mensagem que falha volta com backoff e é processada uma vez; a seguinte não passa na frente', async () => {

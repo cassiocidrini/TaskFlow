@@ -7,12 +7,16 @@
  * - lock ocupado (`busy`) e banco fora: nenhuma mensagem sai;
  * - backoff exponencial com teto, zerado no primeiro sucesso; lote cheio roda de novo sem esperar;
  * - mensagem do broker: chave, corpo e headers vindos da linha da outbox;
+ * - trace distribuído: cada mensagem com contexto gravado ganha um span `create` FILHO do trace de origem, e o
+ *   `traceparent` do header aponta para ele; o `publish` do lote só referencia (links) os `create`;
  * - limpeza no máximo a cada 10 minutos, sem derrubar o loop se falhar;
  * - shutdown: o loop para e o `onModuleDestroy` só resolve quando a rodada em andamento terminou.
  *
  * Atomicidade, o lock de verdade e a limpeza por data estão no teste de integração (`outbox-relay.spec.ts`).
  */
 import type { OutboxMessage as OutboxRow } from '@prisma/client';
+import { trace } from '@opentelemetry/api';
+import { carrierFor } from '../../src/common/telemetry/trace-context';
 import type { ConfigService } from '@nestjs/config';
 import type { RelayEnv } from '../../src/config/relay-env.schema';
 import {
@@ -29,6 +33,10 @@ import type {
   OutboxStore,
   RelayTransaction,
 } from '../../src/outbox-relay/outbox.store';
+import {
+  startInMemoryTracing,
+  type InMemoryTracing,
+} from '../support/in-memory-tracing';
 
 const row = (id: number, overrides: Partial<OutboxRow> = {}): OutboxRow => ({
   id: BigInt(id),
@@ -41,6 +49,7 @@ const row = (id: number, overrides: Partial<OutboxRow> = {}): OutboxRow => ({
   publishedAt: null,
   attempts: 0,
   lastError: null,
+  traceContext: null,
   ...overrides,
 });
 
@@ -230,6 +239,101 @@ describe('OutboxRelay', () => {
       );
 
       expect(message.headers).not.toHaveProperty('correlation-id');
+    });
+
+    it('com contexto de trace: os headers W3C saem junto, com os nomes do padrão', () => {
+      const traceparent =
+        '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01';
+      const message = toOutgoingMessage(row(1), {
+        traceparent,
+        tracestate: 'vendor=x',
+      });
+
+      expect(message.headers).toMatchObject({
+        'event-id': 'ev-1',
+        traceparent,
+        tracestate: 'vendor=x',
+      });
+    });
+  });
+
+  describe('trace distribuído pela outbox', () => {
+    let tracing: InMemoryTracing;
+    const TOPIC = 'taskflow.task-events.v1';
+
+    beforeAll(() => {
+      tracing = startInMemoryTracing();
+    });
+    afterAll(async () => {
+      await tracing.stop();
+    });
+    beforeEach(() => tracing.reset());
+
+    /** O que a API grava em `outbox.trace_context` durante um request (span de origem já encerrado). */
+    const recordedDuringRequest = () => {
+      const origin = trace.getTracer('test').startSpan('POST /tasks');
+      origin.end();
+      return { origin: origin.spanContext(), carrier: carrierFor(origin) };
+    };
+    const traceparentOf = (message: OutgoingMessage) => {
+      const [, traceId, spanId] = message.headers.traceparent.split('-');
+      return { traceId, spanId };
+    };
+
+    it('cada mensagem continua o trace de ORIGEM: create filho do request, traceparent apontando para o create', async () => {
+      const a = recordedDuringRequest();
+      const b = recordedDuringRequest();
+      pending = [
+        row(1, { traceContext: a.carrier }),
+        row(2, { traceContext: b.carrier }),
+      ];
+
+      await relay.runCycle();
+
+      const creates = tracing.named(`create ${TOPIC}`);
+      expect(creates).toHaveLength(2);
+      const [sentA, sentB] = publisher.sent[0];
+      for (const [origin, create, sent] of [
+        [a.origin, creates[0], sentA],
+        [b.origin, creates[1], sentB],
+      ] as const) {
+        expect(create.spanContext().traceId).toBe(origin.traceId); // mesmo trace do request
+        expect(create.parentSpanContext?.spanId).toBe(origin.spanId); // filho do span gravado
+        expect(traceparentOf(sent)).toEqual({
+          traceId: origin.traceId,
+          spanId: create.spanContext().spanId, // o consumer continua do create
+        });
+      }
+    });
+
+    it('o publish do lote não pertence a nenhum request: é raiz própria, com LINKS para os create', async () => {
+      const a = recordedDuringRequest();
+      const b = recordedDuringRequest();
+      pending = [
+        row(1, { traceContext: a.carrier }),
+        row(2, { traceContext: b.carrier }),
+      ];
+
+      await relay.runCycle();
+
+      const [publish] = tracing.named(`publish ${TOPIC}`);
+      const creates = tracing.named(`create ${TOPIC}`);
+      expect(publish.parentSpanContext).toBeUndefined();
+      expect([a.origin.traceId, b.origin.traceId]).not.toContain(
+        publish.spanContext().traceId,
+      );
+      expect(publish.links.map((l) => l.context.spanId)).toEqual(
+        creates.map((c) => c.spanContext().spanId),
+      );
+    });
+
+    it('linha sem contexto (gravada fora de um span): sem create e sem traceparent', async () => {
+      pending = [row(1)];
+
+      await relay.runCycle();
+
+      expect(tracing.named(`create ${TOPIC}`)).toHaveLength(0);
+      expect(publisher.sent[0][0].headers).not.toHaveProperty('traceparent');
     });
   });
 
