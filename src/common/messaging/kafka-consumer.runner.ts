@@ -1,7 +1,20 @@
 import type { Logger } from '@nestjs/common';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
-import { metrics, SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
-import { contextFromCarrier } from '../telemetry/trace-context';
+import {
+  metrics,
+  SpanKind,
+  SpanStatusCode,
+  trace,
+  type Span,
+} from '@opentelemetry/api';
+import { carrierFor, contextFromCarrier } from '../telemetry/trace-context';
+import {
+  classifyFailure,
+  DEFAULT_MAX_ATTEMPTS,
+  nextStep,
+  retryDelay,
+  type FailureClass,
+} from './consumer-errors';
 import { toKafkaLogger } from './kafka-logger';
 
 /** Uma mensagem lida do Kafka, já com chave, corpo e headers como texto. */
@@ -16,9 +29,13 @@ export interface ConsumedMessage {
 
 /**
  * Resultado do processamento de uma mensagem, que vira o label `result` da métrica. Exemplos: `processed`,
- * `duplicate` (o consumer já tinha processado o evento), `ignored` (tipo ou versão que não interessam).
+ * `duplicate` (o consumer já tinha processado o evento), `ignored` (tipo ou versão que não interessam) e
+ * {@link DEAD_LETTERED}, que o próprio runner produz.
  */
 export type HandleResult = string;
+
+/** Resultado de uma mensagem desviada para o dead-letter topic: saiu da partição, mas não foi processada. */
+export const DEAD_LETTERED = 'dead_lettered';
 
 export interface KafkaConsumerOptions {
   brokers: string[];
@@ -27,14 +44,38 @@ export interface KafkaConsumerOptions {
   topics: string[];
   /** Partições processadas em paralelo. Dentro de uma partição, sempre uma mensagem por vez (ordem). */
   partitionsConsumedConcurrently: number;
-  /** O efeito. Lançar = a mensagem NÃO é commitada e volta (depois do backoff). */
+  /**
+   * O efeito. Lançar = falha, classificada em `consumer-errors.ts`: `NonRetryableError` vai direto para o DLT, erro
+   * de banco tenta para sempre, o resto tenta `maxAttempts` vezes.
+   */
   handle: (message: ConsumedMessage) => Promise<HandleResult>;
+  /**
+   * Dead-letter topic DESTE grupo (ex.: `taskflow.notifications-dlt.v1`). Por grupo, e não um por tópico de origem:
+   * a falha é do consumer, não do evento, e reprocessar a partir de um DLT compartilhado reentregaria a mensagem a
+   * todos os grupos.
+   */
+  deadLetterTopic: string;
+  /** Tentativas de uma falha desconhecida antes do DLT. Padrão: {@link DEFAULT_MAX_ATTEMPTS}. */
+  maxAttempts?: number;
   logger: Logger;
 }
 
-/** Teto da espera entre reentregas de uma mensagem que falha. */
-export const MAX_RETRY_BACKOFF_MS = 30_000;
-const FIRST_RETRY_BACKOFF_MS = 500;
+/** Prazo do ack do DLT. Sem ele, com o Kafka fora, o envio ficaria 5 min pendurado (padrão da librdkafka). */
+const DLT_SEND_TIMEOUT_MS = 10_000;
+/** Tamanho máximo da mensagem de erro no header `dlt-error-message` (ver {@link headerSafe}). */
+const MAX_ERROR_HEADER_LENGTH = 500;
+
+/** Como terminou a mensagem dentro do span: concluída (inclusive no DLT) ou a tentar de novo. */
+type Outcome =
+  | { kind: 'done'; result: HandleResult }
+  | {
+      kind: 'retry';
+      error: unknown;
+      failure: FailureClass;
+      attempt: number;
+      delayMs: number;
+      what: string;
+    };
 
 /**
  * Laço de um consumer group do Kafka, genérico (Módulo 13.4): conecta, processa mensagem a mensagem, commita o
@@ -46,20 +87,34 @@ const FIRST_RETRY_BACKOFF_MS = 500;
  * idempotente (no TaskFlow, `processed_events`). Commitar ANTES do efeito seria at-most-once: um crash perderia o
  * evento sem ninguém saber.
  *
- * **Erro no `handle`:** o cliente faz *seek* de volta para a mesma mensagem e a reentrega IMEDIATAMENTE, em loop.
- * Com o banco fora, isso martelaria o Postgres. Aqui a partição espera um backoff exponencial antes de devolver o
- * erro (500 ms → 30 s); as outras partições seguem. Uma mensagem que SEMPRE falha trava a sua partição: o limite
- * de tentativas e o dead-letter topic são a etapa 13.5.
+ * **Falhas (13.5): retry BLOQUEANTE na partição e dead-letter topic para a mensagem envenenada.**
+ * - O cliente faz *seek* para a mensagem que falhou e a reentrega IMEDIATAMENTE, em loop. O runner espera um backoff
+ *   exponencial por partição (500 ms → 30 s) antes de devolver o erro; as outras partições seguem.
+ * - Bloqueante, e não tópicos de retry: um tópico de retry deixaria o `TaskCompleted` passar na frente do
+ *   `TaskAssigned` que espera, e a ordem por tarefa é o que o consumer usa para saber a quem notificar.
+ * - Quando a classificação manda (`consumer-errors.ts`), a mensagem vai para o DLT INTACTA, com o diagnóstico em
+ *   headers, e SÓ DEPOIS do ack do DLT o offset é commitado. DLT fora = a mensagem não sai da partição (nunca se
+ *   perde); crash entre o ack e o commit = ela vai ao DLT de novo (at-least-once; o `event-id` deduplica).
+ * - O DLT troca ordem por disponibilidade: as mensagens seguintes da mesma tarefa passam sem a que foi desviada.
  */
 export class KafkaConsumerRunner {
   private readonly consumer: KafkaJS.Consumer;
+  private readonly deadLetterProducer: KafkaJS.Producer;
+  private readonly maxAttempts: number;
   private readonly tracer = trace.getTracer('taskflow-kafka-consumer');
   private readonly meter = metrics.getMeter('taskflow-kafka-consumer');
   private readonly messagesCounter = this.meter.createCounter(
     'kafka_consumer_messages',
     {
       description:
-        'Mensagens processadas pelo consumer, por grupo e resultado (processed, duplicate, ignored, failed)',
+        'Mensagens concluídas pelo consumer, por grupo e resultado (processed, duplicate, ignored, dead_lettered)',
+    },
+  );
+  private readonly retriesCounter = this.meter.createCounter(
+    'kafka_consumer_retries',
+    {
+      description:
+        'Tentativas que falharam e vão se repetir, por grupo e classe da falha (permanent, infrastructure, unknown)',
     },
   );
   private readonly durationHistogram = this.meter.createHistogram(
@@ -71,12 +126,20 @@ export class KafkaConsumerRunner {
     },
   );
 
-  /** Falhas consecutivas por partição: o backoff de uma não atrasa as outras. */
-  private readonly failures = new Map<number, number>();
+  /**
+   * Tentativas da mensagem que está falhando, por partição. Chaveado também pelo offset: a contagem é da MENSAGEM,
+   * e zera quando a partição avança. Fica em memória: um restart (ou rebalance) recomeça a contagem, o que só atrasa
+   * o DLT de uma falha desconhecida.
+   */
+  private readonly attempts = new Map<
+    number,
+    { offset: string; count: number }
+  >();
   private stopping = false;
   private readonly wakers = new Set<() => void>();
 
   constructor(private readonly options: KafkaConsumerOptions) {
+    this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     const kafka = new KafkaJS.Kafka({
       kafkaJS: {
         brokers: options.brokers,
@@ -98,9 +161,15 @@ export class KafkaConsumerRunner {
         sessionTimeout: 30_000,
       },
     });
+    // Idempotente, como o do relay: um reenvio por timeout de rede não duplica a mensagem no DLT
+    this.deadLetterProducer = kafka.producer({
+      'message.timeout.ms': DLT_SEND_TIMEOUT_MS,
+      kafkaJS: { idempotent: true },
+    });
   }
 
   async start(): Promise<void> {
+    await this.deadLetterProducer.connect();
     await this.consumer.connect();
     await this.consumer.subscribe({ topics: this.options.topics });
     // `run` resolve logo: o laço de consumo segue em segundo plano até o `stop`
@@ -110,18 +179,20 @@ export class KafkaConsumerRunner {
       eachMessage: (payload) => this.process(payload),
     });
     this.options.logger.log(
-      `Consumer group "${this.options.groupId}" conectado a ${this.options.topics.join(', ')} (${this.options.partitionsConsumedConcurrently} partições em paralelo)`,
+      `Consumer group "${this.options.groupId}" conectado a ${this.options.topics.join(', ')} (${this.options.partitionsConsumedConcurrently} partições em paralelo; DLT ${this.options.deadLetterTopic})`,
     );
   }
 
   /**
-   * Para de buscar mensagens, interrompe backoffs em andamento e desconecta. O `disconnect` espera a mensagem em
-   * processamento terminar; a que estava em backoff não é commitada e volta para quem assumir a partição.
+   * Para de buscar mensagens, interrompe backoffs em andamento e desconecta. O `disconnect` do consumer espera a
+   * mensagem em processamento terminar (inclusive um envio ao DLT); só então o produtor do DLT fecha. A mensagem
+   * que estava em backoff não é commitada e volta para quem assumir a partição.
    */
   async stop(): Promise<void> {
     this.stopping = true;
     for (const wake of this.wakers) wake();
     await this.consumer.disconnect();
+    await this.deadLetterProducer.disconnect();
     this.options.logger.log(
       `Consumer group "${this.options.groupId}" desconectado`,
     );
@@ -154,65 +225,57 @@ export class KafkaConsumerRunner {
     // Link é para quando um span processa N mensagens de traces diferentes (consumo em lote). Sem header, o span
     // vira raiz, como antes
     const parent = contextFromCarrier(consumed.headers);
-    const result = await this.tracer
-      .startActiveSpan(
-        `process ${topic}`,
-        {
-          kind: SpanKind.CONSUMER,
-          attributes: {
-            'messaging.system': 'kafka',
-            'messaging.operation.type': 'process',
-            'messaging.destination.name': topic,
-            'messaging.consumer.group.name': group,
-            'messaging.destination.partition.id': String(partition),
-            'messaging.kafka.offset': Number(message.offset),
-            'messaging.message.id': consumed.headers['event-id'] ?? '',
-            'taskflow.correlation_id': consumed.headers['correlation-id'] ?? '',
-          },
+    const outcome = await this.tracer.startActiveSpan(
+      `process ${topic}`,
+      {
+        kind: SpanKind.CONSUMER,
+        attributes: {
+          'messaging.system': 'kafka',
+          'messaging.operation.type': 'process',
+          'messaging.destination.name': topic,
+          'messaging.consumer.group.name': group,
+          'messaging.destination.partition.id': String(partition),
+          'messaging.kafka.offset': Number(message.offset),
+          'messaging.message.id': consumed.headers['event-id'] ?? '',
+          'taskflow.correlation_id': consumed.headers['correlation-id'] ?? '',
         },
-        parent,
-        async (span) => {
-          try {
-            const handled = await this.options.handle(consumed);
-            span.setAttribute('taskflow.consumer.result', handled);
-            return handled;
-          } catch (error) {
-            span.recordException(error as Error);
-            span.setStatus({
-              code: SpanStatusCode.ERROR,
-              message: describe(error),
-            });
-            throw error;
-          } finally {
-            span.end();
-          }
-        },
-      )
-      .catch(async (error: unknown) => {
-        this.messagesCounter.add(1, {
-          consumer_group: group,
-          result: 'failed',
-        });
-        const attempt = (this.failures.get(partition) ?? 0) + 1;
-        this.failures.set(partition, attempt);
-        const delay = Math.min(
-          MAX_RETRY_BACKOFF_MS,
-          FIRST_RETRY_BACKOFF_MS * 2 ** (attempt - 1),
-        );
-        this.options.logger.error({
-          msg: `Falha ao processar mensagem (tentativa ${attempt}; nova tentativa em ${delay} ms): ${describe(error)}`,
-          topic,
-          partition,
-          offset: message.offset,
-          eventId: consumed.headers['event-id'],
-          correlationId: consumed.headers['correlation-id'],
-        });
-        await this.sleep(delay);
-        throw error; // o cliente faz seek e reentrega a MESMA mensagem: nada depois dela é processado antes
-      });
+      },
+      parent,
+      async (span): Promise<Outcome> => {
+        try {
+          const handled = await this.options.handle(consumed);
+          span.setAttribute('taskflow.consumer.result', handled);
+          return { kind: 'done', result: handled };
+        } catch (error) {
+          return await this.onFailure(span, consumed, error);
+        } finally {
+          span.end();
+        }
+      },
+    );
 
-    this.failures.delete(partition);
-    this.messagesCounter.add(1, { consumer_group: group, result });
+    if (outcome.kind === 'retry') {
+      this.retriesCounter.add(1, {
+        consumer_group: group,
+        error_class: outcome.failure,
+      });
+      this.options.logger.error({
+        msg: `Falha ${outcome.what} (${outcome.failure}, tentativa ${outcome.attempt}; nova tentativa em ${outcome.delayMs} ms): ${describe(outcome.error)}`,
+        topic,
+        partition,
+        offset: message.offset,
+        eventId: consumed.headers['event-id'],
+        correlationId: consumed.headers['correlation-id'],
+      });
+      await this.sleep(outcome.delayMs);
+      throw outcome.error; // o cliente faz seek e reentrega a MESMA mensagem: nada depois dela é processado antes
+    }
+
+    this.attempts.delete(partition);
+    this.messagesCounter.add(1, {
+      consumer_group: group,
+      result: outcome.result,
+    });
     this.durationHistogram.record((performance.now() - started) / 1000, {
       consumer_group: group,
     });
@@ -229,6 +292,133 @@ export class KafkaConsumerRunner {
     }
   }
 
+  /** Classifica a falha, conta a tentativa e decide: tentar de novo ou desviar para o DLT. */
+  private async onFailure(
+    span: Span,
+    consumed: ConsumedMessage,
+    error: unknown,
+  ): Promise<Outcome> {
+    const failure = classifyFailure(error);
+    const attempt = this.countAttempt(consumed.partition, consumed.offset);
+    span.recordException(error as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: describe(error) });
+    span.setAttributes({
+      'taskflow.consumer.failure_class': failure,
+      'taskflow.consumer.attempt': attempt,
+    });
+
+    const step = nextStep(failure, attempt, this.maxAttempts);
+    if (step.action === 'retry') {
+      return {
+        kind: 'retry',
+        error,
+        failure,
+        attempt,
+        delayMs: step.delayMs,
+        what: 'ao processar mensagem',
+      };
+    }
+
+    try {
+      await this.deadLetter(consumed, error, failure, attempt);
+    } catch (dltError) {
+      // Sem o ack do DLT, a mensagem NÃO sai da partição: commitar agora a perderia
+      span.recordException(dltError as Error);
+      return {
+        kind: 'retry',
+        error: dltError,
+        failure,
+        attempt,
+        delayMs: retryDelay(attempt),
+        what: `ao enviar ao DLT ${this.options.deadLetterTopic}`,
+      };
+    }
+    span.setAttribute('taskflow.consumer.result', DEAD_LETTERED);
+    this.options.logger.error({
+      msg: `Mensagem desviada para o DLT ${this.options.deadLetterTopic} (${failure}, ${attempt} tentativa(s)): ${describe(error)}`,
+      topic: consumed.topic,
+      partition: consumed.partition,
+      offset: consumed.offset,
+      eventId: consumed.headers['event-id'],
+      correlationId: consumed.headers['correlation-id'],
+    });
+    return { kind: 'done', result: DEAD_LETTERED };
+  }
+
+  /**
+   * Publica a mensagem no DLT e espera o ack. Chave, corpo e headers originais intactos (quem investiga vê o que
+   * chegou, byte a byte); o diagnóstico vai em headers `dlt-*`. O `traceparent` passa a ser o do span de envio, que é
+   * filho do `process`: no Jaeger, o desvio aparece no mesmo trace do request que gerou o evento.
+   */
+  private async deadLetter(
+    consumed: ConsumedMessage,
+    error: unknown,
+    failure: FailureClass,
+    attempt: number,
+  ): Promise<void> {
+    const dlt = this.options.deadLetterTopic;
+    await this.tracer.startActiveSpan(
+      `publish ${dlt}`,
+      {
+        kind: SpanKind.PRODUCER,
+        attributes: {
+          'messaging.system': 'kafka',
+          'messaging.operation.type': 'send',
+          'messaging.destination.name': dlt,
+          'messaging.message.id': consumed.headers['event-id'] ?? '',
+        },
+      },
+      async (span) => {
+        try {
+          const {
+            traceparent: _tp,
+            tracestate: _ts,
+            ...original
+          } = consumed.headers;
+          await this.deadLetterProducer.send({
+            topic: dlt,
+            messages: [
+              {
+                key: consumed.key,
+                value: consumed.value,
+                headers: {
+                  ...original,
+                  ...carrierFor(span),
+                  'dlt-original-topic': consumed.topic,
+                  'dlt-original-partition': String(consumed.partition),
+                  'dlt-original-offset': consumed.offset,
+                  'dlt-consumer-group': this.options.groupId,
+                  // `permanent` = nenhuma tentativa resolveria; `exhausted` = esgotou as tentativas de uma falha desconhecida
+                  'dlt-reason':
+                    failure === 'permanent' ? 'permanent' : 'exhausted',
+                  'dlt-error-message': headerSafe(describe(error)),
+                  'dlt-attempts': String(attempt),
+                  'dlt-failed-at': new Date().toISOString(),
+                },
+              },
+            ],
+          });
+        } catch (sendError) {
+          span.recordException(sendError as Error);
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: describe(sendError),
+          });
+          throw sendError;
+        } finally {
+          span.end();
+        }
+      },
+    );
+  }
+
+  private countAttempt(partition: number, offset: string): number {
+    const current = this.attempts.get(partition);
+    const count = current?.offset === offset ? current.count + 1 : 1;
+    this.attempts.set(partition, { offset, count });
+    return count;
+  }
+
   /** Espera interrompível pelo `stop`. */
   private sleep(ms: number): Promise<void> {
     if (this.stopping) return Promise.resolve();
@@ -242,6 +432,15 @@ export class KafkaConsumerRunner {
       this.wakers.add(done);
     });
   }
+}
+
+/**
+ * Mensagem de erro pronta para header: uma linha só (o erro do zod tem quebras de linha, que quebrariam quem lê
+ * headers linha a linha, como o `kafka-console-consumer`) e com tamanho limitado (um stack trace gigante não estoura
+ * o tamanho da mensagem).
+ */
+function headerSafe(text: string): string {
+  return text.replace(/\s+/g, ' ').trim().slice(0, MAX_ERROR_HEADER_LENGTH);
 }
 
 function describe(error: unknown): string {

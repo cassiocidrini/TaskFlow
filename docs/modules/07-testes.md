@@ -77,7 +77,7 @@ test/
 ├── setup.ts                    # DISABLE_THROTTLE=true, NODE_ENV=test (antes de tudo)
 ├── setup-slow-suites.ts        # timeout de 60 s, só para integração, E2E e streaming
 ├── support/                    # imagens dos containers (as MESMAS tags do compose) e startInMemoryTracing()
-├── unit/                       # 23 arquivos, 218 testes (inclui o JSON do dashboard do Grafana)
+├── unit/                       # 24 arquivos, 236 testes (inclui o JSON do dashboard do Grafana)
 ├── integration/
 │   ├── support/test-database.ts   # startTestDatabase(): Postgres + migrações
 │   ├── event-store.spec.ts        # 18 testes
@@ -95,6 +95,7 @@ test/
 │   └── tasks.e2e-spec.ts          # 19 testes (inclui API → outbox, Módulo 13.2)
 ├── streaming/
 │   ├── support/kafka-container.ts # startTestKafka(): apache/kafka real, porta anunciada = porta mapeada
+│   ├── dead-letter.streaming-spec.ts   # 4 testes (poison pill, falha desconhecida, banco fora, DLT fora — Módulo 13.5)
 │   ├── outbox-relay.streaming-spec.ts  # 2 testes (outbox → relay → Kafka → consumer, Módulo 13.3)
 │   └── notifications.streaming-spec.ts # 4 testes (republicação, restart, falha com backoff, um trace só — Módulo 13.4)
 └── load/                       # k6 e experimentos (NÃO são testes do Jest)
@@ -260,7 +261,7 @@ aleatória o broker anunciaria a porta interna. Por isso o helper escolhe uma po
 mapeia de forma fixa: anunciado e mapeado são o mesmo `localhost:<porta>` (o problema dos "dois listeners" do
 [Módulo 13](13-mensageria-kafka.md)).
 
-**Testes que provam que pegam o bug (mutação manual).** Quatro testes do Módulo 13 foram conferidos quebrando o código
+**Testes que provam que pegam o bug (mutação manual).** Seis testes do Módulo 13 foram conferidos quebrando o código
 de propósito:
 
 | Mutação | Teste que falhou | O que mostrou |
@@ -269,6 +270,8 @@ de propósito:
 | Trocar o advisory lock do relay por `SELECT true` (13.3) | Integração "duas réplicas simultâneas" | **400 envios para 200 eventos**: cada mensagem publicada duas vezes |
 | Gravar a marca de `processed_events` fora da transação do efeito (13.4) | Integração "efeito falhou" | Evento marcado e nenhuma notificação: perdida para sempre |
 | Criar o span `process` do consumer sem o contexto do header (trace pela outbox) | Streaming "um trace só" | O consumer cai num trace novo: `traceId` diferente do request |
+| Tirar a classificação de falha de banco (13.5) | Streaming "falha de banco" | A mensagem vai ao DLT depois de 2 tentativas. Com processos reais: 6 de 40 eventos legítimos no DLT em 45 s de Postgres fora |
+| Commitar o offset mesmo sem o ack do DLT (13.5) | Streaming "DLT indisponível" | A mensagem de trás fura a fila. Na 1ª versão do teste, esta mutação **sobreviveu** (problema 14) |
 
 Um teste que nunca foi visto falhando pode estar testando nada; esta é a versão barata do *mutation testing*.
 
@@ -298,6 +301,7 @@ e é por isso que a mutação acima foi conferida: o teste precisa ser visto fal
 | 11 | `import()` dinâmico funcionou no Jest e quebrou no `tsc` | Com `module: nodenext`, `import()` exige extensão `.js` | `require` tipado com `typeof import(...)` |
 | 12 | **(13.3)** O teste do lock travou por 60 s | `$queryRaw` com `SELECT pg_advisory_xact_lock(...)`: a função devolve `void`, que o Prisma não desserializa; a promessa que liberaria o teste nunca resolveu | `$executeRaw` para comandos sem resultado |
 | 13 | **(13.3)** O teste das duas réplicas falhou na mutação antes de mostrar as duplicatas | A primeira asserção (houve disputa pelo lock) já falha sem lock | Rodar a mutação também sem essa asserção, para ver o efeito real (400 envios) |
+| 14 | **(13.5)** O teste "DLT indisponível" passava, e a mutação "commitar sem o ack do DLT" **também passava** | O teste dormia 12 s antes de criar o tópico do DLT; o join do grupo atrasou o 1º envio, o tópico apareceu antes do timeout de 10 s, e o envio **nunca falhou** | Esperar o erro acontecer (o log do runner) em vez de dormir. A mutação passou a quebrar o teste pelo motivo certo: a mensagem de trás furando a fila |
 
 ### As lições que ficam
 
@@ -306,6 +310,8 @@ e é por isso que a mutação acima foi conferida: o teste precisa ser visto fal
 3. **Configuração que parece funcionar pode não fazer nada.** O `testTimeout` estava no arquivo desde o início, plausível, e era ignorado. Só um experimento revelou.
 4. **Paralelismo só acelera quando sobra recurso.** Sem memória, ele trava a máquina.
 5. **Teste com consistência eventual: rode 3 vezes antes de confiar.**
+6. **Um teste de caminho de erro só prova algo se o erro aconteceu.** Dormir um tempo "suficiente" e torcer não é
+   provocar a falha; só a mutação mostrou que o teste do DLT indisponível nunca a exercitava.
 
 ---
 
@@ -315,9 +321,10 @@ e é por isso que a mutação acima foi conferida: o teste precisa ser visto fal
 |---|---:|---:|---:|
 | Primeira versão deste módulo | 13 | 8 | 12 + 1 `todo` |
 | Antes do Módulo 13 | 166 | 27 | 38 |
-| **Hoje** | **218** | **48** | **44** |
+| **Hoje** | **236** | **48** | **44** |
 
-Mais **6 testes de streaming** (Kafka real), em ~19 s com as imagens em cache.
+Mais **10 testes de streaming** (Kafka real), em ~54 s com as imagens em cache (o do DLT indisponível espera um
+timeout real de 10 s do produtor).
 
 A suíte completa (`npm test`, em sequência) leva cerca de 3 minutos numa máquina de desenvolvimento com 8 GB
 reservados ao Docker. No CI, as quatro suítes rodam em VMs separadas e em paralelo.
@@ -343,7 +350,7 @@ reservados ao Docker. No CI, as quatro suítes rodam em VMs separadas e em paral
 - [x] Consistência eventual com `eventually()`
 - [x] Helpers de teste sem setup duplicado
 - [x] Suítes pesadas estáveis em máquina modesta (`--runInBand`, timeout correto)
-- [x] Mutação manual nos testes críticos da outbox, do relay, do consumer e do trace
+- [x] Mutação manual nos testes críticos da outbox, do relay, do consumer, do trace e do DLT
 - [ ] Cobertura no PR, testes de contrato e mutation testing automatizado (Stryker)
 
 ---

@@ -128,6 +128,12 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists \
           --topic taskflow.task-events.v1 --partitions 3 --replication-factor 1 \
           --config retention.ms=604800000 --config cleanup.policy=delete
+        # Dead-letter topic do consumer group notifications (Módulo 13.5): um por GRUPO, e não por tópico de origem
+        # (a falha é do consumer; reprocessar de um DLT compartilhado reentregaria a todos os grupos). Retenção de
+        # 30 dias, maior que a do tópico de origem: é o prazo para alguém investigar
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists \
+          --topic taskflow.notifications-dlt.v1 --partitions 3 --replication-factor 1 \
+          --config retention.ms=2592000000 --config cleanup.policy=delete
         # Tópico só do smoke test (npm run kafka:smoke): mensagem de teste nunca vai para o tópico de eventos
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists \
           --topic taskflow.smoke --partitions 1 --replication-factor 1 --config retention.ms=3600000
