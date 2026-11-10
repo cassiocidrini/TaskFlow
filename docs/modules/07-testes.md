@@ -1,10 +1,11 @@
 # Módulo 07 — Testes (unitários, integração e E2E)
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 18/10/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
 > **Onde vive no código:** [`test/`](../../test/) · [`jest.config.ts`](../../jest.config.ts) ·
 > helpers em [`test/e2e/support/e2e-app.ts`](../../test/e2e/support/e2e-app.ts) e
-> [`test/integration/support/test-database.ts`](../../test/integration/support/test-database.ts)
+> [`test/integration/support/test-database.ts`](../../test/integration/support/test-database.ts) ·
+> Kafka de teste em [`test/streaming/support/kafka-container.ts`](../../test/streaming/support/kafka-container.ts)
 
 ---
 
@@ -74,30 +75,37 @@ afterAll    → derruba o container
 ```text
 test/
 ├── setup.ts                    # DISABLE_THROTTLE=true, NODE_ENV=test (antes de tudo)
-├── setup-slow-suites.ts        # timeout de 60 s, só para integração e E2E
-├── unit/                       # 17 arquivos, 166 testes (inclui o JSON do dashboard do Grafana)
+├── setup-slow-suites.ts        # timeout de 60 s, só para integração, E2E e streaming
+├── support/                    # imagens dos containers de teste: as MESMAS tags do compose
+├── unit/                       # 20 arquivos, 194 testes (inclui o JSON do dashboard do Grafana)
 ├── integration/
 │   ├── support/test-database.ts   # startTestDatabase(): Postgres + migrações
 │   ├── event-store.spec.ts        # 18 testes
 │   ├── graceful-shutdown.spec.ts  # 3 testes (ordem do app.close() com HTTP real, Módulo 01)
+│   ├── outbox.spec.ts             # 7 testes (atomicidade events + outbox, Módulo 13.2)
+│   ├── outbox-relay.spec.ts       # 6 testes (lock, duas réplicas, falha, limpeza — Módulo 13.3)
 │   └── projections.spec.ts        # 6 testes
 ├── e2e/
 │   ├── support/e2e-app.ts         # startE2EApp(), resetDatabase(), registerAndLogin(), eventually()
 │   ├── auth.e2e-spec.ts           # 12 testes
 │   ├── correlation.e2e-spec.ts    # 5 testes (X-Correlation-Id, Módulo 01)
 │   ├── health.e2e-spec.ts         # 3 testes (probes sem token, Módulo 01)
-│   └── tasks.e2e-spec.ts          # 18 testes
+│   └── tasks.e2e-spec.ts          # 19 testes (inclui API → outbox, Módulo 13.2)
+├── streaming/
+│   ├── support/kafka-container.ts # startTestKafka(): apache/kafka real, porta anunciada = porta mapeada
+│   └── outbox-relay.streaming-spec.ts  # 2 testes (outbox → relay → Kafka → consumer, Módulo 13.3)
 └── load/                       # k6 e experimentos (NÃO são testes do Jest)
 ```
 
-O [`jest.config.ts`](../../jest.config.ts) define 3 *projects* (`unit`, `integration`, `e2e`), e os scripts
-selecionam cada um:
+O [`jest.config.ts`](../../jest.config.ts) define 4 *projects* (`unit`, `integration`, `e2e`, `streaming`), e os
+scripts selecionam cada um:
 
 ```bash
 npm run test:unit          # --selectProjects unit
 npm run test:integration   # --selectProjects integration --runInBand
 npm run test:e2e           # --selectProjects e2e --runInBand
-npm test                   # os três, em sequência (para no primeiro que falhar)
+npm run test:streaming     # --selectProjects streaming --runInBand (sobe Kafka + Postgres)
+npm test                   # unit, integration e e2e em sequência (para no primeiro que falhar)
 ```
 
 > ⚠️ **Nunca** rodar `npx jest` direto: os scripts passam `--experimental-vm-modules` (algumas libs do NestJS 12
@@ -236,6 +244,31 @@ projeção: as respostas dos comandos são lidas na hora, porque esconder bugs a
 
 ---
 
+## 🧪 Parte 4 — Streaming: Kafka de verdade (Módulo 13)
+
+A suíte `test:streaming` prova o caminho que nenhum mock prova: evento gravado pelo código real → outbox → relay →
+**Kafka real** → um consumer lendo o tópico, conferindo chave, partição, ordem e headers. É ela que o 4º job do CI
+roda ([Módulo 03](03-ci-cd-github-actions.md)).
+
+**Por que `GenericContainer`, e não o `KafkaContainer` do Testcontainers:** o módulo `@testcontainers/kafka` só sobe
+as imagens da Confluent (ele chama `/etc/confluent/docker/run`). O teste usa a imagem oficial `apache/kafka:4.3.2`,
+a mesma do compose, com um detalhe que faz funcionar: o cliente usa o endereço que o broker **anuncia**, e com porta
+aleatória o broker anunciaria a porta interna. Por isso o helper escolhe uma porta livre **antes** de subir e a
+mapeia de forma fixa: anunciado e mapeado são o mesmo `localhost:<porta>` (o problema dos "dois listeners" do
+[Módulo 13](13-mensageria-kafka.md)).
+
+**Testes que provam que pegam o bug (mutação manual).** Dois testes do Módulo 13 foram conferidos quebrando o código
+de propósito:
+
+| Mutação | Teste que falhou | O que mostrou |
+|---|---|---|
+| Tirar o mapper da outbox do `CreateTaskHandler` (13.2) | E2E `outbox` | O `TaskCreated` some da outbox |
+| Trocar o advisory lock do relay por `SELECT true` (13.3) | Integração "duas réplicas simultâneas" | **400 envios para 200 eventos**: cada mensagem publicada duas vezes |
+
+Um teste que nunca foi visto falhando pode estar testando nada; esta é a versão barata do *mutation testing*.
+
+---
+
 ## ⚠️ Problemas encontrados e as lições
 
 | # | Problema | Causa | Solução |
@@ -251,6 +284,8 @@ projeção: as respostas dos comandos são lidas na hora, porque esconder bugs a
 | 9 | O E2E testava outra configuração | Helmet e `ValidationPipe` montados à mão, sem CORS nem conversão implícita | `configureApp()` compartilhado com o `main.ts` |
 | 10 | Testes que **nunca rodavam** | `app.controller.spec.ts`, `app.e2e-spec.ts` e `jest-e2e.json` fora do `testMatch` | Removidos: teste morto dá falsa sensação de cobertura |
 | 11 | `import()` dinâmico funcionou no Jest e quebrou no `tsc` | Com `module: nodenext`, `import()` exige extensão `.js` | `require` tipado com `typeof import(...)` |
+| 12 | **(13.3)** O teste do lock travou por 60 s | `$queryRaw` com `SELECT pg_advisory_xact_lock(...)`: a função devolve `void`, que o Prisma não desserializa; a promessa que liberaria o teste nunca resolveu | `$executeRaw` para comandos sem resultado |
+| 13 | **(13.3)** O teste das duas réplicas falhou na mutação antes de mostrar as duplicatas | A primeira asserção (houve disputa pelo lock) já falha sem lock | Rodar a mutação também sem essa asserção, para ver o efeito real (400 envios) |
 
 ### As lições que ficam
 
@@ -267,10 +302,13 @@ projeção: as respostas dos comandos são lidas na hora, porque esconder bugs a
 | Momento | Unitários | Integração | E2E |
 |---|---:|---:|---:|
 | Primeira versão deste módulo | 13 | 8 | 12 + 1 `todo` |
-| **Hoje** | **166** | **27** | **38** |
+| Antes do Módulo 13 | 166 | 27 | 38 |
+| **Hoje** | **194** | **40** | **39** |
+
+Mais **2 testes de streaming** (Kafka real), em ~7 s com as imagens em cache.
 
 A suíte completa (`npm test`, em sequência) leva cerca de 3 minutos numa máquina de desenvolvimento com 8 GB
-reservados ao Docker. No CI, as três suítes rodam em VMs separadas e em paralelo.
+reservados ao Docker. No CI, as quatro suítes rodam em VMs separadas e em paralelo.
 
 ---
 
@@ -285,7 +323,7 @@ reservados ao Docker. No CI, as três suítes rodam em VMs separadas e em parale
 
 ## ✅ Checklist
 
-- [x] Pirâmide completa, com 3 *projects* no Jest
+- [x] Pirâmide completa, com 4 *projects* no Jest (incluindo streaming com Kafka real)
 - [x] Agregado testado sem mocks
 - [x] Testes de ordem e de ausência de efeito colateral
 - [x] Integração com PostgreSQL real: concorrência, atomicidade, idempotência
@@ -293,7 +331,8 @@ reservados ao Docker. No CI, as três suítes rodam em VMs separadas e em parale
 - [x] Consistência eventual com `eventually()`
 - [x] Helpers de teste sem setup duplicado
 - [x] Suítes pesadas estáveis em máquina modesta (`--runInBand`, timeout correto)
-- [ ] Cobertura no PR, testes de contrato e de mutação
+- [x] Mutação manual nos testes críticos da outbox e do relay
+- [ ] Cobertura no PR, testes de contrato e mutation testing automatizado (Stryker)
 
 ---
 

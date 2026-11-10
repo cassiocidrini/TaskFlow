@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.2 de 13.8** (Transactional Outbox). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **13.3 de 13.8** (relay da outbox para o Kafka). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`docker-compose.yml`](../../docker-compose.yml) (serviços `kafka` e `kafka-init`, profile
@@ -10,7 +10,8 @@
 > [`event-store.service.ts`](../../src/events/event-store.service.ts) (`appendMany` com outbox) ·
 > [`outbox.ts`](../../src/events/outbox.ts) ·
 > [`task.integration-events.ts`](../../src/modules/tasks/events/task.integration-events.ts) (o contrato público) ·
-> tabela `outbox` em [`schema.prisma`](../../prisma/schema.prisma)
+> tabela `outbox` em [`schema.prisma`](../../prisma/schema.prisma) ·
+> relay em [`src/relay.ts`](../../src/relay.ts) e [`src/outbox-relay/`](../../src/outbox-relay/outbox-relay.service.ts)
 
 ---
 
@@ -34,7 +35,7 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 |---|---|:-:|
 | **13.1** | Broker Kafka 4 (KRaft) no compose, tópico `taskflow.task-events.v1`, smoke test do cliente | ✅ |
 | **13.2** | **Transactional Outbox**: o evento de integração gravado na **mesma transação** do Event Store | ✅ |
-| 13.3 | **Relay**: processo *worker* que publica o outbox no Kafka (produtor idempotente, chave = `aggregateId`) | 🔜 |
+| **13.3** | **Relay**: processo *worker* que publica a outbox no Kafka (produtor idempotente, chave = `aggregateId`) | ✅ |
 | 13.4 | Consumer group `notifications` com **idempotência** (`processed_events` na mesma transação do efeito) | 🔜 |
 | 13.5 | **Retry com backoff** e **dead-letter topic** | 🔜 |
 | 13.6 | Consumer group `reports` (projeção `project_stats`), **replay** e painel de **lag** | 🔜 |
@@ -43,34 +44,35 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 13.2)
+## 🏗️ Arquitetura (estado atual: 13.3)
 
 ```mermaid
 flowchart LR
-    subgraph host["Host (sua máquina)"]
-        SMOKE["npm run kafka:smoke<br/>(scripts/kafka/smoke.ts)"]
-        API["TaskFlow API"]
+    subgraph api["Processo da API (npm run dev)"]
+        API["TaskFlow API<br/>:3000 · métricas :9464"]
     end
-    subgraph pg["PostgreSQL — UMA transação"]
+    subgraph pg["PostgreSQL"]
         EV[("events<br/>(fonte da verdade)")]
-        OB[("outbox<br/>published_at NULL")]
+        OB[("outbox<br/>published_at")]
     end
-    API -->|"appendMany"| EV
+    subgraph relay["Processo do relay (npm run relay:dev) — 1 ou mais réplicas"]
+        R["OutboxRelay<br/>métricas :9465"]
+    end
+    API -->|"appendMany: UMA transação"| EV
     API -->|"mesmo COMMIT"| OB
-    OB -.->|"relay (13.3)<br/>ainda não existe"| K
+    R -->|"advisory lock + SELECT pendentes<br/>+ UPDATE published_at"| OB
+    R -->|"produtor idempotente<br/>chave = taskId"| T1
     subgraph docker["docker compose --profile streaming"]
         K["kafka :9092 / :29092<br/>broker + controller (KRaft)"]
-        INIT["kafka-init<br/>(roda uma vez e sai)"]
+        T1[("taskflow.task-events.v1<br/>3 partições · 7 dias")]
     end
-    SMOKE -->|"localhost:9092<br/>(listener EXTERNAL)"| K
-    INIT -->|"kafka:29092<br/>(listener INTERNAL)"| K
-    INIT -.->|"cria"| T1[("taskflow.task-events.v1<br/>3 partições · 7 dias")]
-    INIT -.->|"cria"| T2[("taskflow.smoke<br/>1 partição · 1 hora")]
+    K --- T1
+    T1 -.->|"consumer groups<br/>(13.4 em diante)"| C["notifications · reports"]
 ```
 
-Hoje a API já grava, a cada comando, o evento de integração na outbox. Ninguém lê essa tabela ainda: o relay que
-publica no Kafka é a etapa 13.3. Ao fim do módulo: `API → (mesma transação) events + outbox → relay → Kafka →
-consumer groups`.
+A API **não fala com o Kafka**: grava o evento e a mensagem na mesma transação e responde. O relay, um processo
+separado, leva a outbox até o tópico. Com o Kafka fora do ar, a API continua respondendo normalmente e as mensagens
+esperam na outbox (demonstrado em "Resultados"). Os consumer groups entram a partir da etapa 13.4.
 
 ---
 
@@ -222,6 +224,92 @@ ordem da outbox por chave, sem lock extra.
 | **Transação distribuída (XA/2PC)** | Postgres e Kafka na mesma transação | O Kafka não participa de XA; e 2PC acopla a disponibilidade dos dois sistemas |
 | **Listen/Notify** | `NOTIFY` no commit acorda o relay | Otimização de latência do polling, não substituto: notificação se perde com o relay fora do ar. Pode entrar junto do polling |
 
+### O relay: um processo separado, um lote por vez (13.3)
+
+**Por que um processo separado, e não um `setInterval` dentro da API.** Cada réplica da API seria também um relay;
+ele escalaria com o tráfego HTTP (que não tem relação com o volume de eventos) e um lote travado no Kafka disputaria
+o event loop com as requisições. Separado, ele escala, cai e é implantado sozinho: mesma imagem, outro comando
+(`node dist/relay`), com `NestFactory.createApplicationContext` (Nest sem servidor HTTP: injeção de dependência,
+config, logs e ciclo de vida).
+
+**Menor privilégio.** O relay tem schema de ambiente **próprio**
+([`relay-env.schema.ts`](../../src/config/relay-env.schema.ts)): não recebe `JWT_SECRET` nem as variáveis HTTP. Se o
+worker vazar o ambiente, não vaza o segredo que assina tokens.
+
+**A rodada**, numa transação só ([`outbox.store.ts`](../../src/outbox-relay/outbox.store.ts)):
+
+```sql
+BEGIN;
+SELECT pg_try_advisory_xact_lock(hashtext('taskflow.outbox-relay'));  -- false? COMMIT e dorme
+SELECT * FROM outbox WHERE published_at IS NULL ORDER BY id LIMIT 100;
+-- producer.sendBatch(lote) → espera o ack de TODAS as mensagens (acks=all)
+UPDATE outbox SET published_at = now() WHERE id IN (...);
+COMMIT;
+```
+
+Lote cheio: roda de novo na hora (há fila). Lote incompleto ou vazio: espera `OUTBOX_POLL_INTERVAL_MS` (500 ms).
+
+**Por que um lote por vez, e não réplicas em paralelo com `FOR UPDATE SKIP LOCKED`.** O `SKIP LOCKED` é o jeito
+clássico de paralelizar uma fila no Postgres, mas **quebra a ordem por tarefa**. A réplica A pega um lote com a v1
+de uma tarefa, a B pega o lote seguinte com a v2, e se a B publicar primeiro, a v2 chega antes da v1. Com o advisory
+lock, as réplicas **revezam**: cada lote só é lido depois do COMMIT do anterior. Prova: o teste de integração com duas
+réplicas sobre 200 mensagens passa (cada uma publicou parte, nenhuma duplicata, ordem por tarefa intacta); trocando o
+lock por `SELECT true`, as mesmas 200 mensagens viram **400 envios**.
+
+Consequência que precisa ser dita numa entrevista: **mais réplicas dão disponibilidade, não vazão.** Se uma cair
+(até com `kill -9`), a outra pega o lock na rodada seguinte, sem eleição de líder. Para ganhar vazão mantendo ordem
+por chave, o caminho seria particionar a outbox (um lock por faixa de `hash(message_key)`, como as partições do
+próprio Kafka), complexidade que este volume não justifica.
+
+**Por que `pg_try_advisory_xact_lock` (de transação) e não `pg_advisory_lock` (de sessão).** O lock de sessão
+pertence a **uma conexão**, e o pool do Prisma entrega uma conexão qualquer a cada query: o lock e o unlock cairiam
+em conexões diferentes (lock preso, ou solto por engano). O de transação vive dentro da `$transaction` interativa
+(uma conexão só) e o Postgres o solta sozinho no COMMIT/ROLLBACK, inclusive se o processo morrer no meio.
+
+O custo: a transação fica aberta durante o envio ao Kafka. Por isso o produtor tem `message.timeout.ms` de 10 s (o
+padrão da librdkafka é **5 minutos**) e a transação, 20 s: uma falha do Kafka chega como erro de envio registrável,
+e não como transação abortada.
+
+**At-least-once, onde a duplicata nasce.**
+
+| Falha | O que acontece | Quem resolve |
+|---|---|---|
+| Rede oscila e a librdkafka reenvia uma mensagem | O broker descarta a cópia | **Produtor idempotente** (`acks=all` + número de sequência por partição); a ordem também se mantém |
+| O relay cai **depois** do ack e **antes** do COMMIT | O lote volta a ficar pendente e sai de novo, com o **mesmo** `event-id` (provado no teste de streaming) | **Consumer**, deduplicando por `eventId` (13.4). O produtor idempotente não cobre: o processo novo é outro produtor |
+| O envio falha (Kafka fora, timeout) | `attempts + 1` e `last_error` gravados (COMMIT, não rollback); nada marcado | O próprio relay, com backoff |
+
+**Ordem acima de vazão (*head-of-line blocking*, consciente).** Se o lote falha, ele volta **inteiro**, e nada depois
+dele sai antes. Pular a mensagem problemática publicaria a v2 de uma tarefa antes da v1. O custo: uma mensagem com
+erro **permanente** (por exemplo, maior que o `message.max.bytes` do broker) trava a fila. Isso não passa em silêncio:
+`outbox_oldest_pending_age_seconds` sobe sem parar e a linha mostra `attempts` e `last_error`. O tratamento (mover a
+mensagem para uma DLQ do relay) é decisão da etapa 13.5.
+
+**Backoff exponencial:** 500 ms, 1 s, 2 s… até 30 s, zerado no primeiro sucesso. Sem isso, um Kafka caindo seria
+martelado a cada 500 ms.
+
+### Polling, CDC ou LISTEN/NOTIFY para o relay
+
+| Opção | Latência | Custo | Decisão |
+|---|---|---|---|
+| **Polling** (implementado) | Até `OUTBOX_POLL_INTERVAL_MS` (500 ms) com a fila vazia; zero com fila (lote cheio roda de novo) | Uma transação curta a cada 500 ms, coberta pelo índice parcial | ✅ Simples, robusto, sem componente novo |
+| **LISTEN/NOTIFY** | Milissegundos | Notificação se perde com o relay fora do ar: só serve **junto** do polling | Otimização possível, não substituto |
+| **CDC (Debezium)** | Milissegundos, sem polling | Kafka Connect + Debezium para operar, slot de replicação para vigiar | O padrão em escala; a tabela `outbox` continua a mesma (CDC troca só o relay) |
+
+### O que observar no relay
+
+| Sinal | Onde | Leitura |
+|---|---|---|
+| `outbox_oldest_pending_age_seconds` | Prometheus (job `taskflow-relay`) | **O** alerta do relay: há quanto tempo o evento mais antigo espera. Pega relay parado, Kafka fora e mensagem travada. Consultado **no banco** a cada coleta: se o loop travar, o número continua verdadeiro (cresce), em vez de congelar |
+| `outbox_pending_messages` | Prometheus | Tamanho da fila |
+| `outbox_relay_published_total` / `outbox_relay_failures_total` | Prometheus | Vazão e falhas |
+| `up{job="taskflow-relay"}` | Prometheus | Relay sem processo nenhum não exporta métrica: este é o sinal |
+| Span `publish taskflow.task-events.v1` | Jaeger (serviço `taskflow-relay`) | Um span `PRODUCER` por lote, com `messaging.batch.message_count` |
+| `attempts`, `last_error` | Tabela `outbox` | Diagnóstico da linha que não sai |
+
+Regras de alerta sugeridas (o provisionamento de alertas é limitação do Módulo 01):
+`outbox_oldest_pending_age_seconds > 60` por 2 min, `up{job="taskflow-relay"} == 0` por 1 min e
+`increase(outbox_relay_failures_total[5m]) > 0`. O painel no Grafana entra junto com o de lag dos consumers (13.6).
+
 ---
 
 ## 📋 Como reproduzir
@@ -363,6 +451,64 @@ do evento que a originou. Os dois pontos que gravam eventos de tarefa ligam o ma
 `EventSourcedTaskRepository` (ciclo de vida) e o `CreateTaskHandler` (criação, que grava sem passar pelo
 repositório; ver problema 6).
 
+### 7. O relay (13.3)
+
+```bash
+npm run streaming:up        # Kafka + tópicos
+npm run dev                 # a API, em outro terminal
+npm run relay:dev           # o relay (ts-node), em outro terminal; build: npm run build && npm run start:relay
+```
+
+Crie, mova e conclua uma tarefa pela API e leia o tópico:
+
+```bash
+docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic taskflow.task-events.v1 --from-beginning \
+  --property print.key=true --property print.headers=true --property print.partition=true
+```
+
+```text
+Partition:1  event-id:6365feb4-…,event-type:TaskCreated,content-type:application/json,correlation-id:demo-13-2        0ade7afd-…  {"data":{"title":"Conciliar pagamentos",…
+Partition:1  event-id:1fdd728a-…,event-type:TaskStatusChanged,content-type:application/json,correlation-id:e94c2eb4-…  0ade7afd-…  {"data":{"to":"IN_PROGRESS","from":"PENDING"},…
+Partition:1  event-id:24dd5249-…,event-type:TaskCompleted,content-type:application/json,correlation-id:fef54fb5-…      0ade7afd-…  {"data":{"completedAt":"2026-11-10T10:42:47.567Z"},…
+```
+
+Os três eventos da tarefa na **mesma partição**, em ordem. A mensagem no Kafka:
+
+| Parte | Valor | Por quê |
+|---|---|---|
+| `key` | `message_key` da outbox (o `taskId`) | Mesma chave → mesma partição → ordem |
+| `value` | O JSON do evento de integração (13.2) | O contrato público |
+| Header `event-id` | O `eventId` | Deduplicação no consumer sem fazer parse do corpo |
+| Header `event-type` | `TaskCreated`, … | Filtrar/rotear sem fazer parse |
+| Header `correlation-id` | Do envelope, quando existe | Ligar o log do consumer à requisição de origem |
+| Header `content-type` | `application/json` | Formato do corpo explícito (evolução para Avro/Protobuf) |
+
+O relay é **genérico**: lê `topic` e `message_key` da linha e não conhece Task.
+
+**Configuração** ([`relay-env.schema.ts`](../../src/config/relay-env.schema.ts), todas com padrão):
+
+| Variável | Padrão | Para quê |
+|---|---|---|
+| `KAFKA_BROKERS` | `localhost:9092` | Do host; de um container seria `kafka:29092` |
+| `OUTBOX_POLL_INTERVAL_MS` | 500 | Espera com a outbox vazia (latência × consultas) |
+| `OUTBOX_BATCH_SIZE` | 100 | Linhas por lote |
+| `OUTBOX_RETENTION_HOURS` | 72 | Quanto uma linha publicada fica antes da limpeza (a cada 10 min, em blocos de 1.000) |
+| `RELAY_METRICS_PORT` | 9465 | `/metrics` do relay; uma 2ª réplica no mesmo host precisa de outra |
+
+**Experimentos que valem repetir** (resultados reais na seção "Resultados"):
+
+```bash
+# Kafka fora do ar com a API e o relay rodando: a API responde, a outbox acumula, o relay faz backoff
+npm run streaming:down      # crie tarefas; veja attempts/last_error na outbox e curl localhost:9465/metrics
+npm run streaming:up        # o relay se recupera sozinho e publica em ordem
+
+# Duas réplicas: revezam o lock; derrube uma com kill -9 e a outra continua
+RELAY_METRICS_PORT=9466 npm run relay:dev
+
+# Graceful shutdown: Ctrl+C (SIGTERM) termina o lote em andamento e desconecta o produtor
+```
+
 ---
 
 ## ⚠️ Problemas encontrados e soluções
@@ -378,6 +524,13 @@ repositório; ver problema 6).
 | 7 | **(13.2)** Índice parcial não existe no schema do Prisma por padrão | Criado só no SQL da migração, o `migrate dev` o veria como *drift* e geraria um `DROP INDEX` na migração seguinte | Preview feature `partialIndexes` do Prisma 7 e `@@index(..., where: raw("published_at IS NULL"))`. Conferido: um `migrate dev --create-only` depois da migração gera uma migração **vazia** (sem drift) |
 | 8 | **(13.2)** Na outbox, as chaves do JSON aparecem em outra ordem (`data` primeiro) | O JSONB guarda o objeto normalizado, sem a ordem de inserção das chaves | Nenhuma: JSON não tem ordem de campos, e o consumer não pode depender dela. Fica como regra do contrato |
 | 9 | **(13.2)** `events.created_at` e o `occurredAt` publicado divergiriam por milissegundos | O `created_at` vinha do `DEFAULT now()` do banco, e o evento de integração usaria o relógio da aplicação | Um instante só (`recordedAt`), gerado no `appendMany` e gravado explicitamente nos dois. Coberto por teste de integração |
+| 10 | **(13.3)** Meu desenho dizia que réplicas extras do relay ficariam "em standby" | Com o lock de **transação**, a exclusão vale **por rodada**, não por liderança: as réplicas revezam o lock a cada ciclo. Apareceu ao subir a 2ª réplica, que também se declarou "ativa" | Semântica corrigida no código e no texto (`busy` em vez de `standby`; log de lock ocupado em debug, senão alternaria a cada 500 ms). A garantia de ordem não muda: cada lote só é lido depois do COMMIT do anterior. Medido: 10 mensagens publicadas por cada réplica |
+| 11 | **(13.3)** Com o Kafka fora, o envio ficaria pendurado até 5 min, com a transação e o lock abertos | O `message.timeout.ms` padrão da librdkafka é 300 000 ms | `message.timeout.ms = 10 s` no produtor e transação de 20 s. Medido: cada tentativa falha em ~10 s com `Local: Message timed out` |
+| 12 | **(13.3)** Avisos da librdkafka saíam como objeto multilinha no console, no meio dos logs JSON | O logger padrão do cliente faz `console.warn({ ... })` | Adapter (`toKafkaLogger`) que manda os logs do cliente pelo Logger do Nest: uma linha JSON com os campos em `kafka` |
+| 13 | **(13.3)** O relay ocioso gerava ~7 mil traces por hora no Jaeger | Cada query do polling virava um trace raiz | `requireParentSpan: true` na instrumentação do `pg` (problema 20 do [Módulo 01](01-observabilidade.md)) |
+| 14 | **(13.3)** A 2ª réplica no mesmo host subiu sem métricas, sem erro nenhum | Porta 9465 ocupada; o exporter não avisa | `RELAY_METRICS_PORT` (problema 21 do Módulo 01) |
+| 15 | **(13.3)** O `KafkaContainer` do Testcontainers não sobe a imagem `apache/kafka` | O módulo só conhece as imagens da Confluent | `GenericContainer` com porta do host escolhida antes e anunciada pelo broker ([Módulo 07](07-testes.md)) |
+| 16 | **(13.3)** Idade da fila e corte da limpeza poderiam sair deslocados pelo fuso | As colunas são `TIMESTAMP` sem fuso (UTC, gravado pelo Prisma); o `now()` é convertido pelo `TimeZone` da sessão | Contas no SQL com `now() AT TIME ZONE 'UTC'`, cobertas por teste de integração |
 
 ---
 
@@ -404,6 +557,20 @@ repositório; ver problema 6).
 | Demo pela API (criar → iniciar → concluir → concluir de novo) | 3 linhas, chave = `taskId`, `aggregateVersion` 1, 2, 3; o 2º concluir (409) não gerou linha |
 | Consulta do relay (`WHERE published_at IS NULL ORDER BY id`) | Usa o `outbox_pending_idx` |
 
+**13.3 — relay** (máquina local, processos em `node dist/relay`)
+
+| Experimento | Resultado |
+|---|---|
+| Relay subindo com 3 linhas pendentes da demo da 13.2 | Publicadas e marcadas em ~230 ms; as 3 na partição 1, offsets 0, 1, 2 |
+| **Kafka fora do ar** + tarefa criada e concluída pela API | API respondeu **200** normalmente; relay falhou a cada ~10 s (`Local: Message timed out`) com backoff 500 ms → 1 s → 2 s → 4 s; outbox com `attempts = 4`; `outbox_oldest_pending_age_seconds` = 47 s |
+| Kafka de volta (`streaming:up`) | Relay recuperou ~3 s depois de o broker subir ("Publicação restabelecida após 4 falha(s)"); as 2 mensagens saíram em ordem; total no tópico = linhas na outbox (sem duplicata) |
+| **Duas réplicas** + 20 tarefas | Revezaram o lock: 10 mensagens publicadas por cada uma |
+| `kill -9` na réplica A + 10 tarefas | A réplica B publicou todas (10 → 20). **35 linhas na outbox, 35 mensagens no tópico** |
+| **SIGTERM** na réplica B durante uma rajada de 15 criações | Saiu em **53 ms**: "Relay parado (nenhum lote em andamento)" → "Produtor Kafka desconectado" → OpenTelemetry. As 11 linhas que ficaram pendentes saíram quando um relay voltou: **50 linhas, 50 mensagens** |
+| Mutação: lock trocado por `SELECT true` | 200 eventos viraram **400 envios** (teste de integração "duas réplicas") |
+| Testes novos | 19 unitários (loop, backoff, falha, busy, shutdown, headers, schema do ambiente), 6 de integração (lock, duas réplicas, falha, limpeza, métrica da fila), 2 de streaming (ponta a ponta com Kafka real; at-least-once com o mesmo `event-id`) |
+| Suítes | 194 unitários · 40 integração · 39 E2E · 2 streaming (~7 s) |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -414,13 +581,27 @@ repositório; ver problema 6).
 | SQS/SNS provisionados no Terraform e sem uso | Inalterado | O papel do SQS (fila de trabalho) entra na etapa 13.7 |
 | Nenhum registro do que deveria sair do serviço | **(13.2)** Tabela `outbox` gravada na mesma transação dos eventos, com o contrato público `taskflow.task-events.v1` | Sem dual-write: o que for publicado será exatamente o que foi gravado |
 | Payload do Event Store como único formato de evento | **(13.2)** Evento de domínio (interno) × evento de integração (público), com mapeamento explícito | O agregado pode evoluir sem quebrar consumers |
+| Outbox gravada e ninguém publicando | **(13.3)** Relay em processo separado, um lote por vez (advisory lock de transação), produtor idempotente, backoff, limpeza e métricas próprias | Os eventos chegam ao Kafka em ordem por tarefa, sem acoplar a API à disponibilidade do broker |
+| Um processo de telemetria (`tracing.ts` fixo) | **(13.3)** `startTelemetry` por processo; relay como `taskflow-relay` na porta 9465 | Dois processos observáveis separadamente ([Módulo 01](01-observabilidade.md)) |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
-- **A API ainda não publica nada no Kafka.** A outbox é gravada (13.2), mas ninguém a lê: as linhas acumulam com
-  `published_at NULL` até o relay da etapa 13.3. A limpeza das linhas já publicadas também entra na 13.3.
+- **Ninguém consome o tópico ainda.** Os eventos chegam ao Kafka (13.3); os consumer groups com deduplicação são a
+  etapa 13.4.
+- **Uma mensagem com erro permanente trava a fila** (*head-of-line blocking*, escolha consciente pela ordem). Ela fica
+  visível na métrica de idade e no `last_error`; o desvio para uma DLQ é decisão da 13.5.
+- **Vazão de um lote por vez.** Réplicas dão disponibilidade, não vazão. Particionar a outbox por faixa de chave seria
+  o passo para escalar mantendo a ordem.
+- **Transação aberta durante o envio** (até 10 s com o Kafka fora). Aceitável com um lote por vez e timeout curto;
+  com muitas réplicas, cada uma seguraria uma conexão do pool esperando o lock só por instantes (`try`, não espera).
+- **Trace interrompido:** o span `publish` não é filho do `POST` que gravou o evento. O `correlationId` atravessa (header);
+  o `traceparent`, não, porque exigiria guardar o contexto do trace na outbox. Avaliado na 13.4, quando houver consumer.
+- **Sem health check do worker:** o relay não tem HTTP. Num orquestrador, o sinal seria o `up` da métrica ou um probe
+  de exec; entra junto com a decisão sobre Kubernetes.
+- **Limpeza sem índice em `published_at`:** o DELETE varre as linhas publicadas (no máximo 72 h de eventos). Com
+  volume alto, um índice ou particionamento da tabela por data.
 - **As projeções internas continuam no `EventBus` em memória**, depois do commit. Se o processo cair entre o commit e
   a projeção, o read model fica desatualizado (o dual-write do [Módulo 05](05-event-sourcing-cqrs.md)). A outbox
   resolve o caminho do **Kafka**, não esse. O caminho natural seria a projeção consumir do tópico, como os consumer
@@ -449,7 +630,8 @@ repositório; ver problema 6).
 - [x] Smoke test do cliente (admin, producer idempotente, consumer group)
 - [x] Transactional Outbox na mesma transação do Event Store (13.2)
 - [x] Evento de integração separado do evento de domínio, com contrato versionado (13.2)
-- [ ] Relay para o Kafka (13.3)
+- [x] Relay em processo separado, com ordem por tarefa, failover e graceful shutdown (13.3)
+- [x] Métricas e traces do relay; suíte de streaming com Kafka real no CI (13.3)
 - [ ] Consumer idempotente (13.4)
 - [ ] Retry e dead-letter topic (13.5)
 - [ ] Replay e painel de lag (13.6)

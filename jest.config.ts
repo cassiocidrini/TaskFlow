@@ -34,6 +34,14 @@ const config: Config = {
     },
     {
       ...baseConfig,
+      displayName: 'streaming',
+      // Kafka + Postgres reais (Módulo 13). Suíte separada: sobe um broker (~10 s, ~400 MB) que as outras não usam
+      testMatch: ['<rootDir>/test/streaming/**/*.streaming-spec.ts'],
+      setupFiles: ['<rootDir>/test/setup.ts'],
+      setupFilesAfterEnv: ['<rootDir>/test/setup-slow-suites.ts'],
+    },
+    {
+      ...baseConfig,
       displayName: 'e2e',
       testMatch: ['<rootDir>/test/e2e/**/*.e2e-spec.ts'],
       setupFiles: ['<rootDir>/test/setup.ts'],

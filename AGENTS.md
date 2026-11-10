@@ -31,6 +31,7 @@ npm run dev                             # infra:up + start:dev → http://localh
 npm run infra:down                      # derruba os containers (infra:up:obs inclui Prometheus + Grafana)
 npm run aws:up                          # LocalStack + Terraform (aws:down · aws:recreate · aws:resources)
 npm run streaming:up                    # Kafka (profile streaming) + tópicos (streaming:down · streaming:topics · kafka:smoke)
+npm run relay:dev                       # relay da outbox → Kafka (processo separado; build: npm run start:relay)
 
 # Qualidade — rodar SEMPRE antes de commitar
 npx tsc --noEmit && npm run lint && npm run test:unit
@@ -38,7 +39,8 @@ npx tsc --noEmit && npm run lint && npm run test:unit
 # Testes com Docker (Testcontainers)
 npm run test:integration                # ~1 min
 npm run test:e2e                        # ~1,5 min
-npm test                                # as 3 suítes em sequência
+npm run test:streaming                  # Kafka + Postgres reais (outbox → relay → tópico)
+npm test                                # unit, integration e e2e em sequência
 
 # Banco
 npx prisma migrate dev --create-only --name <nome>   # gera o SQL SEM aplicar → REVISE → npx prisma migrate dev
@@ -84,7 +86,10 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `common/correlation/` | `X-Correlation-Id` (1º middleware) + `AsyncLocalStorage` | Ler o id com `currentCorrelationId()`, nunca de parâmetro ou header |
 | `common/telemetry/route-telemetry.guard.ts` | Preenche `http.route` (span e métrica); **1º `APP_GUARD`** | Não é controle de acesso (sempre `true`); grava o padrão da rota, nunca a URL |
 | `health/` | `/health/live`, `/health/ready`, `ShutdownState` (drenagem) | Liveness **nunca** consulta dependências; readiness não expõe detalhe de infraestrutura |
-| `common/lifecycle/` | Encerramento do OTel pelo ciclo de vida do Nest | `telemetry-registry.ts` não pode ter imports (é carregado pelo `tracing.ts`, antes de tudo) |
+| `common/lifecycle/` | Encerramento do OTel pelo ciclo de vida do Nest; `armShutdownWatchdog` (API e relay) | `telemetry-registry.ts` não pode ter imports (é carregado pelo `tracing.ts`, antes de tudo) |
+| `common/telemetry/start-telemetry.ts` | `startTelemetry({ serviceName, metricsPort })` | Chamado por um arquivo de bootstrap por processo (`tracing.ts` = API/9464, `relay-tracing.ts` = relay/9465); só importa OTel, zod e arquivos sem dependências |
+| `relay.ts` + `outbox-relay/` | Processo do relay (`createApplicationContext`): `OutboxRelay` (loop), `OutboxStore` (advisory lock de transação), porta `MessagePublisher` → `KafkaMessagePublisher` | Um lote por vez (lock); nunca `SKIP LOCKED` (quebra a ordem por tarefa); falha = lote inteiro volta; relay genérico, não conhece Task |
+| `config/relay-env.schema.ts` | Ambiente do relay (sem `JWT_SECRET`) | Campo comum aos dois processos reaproveita `envSchema.shape.X` |
 | `common/logging/logger.options.ts` | Opções do `nestjs-pino` (JSON, serializers, nível por status) | Serializers são **allowlist**: não adicione headers ao log |
 
 **Fora de `src/`** (não entram no build nem na imagem de produção; o lint cobre todos):
@@ -93,25 +98,26 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 |---|---|---|
 | Kafka no `docker-compose.yml` (`kafka`, `kafka-init`) | Broker KRaft no profile `streaming` + contrato dos tópicos | Tópico novo = `kafka-init` (autocriação desligada); nome `<sistema>.<assunto>.v<N>` só com `.` e `-`; mensagem de teste nunca no tópico de eventos |
 | `grafana/` | Datasources e dashboard **provisionados** (montados no compose) | Mudança de dashboard = editar o JSON + PR; métrica nova no painel entra em `KNOWN_METRICS` de `test/unit/grafana-dashboard.spec.ts`; nunca agrupar por label de alta cardinalidade |
+| `prometheus.yml` | Jobs `taskflow` (9464) e `taskflow-relay` (9465) | Processo novo com métricas = job novo com porta própria |
 | `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4), `kafka/smoke.ts` (Módulo 13) | Script novo de dev entra aqui, **nunca** em `src/` |
 | `load/k6/`, `load/autocannon/` | Testes de carga da API (Módulo 10) | Medem a API rodando; não são testes do Jest |
 | `labs/node-internals/` | Experimentos do runtime (Módulo 11) | Arquivos gerados (`*.txt`, ~100 MB) são ignorados pelo Git |
 
 ### Padrões aplicados (e onde)
 
-CQRS (`commands/` × `queries/`) · Event Sourcing (`TaskAggregate` + Event Store) · **Repository** (`TaskRepository` → `EventSourcedTaskRepository`) · Template Method funcional (`TaskCommandRunner`) · Strategy (`task-priority.strategy.ts`) · Observer (`EventBus` → projeções) · **Transactional Outbox** (`appendMany` + tabela `outbox`, Módulo 13.2).
+CQRS (`commands/` × `queries/`) · Event Sourcing (`TaskAggregate` + Event Store) · **Repository** (`TaskRepository` → `EventSourcedTaskRepository`) · Template Method funcional (`TaskCommandRunner`) · Strategy (`task-priority.strategy.ts`) · Observer (`EventBus` → projeções) · **Transactional Outbox** (`appendMany` + tabela `outbox`, Módulo 13.2) + **relay** com advisory lock (Módulo 13.3) · **Ports & Adapters** (`MessagePublisher` → `KafkaMessagePublisher`).
 **Não existe** Factory no código — não referencie nem gere uma sem pedido explícito.
 
-### Ordem crítica no `main.ts`
+### Ordem crítica no `main.ts` (e no `relay.ts`)
 
 ```typescript
 import './env';      // 1º: carrega .env
-import './tracing';  // 2º: OpenTelemetry ANTES de http/express/pg serem carregados
+import './tracing';  // 2º: OpenTelemetry ANTES de http/express/pg serem carregados (no relay: './relay-tracing')
 ```
 
-O `tracing.ts` também só pode importar arquivos sem dependências de biblioteca (hoje: `config/env.schema.ts`,
-`common/lifecycle/telemetry-registry.ts` e `health/health-paths.ts`). Importar algo que puxe o `@nestjs/common` faria o Nest carregar antes do
-`sdk.start()`.
+O `tracing.ts`/`relay-tracing.ts` e o `start-telemetry.ts` só podem importar arquivos sem dependências de biblioteca
+(hoje: `config/env.schema.ts`, `config/relay-env.schema.ts`, `common/lifecycle/telemetry-registry.ts` e
+`health/health-paths.ts`). Importar algo que puxe o `@nestjs/common` faria o Nest carregar antes do `sdk.start()`.
 
 ---
 
@@ -150,7 +156,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Ler `userId`/`ownerId` do body — sempre do JWT (`@CurrentUser()`).
 - ❌ Rota de tarefa/projeto sem `JwtAuthGuard` (vai na **classe** do controller) ou sem `assertOwner`.
 - ❌ Responder `403` para recurso de outro usuário — use `404` (anti-enumeration).
-- ❌ Ler `process.env` fora de `env.schema.ts`/`tracing.ts`; usar `!` para silenciar variável ausente.
+- ❌ Ler `process.env` fora dos schemas de ambiente e dos arquivos de bootstrap da telemetria; usar `!` para silenciar variável ausente.
 - ❌ Concatenar entrada do usuário em SQL; `origin: '*'` no CORS; logar senhas/tokens; expor `password`.
 - ❌ Mensagens diferentes para "usuário não existe" e "senha errada".
 
@@ -160,6 +166,8 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ `append` sem o `expectedVersion` lido do agregado.
 - ❌ `actorId` vindo de outro lugar que não o `userId` do JWT do comando; preencher `actorId` de evento legado (`metadata = {}`) por inferência.
 - ❌ Editar ou apagar linhas da tabela `events` (append-only; corrigir = novo evento).
+- ❌ Publicar no Kafka a partir da API (dual-write): evento de integração vai para a `outbox`, na transação do `appendMany`; quem publica é o relay.
+- ❌ Paralelizar o relay com `FOR UPDATE SKIP LOCKED` ou pular a linha que falha: quebra a ordem por tarefa.
 - ❌ Projeção não idempotente (usar `createMany({ skipDuplicates })` / `updateMany`).
 - ❌ Construtor de evento/command com vários parâmetros posicionais do mesmo tipo (já corrompeu o histórico uma vez: o banco de dev tem uma tarefa com título `"HIGH"`, prioridade passada na posição do título).
 
@@ -175,7 +183,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ `testTimeout` dentro de `projects` no `jest.config.ts` (é ignorado) — ver `test/setup-slow-suites.ts`.
 
 **Processo**
-- ❌ Push direto na `main` ou merge com CI vermelho (3 jobs obrigatórios).
+- ❌ Push direto na `main` ou merge com CI vermelho (4 jobs obrigatórios: quality, integration, e2e, streaming).
 
 ---
 
@@ -186,6 +194,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 | Unitários | `test/unit/` | Mocks; agregado testado **sem** mocks; timeout 5 s (lento = bug) |
 | Integração | `test/integration/` | `startTestDatabase()` → Postgres real; contratos com o banco (constraints, `ON CONFLICT`) |
 | E2E | `test/e2e/` | `startE2EApp()`, `registerAndLogin()`, `resetDatabase()`, `eventually()` |
+| Streaming | `test/streaming/` | `startTestKafka()` (imagem `apache/kafka` do compose, porta anunciada = mapeada) + `startTestDatabase()`; consumer real lendo o tópico |
 
 - Suítes com Testcontainers rodam em fila (`--runInBand`): paralelismo esgota a RAM da máquina de dev.
 - Teste novo de banco/consistência eventual: rode **3 vezes** antes de confiar.
@@ -195,7 +204,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · API publicando no Kafka (broker, tópicos e outbox existem; relay e consumers ainda não: as linhas da `outbox` ficam com `published_at NULL`) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · consumers do Kafka (o relay publica em `taskflow.task-events.v1`; nenhum consumer group ainda) · DLQ do relay para mensagem com erro permanente · propagação do `traceparent` pela outbox · painel/alertas do relay e de lag · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · alertas (Grafana/Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

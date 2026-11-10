@@ -5,3 +5,9 @@ scrape_configs:
   - job_name: 'taskflow'
     static_configs:
       - targets: ['host.docker.internal:9464']
+
+  # Relay da outbox (Módulo 13.3): processo separado, com a própria porta de métricas. Fora do ar quando o relay
+  # não está rodando — `up{job="taskflow-relay"} == 0` é, ele mesmo, o primeiro sinal de alerta do relay.
+  - job_name: 'taskflow-relay'
+    static_configs:
+      - targets: ['host.docker.internal:9465']
