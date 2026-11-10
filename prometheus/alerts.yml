@@ -1,0 +1,117 @@
+# Regras de alerta do TaskFlow (Módulo 13.6d). Alertas como código: revisados em PR e testados no CI com
+# `promtool test rules` (prometheus/alerts.test.yml, rodado por test/integration/alert-rules.spec.ts).
+#
+# Sem Alertmanager, por decisão: os alertas aparecem em http://localhost:9090/alerts e no Grafana. Rotear (Slack,
+# PagerDuty, plantão) é decisão de quem opera e fica como próximo passo.
+#
+# Convenções: `severity` = critical (acordar alguém) ou warning (olhar no horário); `summary` curto; `runbook` aponta a
+# seção do módulo que explica o sinal e o que fazer.
+
+groups:
+  - name: taskflow-api
+    rules:
+      # Taxa de erro 5xx acima de 1%, com tráfego de verdade (≥ 0,1 req/s): sem o piso, 1 erro em 3 requisições de
+      # madrugada viraria alerta
+      - alert: ApiHighErrorRate
+        expr: |
+          (
+            sum(rate(http_server_request_duration_count{http_response_status_code=~"5.."}[5m]))
+            / sum(rate(http_server_request_duration_count[5m]))
+          ) > 0.01
+          and sum(rate(http_server_request_duration_count[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'API com {{ $value | humanizePercentage }} de respostas 5xx'
+          runbook: docs/modules/01-observabilidade.md
+
+      # p95 acima de 500 ms: a mesma expressão do painel "Latência" do dashboard da API
+      - alert: ApiHighLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_bucket[5m]))) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'p95 da API em {{ $value | humanizeDuration }}'
+          runbook: docs/modules/01-observabilidade.md
+
+  - name: taskflow-messaging
+    rules:
+      # O alerta do relay: pega relay parado, Kafka fora e mensagem travada. Lido do banco a cada coleta, então
+      # continua crescendo mesmo com o loop do relay travado
+      - alert: OutboxStalled
+        expr: max(outbox_oldest_pending_age_seconds) > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Evento mais antigo da outbox esperando há {{ $value | humanizeDuration }}'
+          runbook: docs/modules/13-mensageria-kafka.md#o-que-observar-no-relay
+
+      # Processo sem coleta não exporta métrica nenhuma: o `up` é o sinal
+      - alert: RelayDown
+        expr: up{job="taskflow-relay"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Relay da outbox sem coleta de métricas'
+          runbook: docs/modules/13-mensageria-kafka.md#o-que-observar-no-relay
+
+      - alert: ConsumerDown
+        expr: up{job=~"taskflow-(notifications|reports)"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Consumer {{ $labels.job }} sem coleta de métricas'
+          runbook: docs/modules/13-mensageria-kafka.md#lag-painel-e-alertas-136d
+
+      # Broker fora (ou o exporter): a coleta do job `kafka` falha, e o lag e os DLTs ficam SEM DADOS, o que deixa o
+      # ConsumerLagHigh cego. Achado na demo: com o Kafka parado, o único sinal era o OutboxStalled, 3,5 min depois
+      - alert: KafkaUnreachable
+        expr: up{job="kafka"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Kafka (ou o kafka-exporter) sem coleta: lag e DLTs sem dados'
+          runbook: docs/modules/13-mensageria-kafka.md#lag-painel-e-alertas-136d
+
+      # Lag visto pelo BROKER (kafka-exporter): continua subindo com o consumer parado. Só os grupos do sistema:
+      # grupos temporários (redrive, smoke) não entram
+      - alert: ConsumerLagHigh
+        expr: |
+          sum by (consumergroup) (
+            kafka_consumergroup_lag{topic="taskflow.task-events.v1", consumergroup=~"notifications|reports"}
+          ) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Grupo {{ $labels.consumergroup }} com {{ $value }} mensagens de atraso'
+          runbook: docs/modules/13-mensageria-kafka.md#lag-painel-e-alertas-136d
+
+      # Cada mensagem no DLT é um efeito que não aconteceu. Sem `for`: uma já basta. Depende de a série nascer em 0
+      # (o runner a inicializa): uma série que aparece valendo 1 não dispara `increase()`
+      - alert: MessageDeadLettered
+        expr: sum by (consumer_group) (increase(kafka_consumer_messages_total{result="dead_lettered"}[5m])) > 0
+        labels:
+          severity: warning
+        annotations:
+          # `increase()` extrapola a janela e devolve número quebrado (visto na demo: "1.0029… mensagens"): arredondado
+          summary: '{{ $value | printf "%.0f" }} mensagem(ns) do grupo {{ $labels.consumer_group }} desviada(s) para o DLT'
+          runbook: docs/modules/13-mensageria-kafka.md#redrive-do-dlt-136c
+
+      # Banco fora não manda nada ao DLT (decisão da 13.5): a partição fica tentando. Este é o alerta dessa situação.
+      # Janela de 2m, e não 1m: no Prometheus 3 a janela é aberta à esquerda, e com coleta de 1 min um `[1m]` tem UMA
+      # amostra, e `rate()` precisa de duas: o alerta morreria calado (achado pelo teste; regra: janela ≥ 4× a coleta)
+      - alert: ConsumerDatabaseUnavailable
+        expr: sum by (consumer_group) (rate(kafka_consumer_retries_total{error_class="infrastructure"}[2m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Grupo {{ $labels.consumer_group }} tentando de novo por banco indisponível'
+          runbook: docs/modules/13-mensageria-kafka.md#retry-e-dead-letter-topic-135

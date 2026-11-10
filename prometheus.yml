@@ -1,5 +1,11 @@
 global:
   scrape_interval: 5s
+  # Regras avaliadas no mesmo ritmo da coleta: um alerta reage em segundos, não no padrão de 1 min
+  evaluation_interval: 5s
+
+# Alertas como código (Módulo 13.6d). Testados com `promtool test rules` (test/integration/alert-rules.spec.ts)
+rule_files:
+  - /etc/prometheus/alerts.yml
 
 scrape_configs:
   - job_name: 'taskflow'
@@ -21,3 +27,9 @@ scrape_configs:
   - job_name: 'taskflow-reports'
     static_configs:
       - targets: ['host.docker.internal:9468']
+
+  # Lag dos consumer groups e tamanho dos DLTs, vistos pelo broker (Módulo 13.6d). Pela rede do compose, e não pelo
+  # host: o exporter roda em container (profile `streaming`). Sem o Kafka de pé, este alvo fica `down`
+  - job_name: 'kafka'
+    static_configs:
+      - targets: ['kafka-exporter:9308']

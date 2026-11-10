@@ -6,8 +6,9 @@
  * provisionado; nenhum agrupamento usa label de alta cardinalidade (URL, usuário, correlação); e o dashboard é
  * somente leitura na UI, com `uid` fixo (mudança = PR).
  *
- * `KNOWN_METRICS` é a lista conferida no `/metrics` da API (porta 9464). Se uma atualização do OpenTelemetry
- * renomear uma métrica, este teste falha antes do dashboard ficar vazio em produção.
+ * `KNOWN_METRICS` é a lista conferida no `/metrics` de cada fonte: a API (9464), o relay (9465), os consumers
+ * (9467/9468) e o `kafka-exporter` (9308, Módulo 13.6d), mais o `up` que o próprio Prometheus gera. Se uma atualização
+ * do OpenTelemetry (ou do exporter) renomear uma métrica, este teste falha antes do painel ficar vazio.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -24,10 +25,36 @@ const KNOWN_METRICS = new Set([
   'nodejs_eventloop_utilization',
   'v8js_memory_heap_used',
   'v8js_gc_duration',
+  // Relay da outbox (13.3)
+  'outbox_oldest_pending_age_seconds',
+  'outbox_pending_messages',
+  'outbox_relay_published_total',
+  'outbox_relay_failures_total',
+  // Consumers (13.4–13.6), via KafkaConsumerRunner
+  'kafka_consumer_messages_total',
+  'kafka_consumer_retries_total',
+  'kafka_consumer_processing_duration',
+  // kafka-exporter (13.6d): o que o BROKER sabe
+  'kafka_consumergroup_lag',
+  'kafka_topic_partition_current_offset',
+  'kafka_topic_partition_oldest_offset',
+  // Gerada pelo Prometheus para todo alvo coletado
+  'up',
 ]);
 
 /** Labels que explodiriam a cardinalidade se virassem dimensão de agrupamento. */
-const HIGH_CARDINALITY_LABELS = ['url', 'url_full', 'http_target', 'user_id', 'userId', 'actor_id', 'correlation_id'];
+const HIGH_CARDINALITY_LABELS = [
+  'url',
+  'url_full',
+  'http_target',
+  'user_id',
+  'userId',
+  'actor_id',
+  'correlation_id',
+  // Mensageria: uma série por evento ou por offset
+  'event_id',
+  'offset',
+];
 
 interface Target {
   expr: string;
@@ -56,7 +83,11 @@ function metricsIn(expr: string): string[] {
     .replace(/\{[^}]*\}/g, '')
     .replace(/\bby\s*\([^)]*\)/g, '')
     .replace(/"[^"]*"/g, '');
-  return withoutLabels.match(/\b(?:http|db|nodejs|v8js)_[a-z0-9_]+\b/g) ?? [];
+  return (
+    withoutLabels.match(
+      /\b(?:(?:http|db|nodejs|v8js|outbox|kafka)_[a-z0-9_]+|up)\b/g,
+    ) ?? []
+  );
 }
 
 /**

@@ -38,6 +38,8 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      # Regras de alerta como código (Módulo 13.6d), testadas com `promtool test rules` no CI
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
     # A API roda no host (npm run dev) e o prometheus.yml coleta de host.docker.internal:9464.
@@ -113,6 +115,21 @@ services:
   # O contrato do tópico fica versionado aqui: nome com .v1 (um v2 incompatível convive durante a migração),
   # 3 partições (unidade de paralelismo E de ordem) e retenção de 7 dias (o Kafka não é a fonte da verdade:
   # o Event Store é; reconstruir tudo = republicar da tabela events).
+  # Lag dos consumer groups visto pelo BROKER (Módulo 13.6d): offsets commitados de cada grupo × fim de cada
+  # partição. Um consumer parado não exporta métrica nenhuma; o exporter continua mostrando o lag dele crescendo.
+  # Também expõe o tamanho dos DLTs. Testado com o Kafka 4 antes de entrar (a 1.9.0 fala o protocolo novo).
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    container_name: taskflow-kafka-exporter
+    profiles: ["streaming"]
+    command: ["--kafka.server=kafka:29092"]
+    ports:
+      - "9308:9308"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
   kafka-init:
     image: apache/kafka:4.3.2
     container_name: taskflow-kafka-init

@@ -1,0 +1,194 @@
+# Testes das regras de alerta (Módulo 13.6d): `promtool test rules prometheus/alerts.test.yml`.
+# Rodado no CI por test/integration/alert-rules.spec.ts, num container com o MESMO Prometheus do compose.
+#
+# Cada caso: séries sintéticas (`input_series`, uma amostra por `interval`) e, em instantes escolhidos, os alertas que
+# devem estar DISPARANDO (lista vazia = nenhum). Protege a PromQL (erro de digitação não silencia o alerta), os
+# limiares, o `for` e os filtros de label.
+
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # Outbox: > 60 s a partir do minuto 2; com `for: 2m`, dispara no minuto 4
+  - interval: 1m
+    input_series:
+      - series: 'outbox_oldest_pending_age_seconds{job="taskflow-relay"}'
+        values: '0 30 90 150 210 270 330'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OutboxStalled
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: OutboxStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'Evento mais antigo da outbox esperando há 3m 30s'
+              runbook: docs/modules/13-mensageria-kafka.md#o-que-observar-no-relay
+
+  # Relay sem coleta desde o minuto 2: dispara no 3 (`for: 1m`)
+  - interval: 1m
+    input_series:
+      - series: 'up{job="taskflow-relay", instance="host.docker.internal:9465"}'
+        values: '1 1 0 0 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: RelayDown
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: RelayDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: taskflow-relay
+              instance: host.docker.internal:9465
+            exp_annotations:
+              summary: 'Relay da outbox sem coleta de métricas'
+              runbook: docs/modules/13-mensageria-kafka.md#o-que-observar-no-relay
+
+  # Broker fora: a coleta do exporter falha (up = 0, observado na demo com o Kafka parado)
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kafka", instance="kafka-exporter:9308"}'
+        values: '1 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: KafkaUnreachable
+        exp_alerts: []
+      - eval_time: 2m
+        alertname: KafkaUnreachable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: kafka
+              instance: kafka-exporter:9308
+            exp_annotations:
+              summary: 'Kafka (ou o kafka-exporter) sem coleta: lag e DLTs sem dados'
+              runbook: docs/modules/13-mensageria-kafka.md#lag-painel-e-alertas-136d
+
+  # Lag do reports somando as partições (> 100 a partir do minuto 2, `for: 5m` → dispara no 7). O grupo do smoke
+  # test, com lag maior, NÃO alerta: o filtro deixa só os grupos do sistema
+  - interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="reports", topic="taskflow.task-events.v1", partition="0"}'
+        values: '0 30 80 80 80 80 80 80 80'
+      - series: 'kafka_consumergroup_lag{consumergroup="reports", topic="taskflow.task-events.v1", partition="1"}'
+        values: '0 20 40 40 40 40 40 40 40'
+      - series: 'kafka_consumergroup_lag{consumergroup="taskflow.smoke", topic="taskflow.task-events.v1", partition="0"}'
+        values: '500 500 500 500 500 500 500 500 500'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ConsumerLagHigh
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: ConsumerLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumergroup: reports
+            exp_annotations:
+              summary: 'Grupo reports com 120 mensagens de atraso'
+              runbook: docs/modules/13-mensageria-kafka.md#lag-painel-e-alertas-136d
+
+  # DLT: a série nasce em 0 (o runner a inicializa) e uma mensagem chega no minuto 2: alerta na hora, sem `for`
+  - interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{consumer_group="notifications", result="dead_lettered"}'
+        values: '0 0 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: MessageDeadLettered
+        exp_alerts: []
+      - eval_time: 3m
+        alertname: MessageDeadLettered
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              consumer_group: notifications
+            exp_annotations:
+              summary: '1 mensagem(ns) do grupo notifications desviada(s) para o DLT'
+              runbook: docs/modules/13-mensageria-kafka.md#redrive-do-dlt-136c
+
+  # A ARMADILHA que a inicialização em 0 evita: a série que já NASCE valendo 1 não tem amostra anterior, e
+  # `increase()` devolve 0. Sem o `add(0)` no runner, o 1º desvio depois de o consumer subir passaria em silêncio
+  - interval: 1m
+    input_series:
+      - series: 'kafka_consumer_messages_total{consumer_group="reports", result="dead_lettered"}'
+        values: '_ _ 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: MessageDeadLettered
+        exp_alerts: []
+
+  # Banco fora: retries `infrastructure` subindo a partir do minuto 2, `for: 2m` → dispara no 4. Os `unknown` não
+  # entram neste alerta
+  - interval: 1m
+    input_series:
+      - series: 'kafka_consumer_retries_total{consumer_group="notifications", error_class="infrastructure"}'
+        values: '0 0 4 8 12 16 20'
+      - series: 'kafka_consumer_retries_total{consumer_group="reports", error_class="unknown"}'
+        values: '0 0 4 8 12 16 20'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: ConsumerDatabaseUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ConsumerDatabaseUnavailable
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              consumer_group: notifications
+            exp_annotations:
+              summary: 'Grupo notifications tentando de novo por banco indisponível'
+              runbook: docs/modules/13-mensageria-kafka.md#retry-e-dead-letter-topic-135
+
+  # API: 2% de 5xx com 100 req/min dispara depois de 5 min; 2 req/min com metade de erro NÃO (abaixo do piso)
+  - interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_count{http_response_status_code="200"}'
+        values: '0+98x15'
+      - series: 'http_server_request_duration_count{http_response_status_code="500"}'
+        values: '0+2x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ApiHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: 'API com 2% de respostas 5xx'
+              runbook: docs/modules/01-observabilidade.md
+  - interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_count{http_response_status_code="200"}'
+        values: '0+1x15'
+      - series: 'http_server_request_duration_count{http_response_status_code="500"}'
+        values: '0+1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ApiHighErrorRate
+        exp_alerts: []
+
+  # API: 90% das requisições entre 0,5 s e 1 s → p95 ≈ 0,97 s, acima de 500 ms
+  - interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_bucket{le="0.25"}'
+        values: '0+10x15'
+      - series: 'http_server_request_duration_bucket{le="0.5"}'
+        values: '0+10x15'
+      - series: 'http_server_request_duration_bucket{le="1"}'
+        values: '0+100x15'
+      - series: 'http_server_request_duration_bucket{le="+Inf"}'
+        values: '0+100x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ApiHighLatency
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'p95 da API em 972.2ms'
+              runbook: docs/modules/01-observabilidade.md

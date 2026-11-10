@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.6c de 13.8** (redrive do DLT e limpeza de `processed_events`). Cada etapa
+> **Status:** 🚧 em construção, etapa **13.6d de 13.8** (lag, painel de mensageria e alertas como código). Cada etapa
 > acrescenta a sua parte a
 > este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
@@ -23,7 +23,9 @@
 > replay em [`src/replay.ts`](../../src/replay.ts), [`src/replay/`](../../src/replay/task-event-replayer.ts) e
 > [`aggregate-lock.ts`](../../src/events/aggregate-lock.ts) · redrive em [`src/redrive.ts`](../../src/redrive.ts) e
 > [`src/redrive/`](../../src/redrive/dlt-redriver.ts) · limpeza em
-> [`processed-events.cleaner.ts`](../../src/common/messaging/processed-events.cleaner.ts)
+> [`processed-events.cleaner.ts`](../../src/common/messaging/processed-events.cleaner.ts) · alertas em
+> [`prometheus/alerts.yml`](../../prometheus/alerts.yml) · painel em
+> [`taskflow-messaging.json`](../../grafana/dashboards/taskflow-messaging.json)
 
 ---
 
@@ -54,7 +56,7 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | **13.6a** | Consumer group `reports` (projeção `project_stats`) com **idempotência pela versão** do agregado, e `GET /projects/:projectId/stats` | ✅ |
 | **13.6b** | **Replay** do Event Store pela outbox (lock por agregado, header `replay`) e runbook de reconstrução de projeção | ✅ |
 | **13.6c** | *Redrive* do DLT (com auditoria, só para o grupo que falhou) e limpeza de `processed_events` | ✅ |
-| 13.6d | `kafka-exporter`, painel de **lag** e regras de alerta | 🔜 |
+| **13.6d** | `kafka-exporter` (lag visto pelo broker), painel "TaskFlow Mensageria" e **9 alertas como código**, testados com `promtool` | ✅ |
 | 13.7 | *(opcional)* Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda | 🔜 |
 | 13.8 | ADRs e o diagrama final | 🔜 |
 
@@ -345,9 +347,8 @@ martelado a cada 500 ms.
 | Span `publish taskflow.task-events.v1` | Jaeger (serviço `taskflow-relay`, trace próprio) | Um span `PRODUCER` por lote, com `messaging.batch.message_count` e links para os `create` |
 | `attempts`, `last_error` | Tabela `outbox` | Diagnóstico da linha que não sai |
 
-Regras de alerta sugeridas (o provisionamento de alertas é limitação do Módulo 01):
-`outbox_oldest_pending_age_seconds > 60` por 2 min, `up{job="taskflow-relay"} == 0` por 1 min e
-`increase(outbox_relay_failures_total[5m]) > 0`. O painel no Grafana entra junto com o de lag dos consumers (13.6d).
+Esses sinais viraram o painel "TaskFlow Mensageria" e os alertas `OutboxStalled` e `RelayDown` na 13.6d (ver "Lag,
+painel e alertas").
 
 ### O consumer idempotente (13.4)
 
@@ -729,6 +730,64 @@ redrive não estendem essa janela: o `notifications` ignora replay, e um evento 
   lock longo), e só nas marcas do próprio grupo. Índice novo em `processed_at`: sem ele, cada lote varreria a tabela.
 - Falha na limpeza só é logada; nunca derruba o consumer. No shutdown, a rodada em andamento termina antes de o Prisma
   fechar.
+
+### Lag, painel e alertas (13.6d)
+
+**Lag visto pelo broker, e não pelo consumer.** O consumer só sabe o próprio lag enquanto está vivo; morto, que é
+quando o lag mais importa, não exporta nada. O `kafka-exporter` (`danielqsj/kafka-exporter:v1.9.0`, profile
+`streaming`) pergunta ao **broker** os offsets commitados de cada grupo e o fim de cada partição. Medido: com o `reports`
+parado e 150 tarefas criadas, o lag dele ficou em 150 no gráfico o tempo todo. A mesma lógica da
+`outbox_oldest_pending_age_seconds`, lida do banco e não do loop do relay. Antes de entrar, a versão foi testada contra
+o Kafka 4 (que removeu versões antigas do protocolo). O exporter também dá o tamanho dos DLTs
+(`current_offset - oldest_offset`).
+
+**Painel "TaskFlow Mensageria"** ([`taskflow-messaging.json`](../../grafana/dashboards/taskflow-messaging.json)), separado do
+da API porque responde outra pergunta ("os eventos estão fluindo?"):
+
+| Linha | Painéis |
+|---|---|
+| Agora | Idade da pendente mais antiga, lag por grupo, mensagens em cada DLT, processos no ar (valores atuais, com cor por limiar) |
+| Outbox e relay | Idade, pendentes, publicadas e falhas por segundo |
+| Consumers | Mensagens/s por grupo e resultado, tentativas por classe, p95 do processamento, lag por partição |
+| Dead-letter topics | Desviadas na última hora, retidas em cada DLT |
+
+Coberto pelo mesmo teste do dashboard da API (toda consulta usa uma métrica que algum processo expõe; lista conferida
+no `/metrics` de cada um). Todas as 14 consultas foram rodadas no Prometheus com o sistema no ar e devolvem dados.
+
+**9 alertas como código** ([`prometheus/alerts.yml`](../../prometheus/alerts.yml)):
+
+| Alerta | Condição | Severidade |
+|---|---|---|
+| `OutboxStalled` | Pendente mais antiga > 60 s por 2 min (relay vivo, fila parada: Kafka fora, mensagem travada) | critical |
+| `RelayDown` / `ConsumerDown` | `up == 0` por 1 min (com o relay morto, a idade da outbox nem existe: o `OutboxStalled` não cobre) | critical |
+| `KafkaUnreachable` | `up{job="kafka"} == 0` por 1 min: broker (ou exporter) fora, lag e DLTs sem dados | critical |
+| `ConsumerLagHigh` | Lag do grupo > 100 por 5 min, só `notifications` e `reports` (grupos temporários de redrive e smoke ficam de fora) | warning |
+| `MessageDeadLettered` | Qualquer desvio ao DLT em 5 min, sem `for`: cada um é um efeito que não aconteceu | warning |
+| `ConsumerDatabaseUnavailable` | Retries `infrastructure` por 2 min: o DLT não acusa banco fora (decisão da 13.5), este alerta sim | critical |
+| `ApiHighErrorRate` / `ApiHighLatency` | 5xx > 1% (com ≥ 0,1 req/s) / p95 > 500 ms, por 5 min | critical / warning |
+
+**Testados no CI com `promtool test rules`** ([`alerts.test.yml`](../../prometheus/alerts.test.yml), rodado por
+[`alert-rules.spec.ts`](../../test/integration/alert-rules.spec.ts) num container com a mesma versão do Prometheus do
+compose): séries sintéticas e, em cada instante, quais alertas disparam, com que labels e com **que texto**. Uma PromQL
+errada não dá erro em lugar nenhum, só deixa de disparar; aqui ela quebra o build, com a saída do `promtool` (qual
+alerta, esperado × obtido) na mensagem.
+
+**Três armadilhas que os testes e a demo pegaram:**
+1. **Contador que nasce em 1 não dispara `increase()`.** Sem amostra anterior, o aumento é 0: o primeiro desvio ao DLT
+   depois de o consumer subir passaria em silêncio. O runner agora publica as séries `dead_lettered` e as de retry com
+   **0** ao subir, e o `alerts.test.yml` tem um caso que documenta a armadilha. Provado ao vivo: com os consumers
+   recém-subidos, a 1ª *poison pill* disparou o `MessageDeadLettered` dos dois grupos.
+2. **Janela de `rate()` curta demais.** No Prometheus 3 a janela é aberta à esquerda: com coleta de 1 min, `[1m]` tem
+   UMA amostra, e `rate()` precisa de duas. O `ConsumerDatabaseUnavailable` foi escrito com `[1m]` e **não disparava**
+   no teste. Funcionaria hoje (coleta de 5 s), mas morreria calado com uma coleta de 30 s ou 60 s, comum em produção.
+   Virou `[2m]` (regra prática: janela ≥ 4× o intervalo de coleta).
+3. **O p95 do processamento era inventado.** O histograma `kafka_consumer_processing_duration` (13.4) medido em
+   segundos usava os buckets padrão do OTel, pensados para milissegundos (0, 5, 10, 25…): 0,6 ms caía em "até 5 s", e
+   o p95 do painel sairia ~4,75 s. Buckets em segundos (1 ms a 10 s) declarados no próprio histograma (`advice`).
+
+**Sem Alertmanager, por decisão.** Os alertas disparam em `http://localhost:9090/alerts`; rotear (plantão, canal,
+silêncio durante deploy) é decisão de quem opera, e fica como próximo passo. Em desenvolvimento, `RelayDown` e
+`ConsumerDown` disparam sempre que o processo não está rodando: é o comportamento certo, só barulhento num laptop.
 
 ### Um trace só através da outbox (`traceparent`)
 
@@ -1116,6 +1175,28 @@ docker exec taskflow-postgres psql -U <usuario-do-.env> -d taskflow_db \
   -c 'SELECT consumer_group, dlt_partition, dlt_offset, event_id, reason, requested_by, redriven_at FROM dlt_redrives'
 ```
 
+### 14. Lag, painel e alertas (13.6d)
+
+```bash
+npm run streaming:up        # sobe o Kafka, os tópicos e o kafka-exporter
+npm run infra:up:obs        # Prometheus (com as regras) e Grafana
+curl -s localhost:9308/metrics | grep kafka_consumergroup_lag      # lag pelo broker
+```
+
+- Grafana em `http://localhost:3001` → pasta TaskFlow → **TaskFlow Mensageria**.
+- Alertas em `http://localhost:9090/alerts` (todos `inactive` com o sistema saudável).
+- Provocar: pare o consumer `reports` e crie 150 tarefas (`ConsumerDown` em ~1,5 min, `ConsumerLagHigh` em ~5,5 min);
+  pare o Kafka com o relay rodando e crie uma tarefa (`OutboxStalled` em ~3,5 min, `KafkaUnreachable` em ~1,5 min).
+- Testar as regras sem subir nada além do Docker:
+
+```bash
+docker run --rm -v "$PWD/prometheus:/rules:ro" -w /rules --entrypoint promtool prom/prometheus:v3.15.0 \
+  test rules alerts.test.yml
+```
+
+O Prometheus não recarrega as regras sozinho (o endpoint `/-/reload` fica desligado: ele também permite desligar o
+servidor por HTTP). Depois de editar `alerts.yml`: `docker restart taskflow-prometheus`.
+
 ---
 
 ## ⚠️ Problemas encontrados e soluções
@@ -1152,6 +1233,12 @@ docker exec taskflow-postgres psql -U <usuario-do-.env> -d taskflow_db \
 | 28 | **(13.6b)** O replay não conseguiria republicar um evento ainda presente na outbox | `UNIQUE (event_id)`, criado para a API nunca gravar o mesmo evento duas vezes | Índice único **parcial** (`WHERE NOT replay`). O `migrate dev` parou pedindo confirmação interativa (recriar um índice único); a migração saiu do `prisma migrate diff`, e um diff seguinte vazio confirmou que não há drift |
 | 29 | **(13.6b)** O teste "o notifications ignora o replay" passava também com o `notifications` aceitando replay | As mensagens de replay tinham eventIds já processados: o `processed_events` as barrava, com ou sem o header | Uma tarefa gravada só no Event Store (anterior à outbox) entrou no teste; com a mutação, o `notifications` notifica a atribuição dela. Mesma lição do problema 22: o teste precisa exercitar o caso em que a proteção é a ÚNICA barreira |
 | 30 | **(13.6c)** No primeiro teste do redrive, a mensagem envenenada também saiu como `exhausted` | O "bug" simulado no handler derrubava TODO `TaskAssigned` antes da validação do contrato: a envenenada nem chegava a ser classificada como `permanent` | Bug restrito à tarefa do cenário. Lição de teste: a falha simulada não pode mascarar a classificação que o teste quer verificar |
+| 31 | **(13.6d)** O p95 do tempo de processamento dos consumers era inventado | O histograma, em segundos, usava os buckets padrão do OTel, pensados para ms: tudo caía em "até 5 s" (visto no `/metrics`: `le=5 → 1` para 0,6 ms) | Buckets em segundos declarados com `advice.explicitBucketBoundaries`. Vale para qualquer histograma customizado: conferir os `le` antes de confiar num percentil |
+| 32 | **(13.6d)** O 1º desvio ao DLT depois de o consumer subir não dispararia o alerta | Contador que nasce já valendo 1 não tem amostra anterior, e `increase()` devolve 0 | Séries de alerta publicadas com 0 na subida do runner; caso no `alerts.test.yml` documentando a armadilha; provado ao vivo |
+| 33 | **(13.6d)** `ConsumerDatabaseUnavailable` não disparava no teste | No Prometheus 3 a janela é aberta à esquerda: `rate(...[1m])` com uma amostra por minuto tem uma amostra só | `[2m]`; regra prática: janela ≥ 4× o intervalo de coleta. O teste pegou um alerta que, em produção com coleta de 60 s, morreria calado |
+| 34 | **(13.6d)** O primeiro teste das regras falhava em todos os alertas que disparavam | O `promtool` compara também as anotações, e o teste não as declarava | `exp_annotations` em cada caso: o texto que o plantão lê também é testado |
+| 35 | **(13.6d)** Com o Kafka fora, o lag sumia do painel e o `ConsumerLagHigh` ficava cego; o único sinal era o `OutboxStalled`, 3,5 min depois | A coleta do exporter falha com o broker parado (`up{job="kafka"} = 0`, observado), e sem dados nenhuma regra de lag avalia | Alerta `KafkaUnreachable` (`up{job="kafka"} == 0` por 1 min), com caso de teste |
+| 36 | **(13.6d)** O alerta do DLT dizia "1.0029457627118645 mensagem(ns)" | `increase()` extrapola a janela e devolve número quebrado | `printf "%.0f"` na anotação. Achado lendo o alerta ao vivo, não no teste (as séries sintéticas davam 1 exato) |
 
 ---
 
@@ -1280,6 +1367,21 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Testes novos | 6 unitários (decisão do redrive, política, retenção), 4 de integração (limpeza: corte, grupo, lotes, start/stop), 1 de streaming (o ciclo completo) |
 | Suítes | 267 unitários · 68 integração · 49 E2E · 13 streaming (~72 s, 3 execuções estáveis) |
 
+**13.6d — lag, painel e alertas** (processos em `node dist/...`, prazos reais dos alertas)
+
+| Experimento | Resultado |
+|---|---|
+| `kafka-exporter` 1.9.0 contra o Kafka 4.3.2 | Funciona: lag por grupo e partição, offsets dos DLTs, `kafka_brokers` |
+| Alvos e regras no Prometheus | 5 alvos `up` (API, relay, 2 consumers, `kafka`); 9 regras carregadas, todas `inactive` com o sistema saudável |
+| Consultas do painel no Prometheus | 14 de 14 com dados (o p95 é `NaN` sem tráfego na janela, como esperado) |
+| `reports` parado + 150 tarefas | Lag 150 o tempo todo (o broker vê o consumer morto); **`ConsumerDown` disparou aos ~92 s**, **`ConsumerLagHigh` aos ~333 s**; consumer de volta: os dois resolveram em < 10 s e as stats chegaram a 150 tarefas |
+| Kafka parado com o relay rodando + 1 tarefa | API respondeu 201; idade da outbox crescendo; **`OutboxStalled` pendente aos ~90 s e disparando aos ~211 s**; Kafka de volta: resolveu em < 20 s |
+| *Poison pill* com os consumers recém-subidos | `MessageDeadLettered` disparou para `notifications` e `reports` na 1ª mensagem (séries iniciadas em 0) |
+| **Mutação:** janela `[1m]` de volta | `promtool test rules` falha, com o alerta e o instante na mensagem |
+| **Mutação:** nome de métrica errado no painel | O teste do dashboard falha, com o nome |
+| Testes novos | 5 unitários (o dashboard novo no teste existente), 3 de integração (`check rules`, `test rules` com 10 casos, imagem igual à do compose) |
+| Suítes | 272 unitários · 71 integração · 49 E2E · 13 streaming (~75 s, 3 execuções estáveis) |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -1297,12 +1399,19 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Um consumer group no tópico | **(13.6a)** Dois grupos, `notifications` e `reports`, cada um com offset, processo, DLT e forma de idempotência próprios; `GET /projects/:projectId/stats` | O primeiro read model alimentado pelo tópico, reconstruível, com a idempotência pela versão do agregado |
 | Projeção reconstruível só a partir do que o tópico retém (7 dias) | **(13.6b)** `npm run replay` republica o Event Store pela outbox, com lock por agregado e header `replay`; runbook de reconstrução | O Event Store vira, na prática, a fonte de qualquer read model; o tópico é transporte |
 | Mensagem no DLT só inspecionável à mão; `processed_events` crescendo para sempre | **(13.6c)** `npm run redrive` com política por grupo, filtro por motivo, `--dry-run` e auditoria; limpeza por data com retenção validada contra a do tópico | O DLT vira parte de um ciclo de recuperação, e a tabela de idempotência tem tamanho limitado |
+| Sinais espalhados em `/metrics`, sem lag e sem alerta | **(13.6d)** Lag pelo broker (`kafka-exporter`), painel "TaskFlow Mensageria" e 9 alertas como código testados com `promtool` | Dá para saber se os eventos estão fluindo sem abrir cinco endpoints, e ser avisado quando não estão |
 | Um processo de telemetria (`tracing.ts` fixo) | **(13.3)** `startTelemetry` por processo; relay como `taskflow-relay` na porta 9465 | Dois processos observáveis separadamente ([Módulo 01](01-observabilidade.md)) |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
+- **Alertas sem roteamento:** sem Alertmanager, disparam em `/alerts` do Prometheus e ninguém é avisado. Próximo passo:
+  rotas por `severity` (critical → plantão, warning → canal) e silêncio durante deploy.
+- **Limiares escolhidos, não derivados de SLO:** 60 s de outbox, lag 100, p95 500 ms são pontos de partida razoáveis
+  para este volume. Em produção, viriam de um SLO ("99% dos eventos notificados em menos de 1 min") e de *burn rate*.
+- **O exporter não vê a velocidade do grupo:** lag 100 num grupo que processa 1.000/s é nada; num que processa 1/s são
+  minutos. Um alerta por **tempo** de atraso (lag ÷ taxa de consumo) seria mais fiel que por quantidade.
 - **Tarefas anteriores à outbox ficam fora dos relatórios até um replay**: o `TaskCreated` delas nunca foi publicado
   pela API. O runbook de reconstrução as inclui.
 - **Replay republica tudo:** não há "só o que falta" (ver "Por que não existe `--missing`"), e um histórico grande
@@ -1383,7 +1492,7 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - [x] Segundo consumer group no mesmo tópico, com idempotência pela versão do agregado e concorrência provada (13.6a)
 - [x] Replay do Event Store pela outbox, sem quebrar a ordem por tarefa nem disparar efeitos, e runbook de reconstrução (13.6b)
 - [x] *Redrive* do DLT com política por grupo e auditoria, e limpeza de `processed_events` com retenção validada (13.6c)
-- [ ] Painel de lag e alertas (13.6d)
+- [x] Lag pelo broker, painel de mensageria e alertas como código testados no CI (13.6d)
 - [ ] Kafka × SQS no mesmo sistema (13.7, opcional)
 - [ ] ADRs (13.8)
 

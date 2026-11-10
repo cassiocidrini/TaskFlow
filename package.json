@@ -31,7 +31,7 @@
     "infra:up": "docker compose up -d --wait postgres jaeger",
     "infra:up:obs": "docker compose up -d --wait postgres jaeger prometheus grafana",
     "infra:down": "docker compose down",
-    "streaming:up": "docker compose --profile streaming up -d --wait kafka && docker compose --profile streaming run --rm kafka-init",
+    "streaming:up": "docker compose --profile streaming up -d --wait kafka && docker compose --profile streaming run --rm kafka-init && docker compose --profile streaming up -d kafka-exporter",
     "streaming:down": "docker compose --profile streaming rm --stop --force kafka",
     "streaming:topics": "docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe",
     "aws:up": "node scripts/dev/localstack.mjs up",

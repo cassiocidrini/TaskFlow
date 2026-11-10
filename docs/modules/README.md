@@ -20,4 +20,4 @@ problemas reais encontrados (e como foram resolvidos) e onde o resultado vive no
 | 10 | [Performance e load testing (k6)](10-performance-load-testing.md) | ✅ revisado |
 | 11 | [Node.js internals](11-nodejs-internals.md) | ✅ revisado |
 | 12 | [Design patterns](12-design-patterns.md) | ✅ revisado |
-| 13 | [Mensageria e streaming de eventos com Kafka](13-mensageria-kafka.md) | 🚧 em construção (13.6c de 13.8) |
+| 13 | [Mensageria e streaming de eventos com Kafka](13-mensageria-kafka.md) | 🚧 em construção (13.6d de 13.8) |
