@@ -2,8 +2,8 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.6b de 13.8** (replay do Event Store pela outbox, e reconstrução de
-> projeção). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **13.6c de 13.8** (redrive do DLT e limpeza de `processed_events`). Cada etapa
+> acrescenta a sua parte a
 > este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`docker-compose.yml`](../../docker-compose.yml) (serviços `kafka` e `kafka-init`, profile
@@ -21,7 +21,9 @@
 > relatórios em [`src/reports-consumer.ts`](../../src/reports-consumer.ts) e
 > [`modules/reports/`](../../src/modules/reports/consumer/reports.handler.ts) ·
 > replay em [`src/replay.ts`](../../src/replay.ts), [`src/replay/`](../../src/replay/task-event-replayer.ts) e
-> [`aggregate-lock.ts`](../../src/events/aggregate-lock.ts)
+> [`aggregate-lock.ts`](../../src/events/aggregate-lock.ts) · redrive em [`src/redrive.ts`](../../src/redrive.ts) e
+> [`src/redrive/`](../../src/redrive/dlt-redriver.ts) · limpeza em
+> [`processed-events.cleaner.ts`](../../src/common/messaging/processed-events.cleaner.ts)
 
 ---
 
@@ -51,7 +53,7 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | **13.5** | **Retry classificado** (banco fora nunca vai ao DLT) e **dead-letter topic** por consumer group | ✅ |
 | **13.6a** | Consumer group `reports` (projeção `project_stats`) com **idempotência pela versão** do agregado, e `GET /projects/:projectId/stats` | ✅ |
 | **13.6b** | **Replay** do Event Store pela outbox (lock por agregado, header `replay`) e runbook de reconstrução de projeção | ✅ |
-| 13.6c | *Redrive* do DLT e limpeza de `processed_events` | 🔜 |
+| **13.6c** | *Redrive* do DLT (com auditoria, só para o grupo que falhou) e limpeza de `processed_events` | ✅ |
 | 13.6d | `kafka-exporter`, painel de **lag** e regras de alerta | 🔜 |
 | 13.7 | *(opcional)* Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda | 🔜 |
 | 13.8 | ADRs e o diagrama final | 🔜 |
@@ -563,7 +565,7 @@ COMMIT
 | | `notifications` (13.4) | `reports` (13.6a) |
 |---|---|---|
 | Idempotência | Tabela de marcas por `eventId` | Versão do agregado (monotônica) |
-| Custo | Uma linha por evento, para sempre (a limpeza é a 13.6c) | Uma linha por **tarefa**, que não cresce com os eventos |
+| Custo | Uma linha por evento, apagada depois da retenção (13.6c) | Uma linha por **tarefa**, que não cresce com os eventos |
 | Reconhece versão antiga chegando depois da nova | Não (o `eventId` é outro) | Sim |
 | Serve quando | O efeito não tem estado para comparar | Há estado por chave e ordem por chave |
 
@@ -680,6 +682,53 @@ Não depende mais da retenção do tópico. Executado no banco de desenvolviment
 projetos reais ficaram **idênticos**, 2 projetos com tarefas anteriores à outbox entraram pela primeira vez, e **72
 projetos fantasmas sumiram**: só existiam em eventos que os scripts das demos injetaram direto no tópico, sem passar
 pelo Event Store. É o "Event Store como fonte da verdade" acontecendo de fato.
+
+### Redrive do DLT (13.6c)
+
+O cenário: um bug no handler fez mensagens esgotarem as tentativas (`dlt-reason: exhausted`); o bug foi corrigido e
+implantado; agora elas precisam ser processadas.
+
+```bash
+npm run redrive -- --group notifications --dry-run              # o que seria reenviado, com o erro de cada uma
+npm run redrive -- --group notifications --by "ana (INC-123)"   # reenvia as exhausted
+npm run redrive -- --group notifications --include-permanent    # também as permanent
+```
+
+**O caminho.** O comando lê o DLT do grupo e republica cada mensagem no **tópico de origem** (`dlt-original-topic`),
+com chave, corpo e headers originais (inclusive `event-id`, que mantém a idempotência), sem os `dlt-*`, mais o header
+`redrive-group`. O consumer processa com o handler normal; se falhar de novo, volta ao DLT pelo caminho da 13.5.
+
+**Decisões:**
+- **Só o grupo que falhou processa.** O tópico de origem é lido por todos os grupos; o runner commita sem processar
+  uma mensagem com `redrive-group` de outro grupo (`ignored_redrive`), o mesmo mecanismo do `replay`. Mutação: sem o
+  filtro, o `reports` processa a mensagem do `notifications`.
+- **Por padrão, só `exhausted`.** Uma `permanent` (contrato violado) falharia igual e voltaria ao DLT; sai só com
+  `--include-permanent`, para quando o contrato do consumer mudou. O teste faz exatamente isso e a vê voltar ao DLT.
+- **O `reports` RECUSA redrive, de propósito.** A mensagem reenviada chega depois das versões mais novas da tarefa, e a
+  guarda de versão a descarta como duplicata: o redrive "funcionaria" sem efeito nenhum, o pior tipo de falha. Cada
+  grupo declara a sua política ([`redrive-policy.ts`](../../src/redrive/redrive-policy.ts)), e o comando sai com erro
+  apontando o runbook de reconstrução (13.6b). Grupo sem política também é recusado.
+- **Auditoria em tabela** (`dlt_redrives`: grupo, posição no DLT, `event_id`, motivo, `requested_by`, quando). Responde
+  "quem reenviou o quê, e quando", e **rodar de novo não reenvia** o que já foi. A linha é gravada **depois** do ack do
+  tópico de origem: um crash entre os dois reenvia de novo na próxima execução, o que a idempotência do consumer
+  absorve; o contrário poderia registrar como reenviada uma mensagem que nunca saiu. Mutação: sem a consulta, a PK da
+  tabela ainda faz o comando falhar, mas **depois** de republicar; a consulta é a proteção, a PK é a rede de segurança.
+- **Leitura do DLT por "foto":** os offsets finais do momento em que o comando começou; ele lê até ali e para. O
+  consumer é temporário e não commita: quem lembra o que já foi feito é a tabela, então uma `permanent` pulada hoje
+  pode sair amanhã com a flag.
+
+### Limpeza de `processed_events` (13.6c)
+
+A tabela de marcas do `notifications` cresce uma linha por evento. A marca só precisa durar enquanto **o mesmo evento
+pode chegar de novo**: a retenção do tópico (7 dias), dentro da qual um *rewind* de offset reentrega tudo. Replay e
+redrive não estendem essa janela: o `notifications` ignora replay, e um evento no DLT nunca foi marcado.
+
+- `PROCESSED_EVENTS_RETENTION_DAYS`, padrão **14** (o dobro, como margem). O schema **recusa ≤ 7**: um valor menor que
+  a retenção do tópico abriria uma janela para duplicar notificações, e essa regra fica no código, não só no doc.
+- Roda dentro do processo do consumer, na subida e a cada 10 minutos, em lotes de 5.000 (sem transação gigante nem
+  lock longo), e só nas marcas do próprio grupo. Índice novo em `processed_at`: sem ele, cada lote varreria a tabela.
+- Falha na limpeza só é logada; nunca derruba o consumer. No shutdown, a rodada em andamento termina antes de o Prisma
+  fechar.
 
 ### Um trace só através da outbox (`traceparent`)
 
@@ -1056,6 +1105,17 @@ curl -s localhost:9468/metrics | grep kafka_consumer_messages_total   # reports:
 curl -s localhost:9467/metrics | grep ignored_replay                  # notifications: leu e ignorou
 ```
 
+### 13. Redrive do DLT (13.6c)
+
+```bash
+npm run redrive -- --group notifications --dry-run     # pula a permanent da demo da 13.5
+npm run redrive -- --group reports                     # recusado: aponta o runbook de reconstrução
+
+# Auditoria do que já foi reenviado
+docker exec taskflow-postgres psql -U <usuario-do-.env> -d taskflow_db \
+  -c 'SELECT consumer_group, dlt_partition, dlt_offset, event_id, reason, requested_by, redriven_at FROM dlt_redrives'
+```
+
 ---
 
 ## ⚠️ Problemas encontrados e soluções
@@ -1091,6 +1151,7 @@ curl -s localhost:9467/metrics | grep ignored_replay                  # notifica
 | 27 | **(13.6b)** O primeiro desenho do replay quebraria a ordem por tarefa | A ordem da outbox se apoiava na concorrência otimista, que só serializa a API consigo mesma; o replay é um segundo escritor | Advisory lock de transação por agregado no `appendMany` e no replay. `SERIALIZABLE` foi descartado: o `BIGSERIAL` é atribuído no INSERT, não na ordem de commit |
 | 28 | **(13.6b)** O replay não conseguiria republicar um evento ainda presente na outbox | `UNIQUE (event_id)`, criado para a API nunca gravar o mesmo evento duas vezes | Índice único **parcial** (`WHERE NOT replay`). O `migrate dev` parou pedindo confirmação interativa (recriar um índice único); a migração saiu do `prisma migrate diff`, e um diff seguinte vazio confirmou que não há drift |
 | 29 | **(13.6b)** O teste "o notifications ignora o replay" passava também com o `notifications` aceitando replay | As mensagens de replay tinham eventIds já processados: o `processed_events` as barrava, com ou sem o header | Uma tarefa gravada só no Event Store (anterior à outbox) entrou no teste; com a mutação, o `notifications` notifica a atribuição dela. Mesma lição do problema 22: o teste precisa exercitar o caso em que a proteção é a ÚNICA barreira |
+| 30 | **(13.6c)** No primeiro teste do redrive, a mensagem envenenada também saiu como `exhausted` | O "bug" simulado no handler derrubava TODO `TaskAssigned` antes da validação do contrato: a envenenada nem chegava a ser classificada como `permanent` | Bug restrito à tarefa do cenário. Lição de teste: a falha simulada não pode mascarar a classificação que o teste quer verificar |
 
 ---
 
@@ -1204,6 +1265,21 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Testes novos | 6 unitários (tradução do histórico, header do relay), 7 de integração (ordem e eventIds, republicar de novo, UNIQUE parcial, lotes, evento legado, lock na API e no replay), 1 de streaming (reconstrução com uma tarefa anterior à outbox) |
 | Suítes | 261 unitários · 64 integração · 49 E2E · 12 streaming (~62 s, 3 execuções estáveis) |
 
+**13.6c — redrive e limpeza**
+
+| Experimento | Resultado |
+|---|---|
+| Ciclo completo no streaming (bug → DLT → correção → redrive) | Notificação criada depois do redrive, uma vez só; `reports` leu a mensagem reenviada (lag 0) e não a processou; 2ª execução: `0 reenviadas, 1 já reenviada`; a `permanent` com a flag voltou ao DLT |
+| `--dry-run` | Lista o que seria reenviado; nenhuma publicação, nenhuma linha em `dlt_redrives` |
+| DLT de desenvolvimento do `notifications` | 1 lida (a *poison pill* da 13.5), 0 reenviadas, 1 pulada (`permanent` sem a flag) |
+| `--group reports` | Recusado com a explicação e o runbook; código de saída 1 |
+| Limpeza com 12 mil marcas antigas | Apagadas em 3 lotes; as recentes e as de outro grupo ficaram |
+| Consumer de notificações com a limpeza ligada | Sobe e limpa na subida (nada a apagar: marcas de hoje), sem erro; encerra limpo |
+| **Mutação:** sem o filtro de `redrive-group` | O `reports` processa a mensagem reenviada ao `notifications` |
+| **Mutação:** sem a consulta a `dlt_redrives` | A 2ª execução republica de novo e só então falha na PK |
+| Testes novos | 6 unitários (decisão do redrive, política, retenção), 4 de integração (limpeza: corte, grupo, lotes, start/stop), 1 de streaming (o ciclo completo) |
+| Suítes | 267 unitários · 68 integração · 49 E2E · 13 streaming (~72 s, 3 execuções estáveis) |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -1220,6 +1296,7 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Mensagem envenenada travava a partição para sempre | **(13.5)** Falhas classificadas: contrato violado vai ao DLT na hora, banco fora tenta para sempre, o resto 5 vezes; DLT por grupo, com ack antes do commit | Uma *poison pill* não para mais 1/3 do sistema, e uma queda do banco não esvazia o tópico no DLT |
 | Um consumer group no tópico | **(13.6a)** Dois grupos, `notifications` e `reports`, cada um com offset, processo, DLT e forma de idempotência próprios; `GET /projects/:projectId/stats` | O primeiro read model alimentado pelo tópico, reconstruível, com a idempotência pela versão do agregado |
 | Projeção reconstruível só a partir do que o tópico retém (7 dias) | **(13.6b)** `npm run replay` republica o Event Store pela outbox, com lock por agregado e header `replay`; runbook de reconstrução | O Event Store vira, na prática, a fonte de qualquer read model; o tópico é transporte |
+| Mensagem no DLT só inspecionável à mão; `processed_events` crescendo para sempre | **(13.6c)** `npm run redrive` com política por grupo, filtro por motivo, `--dry-run` e auditoria; limpeza por data com retenção validada contra a do tópico | O DLT vira parte de um ciclo de recuperação, e a tabela de idempotência tem tamanho limitado |
 | Um processo de telemetria (`tracing.ts` fixo) | **(13.3)** `startTelemetry` por processo; relay como `taskflow-relay` na porta 9465 | Dois processos observáveis separadamente ([Módulo 01](01-observabilidade.md)) |
 
 ---
@@ -1236,8 +1313,10 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - **O lock por agregado custa uma instrução por gravação da API**, mesmo sem replay rodando.
 - **`project_stats` é uma linha quente por projeto:** em escala, um projeto muito ativo serializa os UPDATEs nela.
   O próximo passo seria contadores particionados (N linhas por projeto, somadas na leitura).
-- **DLT sem reprocessamento automático.** Hoje se inspeciona com o `kafka-console-consumer`; reenviar a mensagem
-  corrigida é o *redrive* (13.6c).
+- **Redrive é manual e por grupo inteiro:** sem filtro por tarefa ou período, e sem disparo automático depois de um
+  deploy. Pelo `--dry-run`, quem opera vê antes o que vai sair.
+- **A mensagem reenviada chega fora de ordem** (depois das mais novas da mesma tarefa). Para o `notifications` isso só
+  atrasa o aviso; para projeções com guarda de versão, o redrive é recusado e o caminho é a reconstrução.
 - **O DLT troca ordem por disponibilidade:** as mensagens seguintes da mesma tarefa passam sem a desviada (ver "O
   trade-off honesto"). Estacionar a chave fica registrado, não implementado.
 - **Banco fora para a partição inteira, por quanto tempo durar**, e a volta leva até 30 s (o teto do backoff). É a
@@ -1246,8 +1325,8 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
   assim travaria a partição em vez de ir ao DLT. Aceito: o erro aparece no log e no trace, e o caso é raro.
 - **Contagem de tentativas em memória:** um restart ou rebalance recomeça a contagem de uma falha `unknown`. Só atrasa
   o DLT; não perde nada.
-- **`processed_events` cresce para sempre.** A marca precisa durar pelo menos a retenção do tópico (7 dias) mais a
-  janela de um replay; a limpeza por data é a 13.6c.
+- **A retenção de `processed_events` está amarrada à do tópico por convenção:** o schema recusa ≤ 7 dias, mas se a
+  retenção do tópico mudar no `kafka-init`, o mínimo do schema precisa mudar junto.
 - **Fronteira entre contextos por convenção:** API e consumer usam o mesmo Postgres. Em microsserviços seriam bancos
   separados; aqui a regra (o consumer não lê as tabelas da API; a API só **lê** as notificações) está no AGENTS.md.
 - **Grupo novo lê o histórico retido:** a primeira subida de um consumer notifica eventos de até 7 dias atrás.
@@ -1303,7 +1382,7 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - [x] DLQ no relay avaliada e recusada, com runbook (13.5)
 - [x] Segundo consumer group no mesmo tópico, com idempotência pela versão do agregado e concorrência provada (13.6a)
 - [x] Replay do Event Store pela outbox, sem quebrar a ordem por tarefa nem disparar efeitos, e runbook de reconstrução (13.6b)
-- [ ] *Redrive* do DLT e limpeza de `processed_events` (13.6c)
+- [x] *Redrive* do DLT com política por grupo e auditoria, e limpeza de `processed_events` com retenção validada (13.6c)
 - [ ] Painel de lag e alertas (13.6d)
 - [ ] Kafka × SQS no mesmo sistema (13.7, opcional)
 - [ ] ADRs (13.8)

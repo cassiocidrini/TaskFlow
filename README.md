@@ -23,9 +23,9 @@ teste que a comprova; o que **não** está implementado aparece em [Limitações
 | **Autorização (OWASP A01)** | Toda rota de tarefa exige JWT e posse do projeto; recurso alheio responde `404` (anti-enumeration) e há proteção anti-IDOR em rotas aninhadas | [`tasks.e2e-spec.ts`](test/e2e/tasks.e2e-spec.ts) |
 | **Projeções idempotentes** | `INSERT … ON CONFLICT DO NOTHING` e `UPDATE … SET`: entrega duplicada, 5 entregas simultâneas e replay completo resultam no mesmo estado | [`projections.spec.ts`](test/integration/projections.spec.ts) |
 | **Health checks e graceful shutdown** | `/health/live` × `/health/ready`; no SIGTERM, readiness 503 e drenagem → HTTP fecha esperando as requisições → banco → telemetria. Sob carga: 0 requisições cortadas | [`health/`](src/health/health.controller.ts) |
-| **Mensageria confiável (Kafka)** | Transactional Outbox na mesma transação do Event Store + relay em processo separado (ordem por tarefa, failover entre réplicas, API de pé com o Kafka fora do ar) + consumer **idempotente** (marca e efeito na mesma transação): 300 eventos com `kill -9` no meio = 300 notificações, 0 duplicadas; dois consumer groups no mesmo tópico, com idempotência por tabela de marcas e pela versão do agregado (contador sem *lost update*: a mutação perdeu 17 de 20); replay do Event Store pela outbox (reconstrução do read model: 6 projetos idênticos, 72 fantasmas injetados no tópico eliminados); retry classificado + dead-letter topic (Postgres fora 45 s = **0** no DLT; sem a classificação, 6 de 40 eventos legítimos iriam para lá) | [Módulo 13](docs/modules/13-mensageria-kafka.md) · [`notifications.streaming-spec.ts`](test/streaming/notifications.streaming-spec.ts) |
+| **Mensageria confiável (Kafka)** | Transactional Outbox na mesma transação do Event Store + relay em processo separado (ordem por tarefa, failover entre réplicas, API de pé com o Kafka fora do ar) + consumer **idempotente** (marca e efeito na mesma transação): 300 eventos com `kill -9` no meio = 300 notificações, 0 duplicadas; dois consumer groups no mesmo tópico, com idempotência por tabela de marcas e pela versão do agregado (contador sem *lost update*: a mutação perdeu 17 de 20); replay do Event Store pela outbox (reconstrução do read model: 6 projetos idênticos, 72 fantasmas injetados no tópico eliminados); retry classificado + dead-letter topic com redrive auditado (só o grupo que falhou reprocessa) (Postgres fora 45 s = **0** no DLT; sem a classificação, 6 de 40 eventos legítimos iriam para lá) | [Módulo 13](docs/modules/13-mensageria-kafka.md) · [`notifications.streaming-spec.ts`](test/streaming/notifications.streaming-spec.ts) |
 | **Fail-fast de configuração** | Variáveis de ambiente validadas com `zod` no boot: configuração inválida impede a app de subir | [`env.schema.ts`](src/config/env.schema.ts) |
-| **Testes com infraestrutura real** | 261 unitários · 64 de integração, 49 E2E e 12 de streaming contra **PostgreSQL e Kafka reais** via Testcontainers | [Testes](#-testes) |
+| **Testes com infraestrutura real** | 267 unitários · 68 de integração, 49 E2E e 13 de streaming contra **PostgreSQL e Kafka reais** via Testcontainers | [Testes](#-testes) |
 | **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas com `http_route`, sem os probes); Grafana **provisionado** com dashboard RED + banco + event loop; logs JSON com `correlationId` e `trace_id`; **um trace só** do request ao consumer do Kafka (contexto W3C gravado na outbox) | [`tracing.ts`](src/tracing.ts) · [`grafana/`](grafana/dashboards/taskflow-api.json) |
 | **IaC** | Terraform (S3, SQS, SNS, IAM de menor privilégio) com backend remoto, sobre LocalStack | [`terraform/`](terraform/) |
 
@@ -209,10 +209,10 @@ de outro usuário** · `409` regra de negócio violada ou conflito de concorrên
 
 | Suíte | Qtd. | Infraestrutura | O que prova |
 |---|---:|---|---|
-| **Unitários** | 261 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish`, contrato de integração, loop e backoff do relay, spans `create`/`publish` do relay, regras de notificação e leitor tolerante, deltas dos relatórios |
-| **Integração** | 64 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade de `events` + `outbox`, envelope de metadados, idempotência das projeções e do consumer, ordem do graceful shutdown, lock do relay com duas réplicas, contexto de trace gravado na outbox, guarda de versão e contadores sem *lost update* nos relatórios |
+| **Unitários** | 267 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish`, contrato de integração, loop e backoff do relay, spans `create`/`publish` do relay, regras de notificação e leitor tolerante, deltas dos relatórios |
+| **Integração** | 68 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade de `events` + `outbox`, envelope de metadados, idempotência das projeções e do consumer, ordem do graceful shutdown, lock do relay com duas réplicas, contexto de trace gravado na outbox, guarda de versão e contadores sem *lost update* nos relatórios |
 | **E2E** | 49 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico com autor, paginação, consistência eventual, `X-Correlation-Id`, health checks, API → outbox, `/me/notifications` só do próprio usuário, stats do projeto só para o dono |
-| **Streaming** | 12 | Kafka + PostgreSQL reais | Outbox → relay → tópico → consumer: chave, partição, ordem, headers; republicação sem notificação extra; restart sem reprocessar; falha com backoff sem furar a ordem; **um trace só** do request ao consumer; poison pill no DLT sem parar a partição; banco fora sem nada no DLT; DLT fora sem perder a mensagem; dois consumer groups no mesmo tópico sem dobrar números na republicação |
+| **Streaming** | 13 | Kafka + PostgreSQL reais | Outbox → relay → tópico → consumer: chave, partição, ordem, headers; republicação sem notificação extra; restart sem reprocessar; falha com backoff sem furar a ordem; **um trace só** do request ao consumer; poison pill no DLT sem parar a partição; banco fora sem nada no DLT; DLT fora sem perder a mensagem; dois consumer groups no mesmo tópico sem dobrar números na republicação |
 
 ```bash
 npm run test:unit          # ~3 s — use o tempo todo
@@ -254,7 +254,7 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 - **Dual-write entre Event Store e EventBus (projeções internas):** se o processo cair entre gravar e publicar, a projeção não é atualizada. A *Transactional Outbox* já existe (Módulo 13.2), mas cobre o caminho do Kafka; as projeções continuam no `EventBus` em memória. O `reports` já é uma projeção alimentada pelo tópico e reconstruível por `npm run replay` (Módulo 13.6b); próximo passo: levar o `tasks_read` para o mesmo modelo.
 - **EventBus em memória:** entrega em ordem dentro de um processo. Os eventos já chegam ao Kafka pela outbox + relay (Módulo 13) e o consumer de notificações os lê, mas as **projeções internas** (`tasks_read`) continuam no `EventBus`. Com consumers externos, as projeções precisarão guardar a versão do agregado para descartar eventos fora de ordem.
 - **Relay da outbox:** um lote por vez (ordem acima de vazão); uma mensagem com erro permanente trava a fila. Sem DLQ no relay **por decisão** (as falhas possíveis ali são de infraestrutura e atingiriam todas as mensagens), com runbook para estacionar a linha à mão (Módulo 13.5).
-- **Consumer de notificações:** o DLT ainda não tem reprocessamento (*redrive*, 13.6c) e, ao desviar uma mensagem, as seguintes da mesma tarefa passam sem ela (ordem trocada por disponibilidade); `processed_events` ainda sem limpeza; API e consumer dividem o Postgres (fronteira por convenção); um crash (`kill -9`) pausa as partições por 30 s (session timeout).
+- **Consumer de notificações:** o redrive do DLT é manual e por grupo inteiro (`npm run redrive`, com `--dry-run` e auditoria) e, ao desviar uma mensagem, as seguintes da mesma tarefa passam sem ela (ordem trocada por disponibilidade); API e consumer dividem o Postgres (fronteira por convenção); um crash (`kill -9`) pausa as partições por 30 s (session timeout).
 - **Consumer de relatórios:** tarefas criadas antes da outbox só entram nos números com um replay; reconstruir a projeção exige parar o consumer até o lag zerar; `project_stats` é uma linha quente por projeto.
 - **Replay:** republica o histórico inteiro (sem filtro por período ou projeto), e o lock por agregado que garante a ordem custa uma instrução por gravação da API.
 - **Logs:** JSON no stdout com `correlationId` e `trace_id`, mas sem agregador local (Loki).
@@ -281,6 +281,7 @@ src/
 ├── events/                 # EventStoreService (append atômico, concorrência otimista, outbox na mesma transação)
 ├── outbox-relay/           # relay da outbox → Kafka (processo separado: relay.ts)
 ├── replay/                 # replay do Event Store pela outbox (comando: replay.ts)
+├── redrive/                # redrive do DLT com política por grupo e auditoria (comando: redrive.ts)
 ├── health/                 # /health/live, /health/ready, drenagem do graceful shutdown
 ├── modules/
 │   ├── auth/               # JWT + bcrypt, guards, @CurrentUser
@@ -299,6 +300,7 @@ src/
 ├── relay-tracing.ts        # OpenTelemetry do relay
 ├── relay.ts                # entrypoint do relay (Nest sem HTTP)
 ├── replay.ts               # comando npm run replay (republica o Event Store pela outbox)
+├── redrive.ts              # comando npm run redrive (DLT → tópico de origem, só para o grupo que falhou)
 ├── notifications-consumer.ts # entrypoint do consumer group notifications
 ├── reports-consumer.ts     # entrypoint do consumer group reports
 └── main.ts                 # entrypoint da API
@@ -337,7 +339,7 @@ reproduzir, **problemas reais encontrados** e onde o resultado vive no código. 
 | [10](docs/modules/10-performance-load-testing.md) | Performance e load testing (k6) | `load/` |
 | [11](docs/modules/11-nodejs-internals.md) | Node.js internals (event loop, thread pool, streams, leaks) | `labs/node-internals/` |
 | [12](docs/modules/12-design-patterns.md) | Design patterns | ver [Padrões de projeto aplicados](#padrões-de-projeto-aplicados) |
-| [13](docs/modules/13-mensageria-kafka.md) | Mensageria e streaming com Kafka (🚧 13.6b de 13.8) | `docker-compose.yml` (profile `streaming`), `events/`, `outbox-relay/`, `modules/notifications/consumer/`, `common/messaging/` |
+| [13](docs/modules/13-mensageria-kafka.md) | Mensageria e streaming com Kafka (🚧 13.6c de 13.8) | `docker-compose.yml` (profile `streaming`), `events/`, `outbox-relay/`, `modules/notifications/consumer/`, `common/messaging/` |
 
 ---
 

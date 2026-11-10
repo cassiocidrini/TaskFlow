@@ -32,6 +32,22 @@ export const consumerEnvSchema = z
       .max(65_535)
       .default(9467),
 
+    /**
+     * Por quantos dias a marca de "evento já processado" fica em `processed_events` (Módulo 13.6c). A marca precisa
+     * durar enquanto o MESMO evento pode chegar de novo: a retenção do tópico (7 dias, `kafka-init`), dentro da qual
+     * um rewind de offset reentrega tudo. Replay e redrive não estendem essa janela (o `notifications` ignora replay,
+     * e um evento no DLT nunca foi marcado). Abaixo de 8 dias o schema RECUSA: seria uma janela para duplicar efeitos.
+     */
+    PROCESSED_EVENTS_RETENTION_DAYS: z.coerce
+      .number()
+      .int()
+      .min(8, {
+        message:
+          'precisa ser maior que a retenção do tópico (7 dias): menos que isso, um rewind dentro da retenção duplicaria efeitos',
+      })
+      .max(365)
+      .default(14),
+
     /** Porta do `/metrics` do consumer de relatórios (Módulo 13.6a). */
     REPORTS_METRICS_PORT: z.coerce
       .number()

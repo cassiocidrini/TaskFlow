@@ -146,6 +146,8 @@ model ProcessedEvent {
   processedAt   DateTime @default(now()) @map("processed_at")
 
   @@id([consumerGroup, eventId])
+  // A limpeza por data (13.6c) apaga `WHERE processed_at < corte`: sem índice, cada rodada varreria a tabela inteira
+  @@index([processedAt], map: "processed_events_processed_at_idx")
   @@map("processed_events")
 }
 
@@ -233,4 +235,27 @@ enum ReportTaskStatus {
   PENDING
   IN_PROGRESS
   DONE
+}
+
+// ============================================================
+// Operação do Kafka (Módulo 13.6c)
+// ============================================================
+
+// Auditoria do redrive: cada mensagem do DLT reenviada ao tópico de origem. Responde "quem reenviou o quê, e quando"
+// e impede reenviar a mesma mensagem duas vezes (a PK é a posição dela no DLT). Gravada
+// DEPOIS do ack do tópico de origem: um crash entre os dois reenvia de novo, o que a idempotência dos consumers absorve.
+model DltRedrive {
+  consumerGroup String   @map("consumer_group")
+  dltTopic      String   @map("dlt_topic")
+  dltPartition  Int      @map("dlt_partition")
+  dltOffset     BigInt   @map("dlt_offset")
+  eventId       String?  @map("event_id")
+  // `permanent` ou `exhausted`, copiado do header `dlt-reason`
+  reason        String
+  // `--by` do comando, ou o usuário do sistema operacional que o rodou
+  requestedBy   String   @map("requested_by")
+  redrivenAt    DateTime @default(now()) @map("redriven_at")
+
+  @@id([dltTopic, dltPartition, dltOffset])
+  @@map("dlt_redrives")
 }

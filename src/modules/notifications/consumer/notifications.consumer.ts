@@ -6,7 +6,9 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { KafkaConsumerRunner } from '../../../common/messaging/kafka-consumer.runner';
+import { ProcessedEventsCleaner } from '../../../common/messaging/processed-events.cleaner';
 import type { ConsumerEnv } from '../../../config/consumer-env.schema';
+import { PrismaService } from '../../../prisma/prisma.service';
 import { TASK_EVENTS_TOPIC } from '../../tasks/events/task.integration-events';
 import {
   NOTIFICATIONS_GROUP,
@@ -34,10 +36,12 @@ export class NotificationsConsumer
 {
   private readonly logger = new Logger(NotificationsConsumer.name);
   private readonly runner: KafkaConsumerRunner;
+  private readonly cleaner: ProcessedEventsCleaner;
 
   constructor(
     handler: NotificationsHandler,
     config: ConfigService<ConsumerEnv, true>,
+    prisma: PrismaService,
   ) {
     this.runner = new KafkaConsumerRunner({
       brokers: config.get('KAFKA_BROKERS', { infer: true }),
@@ -50,14 +54,26 @@ export class NotificationsConsumer
       acceptsReplay: false,
       logger: this.logger,
     });
+    // A idempotência deste grupo é a tabela de marcas: ele mesmo apaga as que passaram da retenção (13.6c)
+    this.cleaner = new ProcessedEventsCleaner(prisma, {
+      consumerGroup: NOTIFICATIONS_GROUP,
+      retentionDays: config.get('PROCESSED_EVENTS_RETENTION_DAYS', {
+        infer: true,
+      }),
+      logger: this.logger,
+    });
   }
 
   async onApplicationBootstrap(): Promise<void> {
     await this.runner.start();
+    this.cleaner.start();
   }
 
-  /** 1º passo do shutdown: termina a mensagem em andamento e desconecta, ANTES de o Prisma fechar. */
+  /**
+   * 1º passo do shutdown: termina a mensagem em andamento e desconecta, e espera uma limpeza em andamento, ANTES de o
+   * Prisma fechar.
+   */
   async onModuleDestroy(): Promise<void> {
-    await this.runner.stop();
+    await Promise.all([this.runner.stop(), this.cleaner.stop()]);
   }
 }
