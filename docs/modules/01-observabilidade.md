@@ -1,8 +1,9 @@
 # Módulo 01 — Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana)
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 09/11/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Onde vive no código:** [`src/tracing.ts`](../../src/tracing.ts) · [`src/env.ts`](../../src/env.ts) ·
+> **Onde vive no código:** [`src/tracing.ts`](../../src/tracing.ts) ·
+> [`src/common/telemetry/start-telemetry.ts`](../../src/common/telemetry/start-telemetry.ts) · [`src/env.ts`](../../src/env.ts) ·
 > [`src/main.ts`](../../src/main.ts) · [`src/common/logging/`](../../src/common/logging/logger.options.ts) ·
 > [`src/common/correlation/`](../../src/common/correlation/correlation-id.middleware.ts) ·
 > [`src/health/`](../../src/health/health.controller.ts) ·
@@ -183,6 +184,9 @@ scrape_configs:
   - job_name: 'taskflow'
     static_configs:
       - targets: ['host.docker.internal:9464']
+  - job_name: 'taskflow-relay'          # relay da outbox (Módulo 13.3), processo separado
+    static_configs:
+      - targets: ['host.docker.internal:9465']
 ```
 
 ```bash
@@ -204,33 +208,52 @@ docker compose up -d postgres jaeger prometheus grafana
 > rede do compose) e IP fixo como `172.17.0.1` (depende da sub-rede configurada em cada máquina).
 > Com firewall ativo no Linux (`ufw`), pode ser preciso liberar a porta `9464` vinda da bridge do Docker.
 
-### 3. `src/tracing.ts`
+### 3. `startTelemetry` e os arquivos de bootstrap (`src/tracing.ts`, `src/relay-tracing.ts`)
+
+O SDK sobe numa função parametrizada,
+[`startTelemetry`](../../src/common/telemetry/start-telemetry.ts), chamada por um arquivo de bootstrap **por
+processo**. São dois processos desde o [Módulo 13.3](13-mensageria-kafka.md): a API e o relay da outbox.
 
 ```ts
-import { NodeSDK } from '@opentelemetry/sdk-node';
-import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
-import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
-import { PrometheusExporter } from '@opentelemetry/exporter-prometheus';
-import { resourceFromAttributes } from '@opentelemetry/resources';
-import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
-import { envSchema } from './config/env.schema';
+// src/tracing.ts — 2º import do main.ts
+startTelemetry({ serviceName: 'taskflow', metricsPort: 9464 });
 
-// O tracing sobe ANTES do Nest, então ainda não existe ConfigService.
-// Reaproveitamos o MESMO schema zod para validar só este campo (mesma regra, mesmo default).
-const otlpEndpoint = envSchema.shape.OTEL_EXPORTER_OTLP_ENDPOINT.parse(process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
-
-const sdk = new NodeSDK({
-  resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: 'taskflow' }),
-  traceExporter: new OTLPTraceExporter({ url: `${otlpEndpoint}/v1/traces` }),
-  metricReader: new PrometheusExporter({ port: 9464, host: '0.0.0.0' }),
-  instrumentations: [getNodeAutoInstrumentations()],
-});
-
-sdk.start();
-
-// Sem handler de SIGTERM aqui: o encerramento do SDK é o último passo do graceful shutdown do Nest
-registerTelemetryShutdown(() => sdk.shutdown());
+// src/relay-tracing.ts — 2º import do relay.ts
+startTelemetry({ serviceName: 'taskflow-relay', metricsPort: 9465 /* RELAY_METRICS_PORT */ });
 ```
+
+```ts
+// src/common/telemetry/start-telemetry.ts (resumido)
+export function startTelemetry({ serviceName, metricsPort }: TelemetryOptions): void {
+  // O tracing sobe ANTES do Nest, então ainda não existe ConfigService.
+  // Reaproveitamos o MESMO schema zod para validar só este campo (mesma regra, mesmo default).
+  const otlpEndpoint = envSchema.shape.OTEL_EXPORTER_OTLP_ENDPOINT.parse(process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
+
+  const sdk = new NodeSDK({
+    resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: serviceName }),
+    traceExporter: new OTLPTraceExporter({ url: `${otlpEndpoint}/v1/traces` }),
+    metricReader: new PrometheusExporter({ port: metricsPort, host: '0.0.0.0' }),
+    instrumentations: [
+      getNodeAutoInstrumentations({
+        '@opentelemetry/instrumentation-http': { ignoreIncomingRequestHook: (req) => isHealthCheck(req.url) },
+        '@opentelemetry/instrumentation-pg': { requireParentSpan: true }, // ver problema 20
+      }),
+    ],
+  });
+
+  sdk.start();
+  // Sem handler de SIGTERM aqui: o encerramento do SDK é o último passo do graceful shutdown do Nest
+  registerTelemetryShutdown(() => sdk.shutdown());
+}
+```
+
+**Por que um arquivo de bootstrap por processo, e não a chamada direto no `main.ts`:** `import` é içado
+(*hoisted*). Uma chamada no corpo do `main.ts` rodaria **depois** de o Nest e o `pg` já terem sido carregados, e a
+auto-instrumentação não os alcançaria. O arquivo de efeito colateral importado em 2º lugar garante a ordem.
+
+**Por que cada processo tem o seu `service.name` e a sua porta:** no Jaeger, `taskflow` e `taskflow-relay` aparecem
+separados (dá para filtrar os spans de publicação do relay). E duas instâncias do exporter na mesma porta não
+convivem: a segunda **perde as métricas em silêncio** (problema 21).
 
 O endpoint do Jaeger vem da variável **`OTEL_EXPORTER_OTLP_ENDPOINT`** (default `http://localhost:4318`), validada
 pelo schema de ambiente do projeto ([`env.schema.ts`](../../src/config/env.schema.ts)). Dentro de um container,
@@ -485,6 +508,8 @@ Problemas **reais**, na ordem em que apareceram:
 | 17 | Métrica sem `http_route` e span raiz chamado só `GET` | Com Express 5 + Nest, o `instrumentation-express` não preenche a rota no `rpcMetadata` | `RouteTelemetryGuard` como primeiro guard global. Um interceptor foi testado antes e descartado: perdia a rota dos 401/429 |
 | 18 | Grafana registrando erro no boot após o provisionamento | Montar `provisioning/` inteira escondeu as pastas vazias `plugins/` e `alerting/` da imagem | Montar só as subpastas usadas |
 | 19 | No navegador: legenda "Value" no painel de req/s e URL `taskflow-e28094-api` | A série dos 404 não tem `http_route` (o Grafana mostra "Value"); o "—" do título virou `e28094` no slug. A verificação pela API do Grafana conferia só se havia dados, não como apareciam | `label_replace(…, "http_route", "(sem rota)", "http_route", "")` e título "TaskFlow API". Lição: um dashboard também se revisa **olhando** |
+| 20 | **(Módulo 13.3)** O relay da outbox, parado, gerava um trace a cada 500 ms no Jaeger (`pg.query:BEGIN`, `SELECT`…), cerca de 7 mil por hora sem informação | O polling roda fora de qualquer requisição: cada query virava um trace raiz | `'@opentelemetry/instrumentation-pg': { requireParentSpan: true }`. Conferido no Jaeger: o relay ocioso não gera traces de query, e o `POST /tasks` da API continua com os 9 spans de query dentro do span HTTP |
+| 21 | **(Módulo 13.3)** Uma 2ª réplica do relay no mesmo host subia normalmente, mas sem métricas | A porta de métricas já estava em uso, e o `PrometheusExporter` **não** falha nem avisa | Porta configurável (`RELAY_METRICS_PORT`). Em produção, cada réplica tem o seu IP e o padrão basta. E `up{job="taskflow-relay"}` acusa uma réplica sem coleta |
 
 ---
 
@@ -523,6 +548,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 | Dashboard importado à mão (só existia na máquina onde foi importado) | Datasources e dashboard provisionados de `grafana/`, com teste no CI | Um ambiente novo nasce observável; mudança de dashboard é PR |
 | Métrica HTTP sem rota e contando probes | `http_route` em toda rota conhecida (inclusive 401/429); probes fora | Dá para ver qual endpoint degrada, sem a média diluída pelos probes |
 | Sem health check; `process.exit(0)` no SIGTERM do `tracing.ts` | `/health/live` + `/health/ready` e graceful shutdown pelo ciclo de vida do Nest | O orquestrador sabe quando reiniciar e quando tirar a réplica do balanceador; deploy sem cortar requisições |
+| Um processo, `service.name` e porta fixos no `tracing.ts` | `startTelemetry({ serviceName, metricsPort })` chamado pela API (`taskflow`, 9464) e pelo relay da outbox (`taskflow-relay`, 9465); queries sem span pai fora dos traces | O relay do [Módulo 13.3](13-mensageria-kafka.md) é outro processo: precisa aparecer separado no Jaeger e no Prometheus, sem o ruído do polling |
 
 ---
 
@@ -530,6 +556,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 
 - **Probes ainda sem consumidor:** não há manifesto Kubernetes nem `HEALTHCHECK` no Dockerfile. Os probes existem e foram testados, mas nada os chama automaticamente (Módulo 02 e a troca do Dockerfile para `node:24` não-root).
 - **Coleta de logs:** os logs saem em JSON no stdout, mas nenhum agregador os coleta localmente (ex.: Loki + Promtail no compose). Hoje se lê com `docker logs`/terminal.
+- **Trace interrompido na outbox:** o span `publish` do relay não é filho do `POST` que gravou o evento (o contexto do trace não é guardado na outbox). O `correlationId` atravessa (vai no header da mensagem); o `traceparent`, ainda não. Ver o [Módulo 13](13-mensageria-kafka.md).
 - **`correlationId` fora do HTTP:** um log emitido fora de uma requisição (boot, script) sai sem `correlationId`, e um evento gravado fora dela fica sem o campo no envelope.
 - **Sem alertas:** o dashboard mostra, mas ninguém é avisado. O próximo passo são regras de alerta (ex.: 5xx > 1% por 5 min, p95 acima do SLO) provisionadas também por arquivo.
 - **Jaeger v1:** as imagens do compose têm versão fixa (nunca `:latest`, para o ambiente de amanhã ser igual ao de hoje), mas o `jaegertracing/all-in-one:1.76.0` é a última linha do **v1**, já descontinuado. O próximo passo é migrar para o Jaeger v2 (`jaegertracing/jaeger`), que é construído sobre o OpenTelemetry Collector.

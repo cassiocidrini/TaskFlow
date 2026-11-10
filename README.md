@@ -23,8 +23,9 @@ teste que a comprova; o que **não** está implementado aparece em [Limitações
 | **Autorização (OWASP A01)** | Toda rota de tarefa exige JWT e posse do projeto; recurso alheio responde `404` (anti-enumeration) e há proteção anti-IDOR em rotas aninhadas | [`tasks.e2e-spec.ts`](test/e2e/tasks.e2e-spec.ts) |
 | **Projeções idempotentes** | `INSERT … ON CONFLICT DO NOTHING` e `UPDATE … SET`: entrega duplicada, 5 entregas simultâneas e replay completo resultam no mesmo estado | [`projections.spec.ts`](test/integration/projections.spec.ts) |
 | **Health checks e graceful shutdown** | `/health/live` × `/health/ready`; no SIGTERM, readiness 503 e drenagem → HTTP fecha esperando as requisições → banco → telemetria. Sob carga: 0 requisições cortadas | [`health/`](src/health/health.controller.ts) |
+| **Mensageria confiável (Kafka)** | Transactional Outbox na mesma transação do Event Store + relay em processo separado: sem dual-write, ordem por tarefa, failover entre réplicas, API de pé com o Kafka fora do ar | [Módulo 13](docs/modules/13-mensageria-kafka.md) · [`outbox-relay.streaming-spec.ts`](test/streaming/outbox-relay.streaming-spec.ts) |
 | **Fail-fast de configuração** | Variáveis de ambiente validadas com `zod` no boot: configuração inválida impede a app de subir | [`env.schema.ts`](src/config/env.schema.ts) |
-| **Testes com infraestrutura real** | 166 unitários · 27 de integração e 38 E2E contra **PostgreSQL real** via Testcontainers | [Testes](#-testes) |
+| **Testes com infraestrutura real** | 194 unitários · 40 de integração, 39 E2E e 2 de streaming contra **PostgreSQL e Kafka reais** via Testcontainers | [Testes](#-testes) |
 | **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas com `http_route`, sem os probes); Grafana **provisionado** com dashboard RED + banco + event loop; logs JSON com `correlationId` e `trace_id` | [`tracing.ts`](src/tracing.ts) · [`grafana/`](grafana/dashboards/taskflow-api.json) |
 | **IaC** | Terraform (S3, SQS, SNS, IAM de menor privilégio) com backend remoto, sobre LocalStack | [`terraform/`](terraform/) |
 
@@ -40,7 +41,10 @@ flowchart LR
         CT -->|Command| CH[Command Handler]
         CH --> R[TaskCommandRunner<br/>1. assertOwner<br/>2. load agregado<br/>3. regra de domínio<br/>4. save<br/>5. publish]
         R <-->|fromHistory / appendMany| ES[(Event Store<br/>events)]
+        R -->|mesma transação| OB[(outbox)]
     end
+
+    OB -->|relay<br/>processo separado| K[[Kafka<br/>taskflow.task-events.v1]]
 
     subgraph Leitura [Leitura — Query side]
         CT -->|Query| QH[Query Handler]
@@ -55,6 +59,7 @@ flowchart LR
 - **Escrita:** cada comando carrega o agregado a partir dos eventos, valida a regra de negócio e grava os eventos novos com **concorrência otimista**. Um conflito de versão responde `409`.
 - **Leitura:** listagens vêm do Read Model `tasks_read`, uma projeção desnormalizada e paginada por cursor. O histórico vem direto do Event Store.
 - **Projeções** rodam depois da resposta HTTP (**consistência eventual**) e são idempotentes, o que torna seguro reprocessá-las.
+- **Kafka:** cada evento ganha, na mesma transação, um evento de **integração** na `outbox`. Um relay (outro processo) publica no tópico em ordem por tarefa. A API nunca fala com o broker ([Módulo 13](docs/modules/13-mensageria-kafka.md)).
 
 ### Event Sourcing na prática
 
@@ -153,7 +158,7 @@ curl -s $API/projects/$PROJECT/tasks/$TASK/history -H "$AUTH" | jq
 |---|---|---|
 | API + Swagger | http://localhost:3000/docs | — |
 | Jaeger (traces) | http://localhost:16686 | — |
-| Métricas (exporter OTel) | http://localhost:9464/metrics | — |
+| Métricas (exporter OTel) | http://localhost:9464/metrics (API) · http://localhost:9465/metrics (relay) | — |
 | Prometheus | http://localhost:9090 | — |
 | Grafana | http://localhost:3001 | `admin` / `admin` · dashboard **TaskFlow API** já provisionado |
 | LocalStack (AWS) | http://localhost:4566 | `test` / `test` |
@@ -169,6 +174,7 @@ curl -s $API/projects/$PROJECT/tasks/$TASK/history -H "$AUTH" | jq
 | `npm run aws:resources` | Lista as filas SQS e os buckets S3 criados |
 | `npm run streaming:up` · `streaming:down` · `streaming:topics` | Kafka 4 (KRaft) e criação dos tópicos ([Módulo 13](docs/modules/13-mensageria-kafka.md)); fora do `npm run dev` |
 | `npm run kafka:smoke` | Produz e consome uma mensagem de teste (valida cliente e broker) |
+| `npm run relay:dev` · `start:relay` | Relay da outbox → Kafka, processo separado da API (precisa do `streaming:up`) |
 
 ---
 
@@ -199,15 +205,17 @@ de outro usuário** · `409` regra de negócio violada ou conflito de concorrên
 
 | Suíte | Qtd. | Infraestrutura | O que prova |
 |---|---:|---|---|
-| **Unitários** | 166 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish` |
-| **Integração** | 27 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade do `appendMany`, envelope de metadados, idempotência das projeções, ordem do graceful shutdown |
-| **E2E** | 38 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico com autor, paginação, consistência eventual, `X-Correlation-Id`, health checks |
+| **Unitários** | 194 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish`, contrato de integração, loop e backoff do relay |
+| **Integração** | 40 | PostgreSQL real (Testcontainers) | Concorrência otimista, atomicidade de `events` + `outbox`, envelope de metadados, idempotência das projeções, ordem do graceful shutdown, lock do relay com duas réplicas |
+| **E2E** | 39 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico com autor, paginação, consistência eventual, `X-Correlation-Id`, health checks, API → outbox |
+| **Streaming** | 2 | Kafka + PostgreSQL reais | Outbox → relay → tópico: chave, partição, ordem, headers; at-least-once com o mesmo `event-id` |
 
 ```bash
 npm run test:unit          # ~3 s — use o tempo todo
 npm run test:integration   # Docker necessário
 npm run test:e2e           # Docker necessário
-npm test                   # as três, em sequência
+npm run test:streaming     # Docker necessário (sobe Kafka)
+npm test                   # unit, integration e e2e, em sequência
 npx tsc --noEmit && npm run lint
 ```
 
@@ -216,8 +224,8 @@ npx tsc --noEmit && npm run lint
 
 ### CI
 
-Cada PR para a `main` dispara [3 jobs paralelos](.github/workflows/ci.yml), e todos são obrigatórios para o merge:
-**tipos + lint + unitários + build** · **integração** · **E2E**. O workflow roda com `permissions: contents: read`
+Cada PR para a `main` dispara [4 jobs paralelos](.github/workflows/ci.yml), e todos são obrigatórios para o merge:
+**tipos + lint + unitários + build** · **integração** · **E2E** · **streaming** (Kafka real). O workflow roda com `permissions: contents: read`
 e cancela execuções obsoletas do mesmo PR.
 
 ---
@@ -240,7 +248,8 @@ e cancela execuções obsoletas do mesmo PR.
 Escolhas conscientes de escopo, com o próximo passo de cada uma:
 
 - **Dual-write entre Event Store e EventBus (projeções internas):** se o processo cair entre gravar e publicar, a projeção não é atualizada. A *Transactional Outbox* já existe (Módulo 13.2), mas cobre o caminho do Kafka; as projeções continuam no `EventBus` em memória. Próximo passo: projeções consumindo do tópico + comando de **replay**.
-- **EventBus em memória:** entrega em ordem dentro de um processo. O Kafka já está no compose (Módulo 13, etapa 13.1) e cada evento já é gravado na `outbox` na mesma transação do Event Store (13.2), mas ainda não há relay: nada é publicado no Kafka até a etapa 13.3. Com um broker externo, as projeções precisarão guardar a versão do agregado para descartar eventos fora de ordem.
+- **EventBus em memória:** entrega em ordem dentro de um processo. Os eventos já chegam ao Kafka pela outbox + relay (Módulo 13, etapas 13.2 e 13.3), mas **nenhum consumer** lê o tópico ainda (13.4). Com consumers externos, as projeções precisarão guardar a versão do agregado para descartar eventos fora de ordem.
+- **Relay da outbox:** um lote por vez (ordem acima de vazão); uma mensagem com erro permanente trava a fila até a DLQ da etapa 13.5; o trace da requisição não continua no span de publicação (o `correlationId`, sim).
 - **Logs:** JSON no stdout com `correlationId` e `trace_id`, mas sem agregador local (Loki).
 - **Sem alertas:** o dashboard provisionado mostra os sinais, mas nenhuma regra de alerta avisa quando o 5xx ou o p95 passam do limite.
 - **Eventos antigos sem autor:** eventos gravados antes do envelope de metadados aparecem no histórico com `actorId: null`; o autor não é inferido. O metadata ainda não chega ao `EventBus` nem às projeções.
@@ -262,7 +271,8 @@ src/
 │   ├── lifecycle/          # encerramento do OpenTelemetry no graceful shutdown
 │   ├── telemetry/          # http.route nas métricas e spans (RouteTelemetryGuard)
 │   └── logging/            # opções do nestjs-pino (logs JSON)
-├── events/                 # EventStoreService (append atômico, concorrência otimista)
+├── events/                 # EventStoreService (append atômico, concorrência otimista, outbox na mesma transação)
+├── outbox-relay/           # relay da outbox → Kafka (processo separado: relay.ts)
 ├── health/                 # /health/live, /health/ready, drenagem do graceful shutdown
 ├── modules/
 │   ├── auth/               # JWT + bcrypt, guards, @CurrentUser
@@ -275,9 +285,11 @@ src/
 │       ├── events/         # eventos de domínio + projeções
 │       └── strategies/     # Strategy de prioridade
 ├── app.setup.ts            # Helmet, CORS, ValidationPipe, Swagger (compartilhado com o E2E)
-├── tracing.ts              # OpenTelemetry (carregado antes do Nest)
-└── main.ts
-test/                       # unit/ · integration/ · e2e/ — a pirâmide de testes (Jest)
+├── tracing.ts              # OpenTelemetry da API (carregado antes do Nest)
+├── relay-tracing.ts        # OpenTelemetry do relay
+├── relay.ts                # entrypoint do relay (Nest sem HTTP)
+└── main.ts                 # entrypoint da API
+test/                       # unit/ · integration/ · e2e/ · streaming/ — a pirâmide de testes (Jest)
 terraform/                  # IaC (S3, SQS, SNS, IAM)
 grafana/                    # datasources e dashboard provisionados (dashboard como código)
 
@@ -287,7 +299,7 @@ load/                       # testes de carga da API: k6/ e autocannon/ (Módulo
 labs/node-internals/        # experimentos do runtime: event loop, streams, leaks (Módulo 11)
 ```
 
-`src/` contém só a API. O que é estudo ou ferramenta fica fora dele, para não ser compilado no `dist/` nem
+`src/` contém só o produto: a API e o relay da outbox (dois processos, mesma imagem). O que é estudo ou ferramenta fica fora dele, para não ser compilado no `dist/` nem
 confundido com código de produção.
 
 ---
@@ -312,7 +324,7 @@ reproduzir, **problemas reais encontrados** e onde o resultado vive no código. 
 | [10](docs/modules/10-performance-load-testing.md) | Performance e load testing (k6) | `load/` |
 | [11](docs/modules/11-nodejs-internals.md) | Node.js internals (event loop, thread pool, streams, leaks) | `labs/node-internals/` |
 | [12](docs/modules/12-design-patterns.md) | Design patterns | ver [Padrões de projeto aplicados](#padrões-de-projeto-aplicados) |
-| [13](docs/modules/13-mensageria-kafka.md) | Mensageria e streaming com Kafka (🚧 13.1 de 13.8) | `docker-compose.yml` (profile `streaming`), `scripts/kafka/` |
+| [13](docs/modules/13-mensageria-kafka.md) | Mensageria e streaming com Kafka (🚧 13.3 de 13.8) | `docker-compose.yml` (profile `streaming`), `events/`, `outbox-relay/`, `relay.ts` |
 
 ---
 

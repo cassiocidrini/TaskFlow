@@ -15,7 +15,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Três jobs PARALELOS. Cada teste roda UMA vez. Todos obrigatórios na Branch Protection:
+# Quatro jobs PARALELOS. Cada teste roda UMA vez. Todos obrigatórios na Branch Protection:
 # nenhum merge sem tudo verde.
 jobs:
   quality:
@@ -68,3 +68,20 @@ jobs:
 
       - name: Testes E2E (HTTP + Postgres real)
         run: npm run test:e2e
+
+  # Módulo 13: outbox → relay → Kafka com broker e banco REAIS. Job próprio porque é a única suíte que sobe um
+  # Kafka (~400 MB, ~10 s): as outras não pagam esse custo, e uma falha aqui aponta direto para a mensageria.
+  streaming:
+    name: Testes de streaming (Kafka + Postgres, Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx prisma generate
+
+      - name: Testes de streaming (relay publicando no Kafka)
+        run: npm run test:streaming

@@ -1,6 +1,6 @@
 # Módulo 03 — CI/CD com GitHub Actions
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 18/10/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
 > **Onde vive no código:** [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) ·
 > [`prisma.config.ts`](../../prisma.config.ts) · [`jest.config.ts`](../../jest.config.ts) · [`package.json`](../../package.json) (scripts)
@@ -57,6 +57,7 @@ flowchart LR
     E["push / pull_request<br/>para a main"] --> Q
     E --> I
     E --> X
+    E --> S
     subgraph Q [job: quality]
         direction TB
         q1[tsc --noEmit] --> q2[oxlint] --> q3[testes unitários] --> q4[nest build]
@@ -67,21 +68,30 @@ flowchart LR
     subgraph X [job: e2e]
         x1["HTTP + PostgreSQL real"]
     end
-    Q --> M{3 verdes?}
+    subgraph S [job: streaming]
+        s1["Kafka + PostgreSQL reais<br/>(Módulo 13)"]
+    end
+    Q --> M{4 verdes?}
     I --> M
     X --> M
+    S --> M
     M -->|sim| OK[merge liberado]
     M -->|não| NO[merge bloqueado]
 ```
 
-**Por que três jobs, e não um:**
+**Por que jobs separados, e não um:**
 
-| | Um job sequencial | Três jobs paralelos |
+| | Um job sequencial | Jobs paralelos |
 |---|---|---|
 | Feedback de um erro de lint | Espera os containers dos testes | Aparece em ~1 min no `quality` |
 | Qual parte quebrou | Ler o log inteiro | O **nome** do job vermelho já diz |
 | Tempo total | Soma de tudo | O tempo do job **mais lento** |
-| Custo | 1 VM | 3 VMs (cada uma repete `npm ci` + `prisma generate`) |
+| Custo | 1 VM | Uma VM por job (cada uma repete `npm ci` + `prisma generate`) |
+
+**O 4º job, `streaming` (Módulo 13.3).** A suíte `test:streaming` sobe um **Kafka real** (`apache/kafka:4.3.2`, a
+mesma imagem do compose) além do Postgres, e prova o caminho outbox → relay → tópico. Ganhou job próprio, em vez de
+entrar no de integração, pelos mesmos motivos da tabela: só ela paga o custo do broker (~400 MB, ~10 s de boot), e
+um vermelho nela aponta direto para a mensageria.
 
 ---
 
@@ -118,6 +128,7 @@ jobs:
 
   integration:   # mesmo setup + npm run test:integration
   e2e:           # mesmo setup + npm run test:e2e
+  streaming:     # mesmo setup + npm run test:streaming (Kafka + Postgres via Testcontainers)
 ```
 
 | Step | Por quê |
@@ -165,11 +176,14 @@ Em **Settings → Branches → regra da `main`**:
 |---|---|
 | Push direto na `main` | ❌ Bloqueado (só via PR) |
 | PR com qualquer job vermelho | ❌ Merge bloqueado |
-| PR com os 3 jobs verdes | ✅ Merge liberado |
+| PR com os 4 jobs verdes | ✅ Merge liberado |
 
 > ⚠️ **Armadilha ao renomear jobs:** o check obrigatório é identificado pelo **nome** do job. Quando o job único
 > `Build & Test` virou três jobs, o check antigo **nunca mais reportaria**, e o PR ficaria travado em
 > *"Expected — Waiting for status to be reported"*. Depois de renomear, rode o CI uma vez e atualize a lista de checks.
+>
+> O mesmo vale para um job **novo**: o `streaming` (13.3) só passa a bloquear o merge depois de adicionado à lista de
+> checks obrigatórios, e ele só aparece na lista depois de rodar uma vez.
 
 ### Níveis de rigor
 
@@ -224,6 +238,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 | | Run #2 (Node 24) | ✅ 37 s |
 | Um job com unit + integração + E2E | Run #17 | ✅ 1 min 20 s |
 | Três jobs paralelos | PRs #5 e #6 | ✅ todos verdes, com 150 testes por PR |
+| Quatro jobs (+ `streaming`) | Módulo 13.3 | Localmente: suíte de streaming em ~7 s com as imagens em cache |
 
 ---
 
@@ -232,7 +247,8 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - **CD não implementado:** não há deploy automático. O próximo passo natural é um workflow disparado no merge para a `main` que publica a imagem Docker e faz o deploy (ex.: Render/Fly.io + Neon).
 - **Actions fixadas por tag** (`@v4`), e não por SHA: fixar por hash protege contra uma tag adulterada (*supply chain*).
 - **Sem análise de dependências:** Dependabot, CodeQL e `npm audit` no CI cobririam o OWASP A06 (componentes vulneráveis).
-- **Setup repetido nos 3 jobs:** uma *composite action* eliminaria as 6 linhas duplicadas.
+- **Setup repetido nos 4 jobs:** uma *composite action* eliminaria as linhas duplicadas.
+- **`npm ci` baixa o binário da librdkafka do GitHub** (cliente Kafka, Módulo 13): uma dependência de rede a mais em todos os jobs.
 - **Sem cobertura publicada:** o `test:cov` existe, mas o relatório não é exibido no PR.
 
 ---
@@ -240,10 +256,10 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 ## ✅ Checklist
 
 - [x] Workflow em push e PR para a `main`
-- [x] 3 jobs paralelos: qualidade, integração e E2E
+- [x] Jobs paralelos: qualidade, integração, E2E e streaming (Kafka real, Módulo 13.3)
 - [x] Testes com PostgreSQL real no CI (Testcontainers)
 - [x] `permissions` mínimas e cancelamento de runs obsoletos
-- [x] Branch Protection exigindo os 3 checks
+- [x] Branch Protection exigindo os checks (o `streaming` entra na lista após o 1º run)
 - [x] Badge do CI no README
 - [ ] CD (deploy automatizado)
 - [ ] Dependabot / CodeQL / actions fixadas por SHA
