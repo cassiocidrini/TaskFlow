@@ -6,7 +6,7 @@
  * - falha no envio: registra a tentativa no lote INTEIRO e não marca nada (at-least-once, ordem acima de vazão);
  * - lock ocupado (`busy`) e banco fora: nenhuma mensagem sai;
  * - backoff exponencial com teto, zerado no primeiro sucesso; lote cheio roda de novo sem esperar;
- * - mensagem do broker: chave, corpo e headers vindos da linha da outbox;
+ * - mensagem do broker: chave, corpo e headers vindos da linha da outbox (inclusive `replay`, 13.6b);
  * - trace distribuído: cada mensagem com contexto gravado ganha um span `create` FILHO do trace de origem, e o
  *   `traceparent` do header aponta para ele; o `publish` do lote só referencia (links) os `create`;
  * - limpeza no máximo a cada 10 minutos, sem derrubar o loop se falhar;
@@ -50,6 +50,7 @@ const row = (id: number, overrides: Partial<OutboxRow> = {}): OutboxRow => ({
   attempts: 0,
   lastError: null,
   traceContext: null,
+  replay: false,
   ...overrides,
 });
 
@@ -239,6 +240,15 @@ describe('OutboxRelay', () => {
       );
 
       expect(message.headers).not.toHaveProperty('correlation-id');
+    });
+
+    it('linha de replay (13.6b): header `replay: true`; linha da API: sem o header', () => {
+      expect(toOutgoingMessage(row(1, { replay: true })).headers).toMatchObject(
+        {
+          replay: 'true',
+        },
+      );
+      expect(toOutgoingMessage(row(2)).headers).not.toHaveProperty('replay');
     });
 
     it('com contexto de trace: os headers W3C saem junto, com os nomes do padrão', () => {

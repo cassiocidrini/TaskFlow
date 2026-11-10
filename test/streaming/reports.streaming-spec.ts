@@ -6,7 +6,10 @@
  * - dois grupos, um tópico: cada um lê TODAS as mensagens, independente do outro;
  * - os números do projeto batem com o que aconteceu (status, sem responsável, lead time);
  * - o relay republicando tudo (o at-least-once da 13.3) não dobra nada: a guarda de versão do `reports` e o
- *   `processed_events` do `notifications`, cada um com a sua forma de idempotência.
+ *   `processed_events` do `notifications`, cada um com a sua forma de idempotência;
+ * - **reconstrução pelo replay do Event Store (13.6b):** o runbook (parar, limpar, `replay`, subir) devolve os
+ *   MESMOS números, mais uma tarefa que nunca passou pela outbox; e o `notifications` lê as mensagens de replay e
+ *   não notifica nada, nem a atribuição dessa tarefa (que ele nunca viu).
  */
 import { randomUUID } from 'node:crypto';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
@@ -34,6 +37,7 @@ import { EventSourcedTaskRepository } from '../../src/modules/tasks/infrastructu
 import { KafkaMessagePublisher } from '../../src/outbox-relay/kafka-message-publisher';
 import { OutboxRelay } from '../../src/outbox-relay/outbox-relay.service';
 import { OutboxStore } from '../../src/outbox-relay/outbox.store';
+import { TaskEventReplayer } from '../../src/replay/task-event-replayer';
 import {
   startTestDatabase,
   type TestDatabase,
@@ -48,6 +52,8 @@ describe('Evento → Kafka → consumer de relatórios (streaming)', () => {
   let publisher: KafkaMessagePublisher;
   let relay: OutboxRelay;
   const runners: KafkaConsumerRunner[] = [];
+  let admin: KafkaJS.Admin;
+  let reportsRunner: KafkaConsumerRunner;
 
   const OWNER = randomUUID();
   const ANA = randomUUID();
@@ -70,6 +76,7 @@ describe('Evento → Kafka → consumer de relatórios (streaming)', () => {
       groupId,
       topics: [TASK_EVENTS_TOPIC],
       deadLetterTopic,
+      acceptsReplay: groupId === 'reports', // como em produção: projeção aplica, efeito ignora
       partitionsConsumedConcurrently: 3,
       logger,
       handle: async (message) => {
@@ -80,6 +87,7 @@ describe('Evento → Kafka → consumer de relatórios (streaming)', () => {
     });
     runners.push(runner);
     await runner.start();
+    return runner;
   };
 
   /** Uma tarefa pelo caminho do `CreateTaskHandler`, e então os comandos no agregado real */
@@ -137,7 +145,7 @@ describe('Evento → Kafka → consumer de relatórios (streaming)', () => {
     prisma = db.prisma;
     eventStore = new EventStoreService(prisma as never);
 
-    const admin = new KafkaJS.Kafka({
+    admin = new KafkaJS.Kafka({
       kafkaJS: { brokers: kafka.brokers, logLevel: KafkaJS.logLevel.ERROR },
     }).admin();
     await admin.connect();
@@ -146,7 +154,6 @@ describe('Evento → Kafka → consumer de relatórios (streaming)', () => {
         (topic) => ({ topic, numPartitions: 3 }),
       ),
     });
-    await admin.disconnect();
 
     const env: Partial<RelayEnv> = {
       KAFKA_BROKERS: kafka.brokers,
@@ -166,13 +173,14 @@ describe('Evento → Kafka → consumer de relatórios (streaming)', () => {
   }, 180_000);
 
   afterAll(async () => {
+    await admin?.disconnect();
     await Promise.all(runners.map((r) => r.stop()));
     await publisher?.beforeApplicationShutdown();
     await Promise.all([db?.stop(), kafka?.stop()]);
   });
 
   it('dois grupos no mesmo tópico; números do projeto certos; republicar tudo não dobra nada', async () => {
-    await startGroup(
+    reportsRunner = await startGroup(
       'reports',
       (m) => new ReportsHandler(prisma as never).handle(m),
       REPORTS_DLT,
@@ -238,6 +246,104 @@ describe('Evento → Kafka → consumer de relatórios (streaming)', () => {
         where: { projectId: PROJECT },
       }),
     ).toMatchObject(expected);
+    expect(await prisma.notification.count()).toBe(notificationsBefore);
+  });
+
+  /** Mensagens que o grupo ainda não commitou (soma das partições): 0 = leu tudo */
+  const lagOf = async (groupId: string) => {
+    const [committed] = await admin.fetchOffsets({
+      groupId,
+      topics: [TASK_EVENTS_TOPIC],
+    });
+    const ends = await admin.fetchTopicOffsets(TASK_EVENTS_TOPIC);
+    return ends.reduce((lag, end) => {
+      const done = committed.partitions.find(
+        (p) => p.partition === end.partition,
+      );
+      return lag + Number(end.high) - Math.max(0, Number(done?.offset ?? 0));
+    }, 0);
+  };
+
+  it('reconstrução do reports pelo replay do Event Store: os mesmos números; o notifications ignora o replay', async () => {
+    const before = await prisma.projectStats.findUniqueOrThrow({
+      where: { projectId: PROJECT },
+    });
+    const notificationsBefore = await prisma.notification.count();
+
+    // Uma tarefa "anterior à outbox": só no Event Store, nunca publicada, já atribuída à Ana. É o caso de uso do
+    // replay, e o único em que o header importa para o notifications: as outras mensagens de replay têm eventIds
+    // que ele já processou (o processed_events as descartaria de qualquer jeito)
+    const legacyId = randomUUID();
+    const legacyData = {
+      taskId: legacyId,
+      projectId: PROJECT,
+      title: 'Anterior à outbox',
+      priority: 'LOW' as const,
+      assigneeId: ANA,
+    };
+    await eventStore.append(
+      {
+        aggregateId: legacyId,
+        aggregateType: 'Task',
+        eventType: 'TaskCreated',
+        payload: { ...legacyData },
+        schemaVersion: TASK_EVENT_SCHEMA_VERSIONS.TaskCreated,
+      },
+      0,
+      { actorId: OWNER },
+    ); // sem `toOutbox`: não vai para o tópico
+
+    // Runbook do Módulo 13: 1. parar o consumer; 2. limpar a projeção
+    await reportsRunner.stop();
+    runners.splice(runners.indexOf(reportsRunner), 1);
+    await prisma.$executeRawUnsafe(
+      'TRUNCATE TABLE "report_tasks", "project_stats"',
+    );
+
+    // 3. replay do Event Store (o tópico NÃO é a fonte: o histórico vem da tabela events)
+    const replay = await new TaskEventReplayer(prisma as never).replay();
+    expect(replay.messages).toBe(await prisma.event.count());
+    await drainOutbox();
+
+    // 4. subir de novo: o grupo retoma do offset commitado, então lê só as mensagens de replay
+    const seen = results.reports.length;
+    reportsRunner = await startGroup(
+      'reports',
+      (m) => new ReportsHandler(prisma as never).handle(m),
+      REPORTS_DLT,
+    );
+    await waitFor(
+      () => results.reports.length === seen + replay.messages,
+      'o reports aplicar o replay',
+    );
+
+    expect(results.reports.slice(seen)).toEqual(
+      Array(replay.messages).fill('processed'),
+    );
+    const { updatedAt: _a, ...rebuilt } =
+      await prisma.projectStats.findUniqueOrThrow({
+        where: { projectId: PROJECT },
+      });
+    const { updatedAt: _b, ...original } = before;
+    // Os mesmos números, MAIS a tarefa anterior à outbox, que entrou nos relatórios pela primeira vez. Lead time e
+    // `asOf` iguais: o instante original vem no envelope do replay
+    expect(rebuilt).toEqual({
+      ...original,
+      total: original.total + 1,
+      pending: original.pending + 1,
+      lastEventAt: rebuilt.lastEventAt, // a tarefa nova é o evento mais recente
+    });
+    expect(rebuilt.lastEventAt!.getTime()).toBeGreaterThanOrEqual(
+      original.lastEventAt!.getTime(),
+    );
+
+    // O notifications recebeu as mesmas mensagens de replay, commitou e não notificou ninguém
+    const deadline = Date.now() + 30_000;
+    while ((await lagOf('notifications')) > 0) {
+      if (Date.now() > deadline)
+        throw new Error('timeout: notifications com lag');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     expect(await prisma.notification.count()).toBe(notificationsBefore);
   });
 });

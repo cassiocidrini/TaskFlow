@@ -37,6 +37,8 @@ export class ReportsConsumer
       partitionsConsumedConcurrently: 3,
       handle: (message) => handler.handle(message),
       deadLetterTopic: REPORTS_DLT,
+      // Projeção: o replay do Event Store é justamente como ela se reconstrói (Módulo 13.6b)
+      acceptsReplay: true,
       logger: this.logger,
     });
   }

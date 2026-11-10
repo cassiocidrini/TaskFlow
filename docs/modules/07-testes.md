@@ -77,9 +77,10 @@ test/
 ├── setup.ts                    # DISABLE_THROTTLE=true, NODE_ENV=test (antes de tudo)
 ├── setup-slow-suites.ts        # timeout de 60 s, só para integração, E2E e streaming
 ├── support/                    # imagens dos containers (as MESMAS tags do compose) e startInMemoryTracing()
-├── unit/                       # 26 arquivos, 255 testes (inclui o JSON do dashboard do Grafana)
+├── unit/                       # 27 arquivos, 261 testes (inclui o JSON do dashboard do Grafana)
 ├── integration/
 │   ├── support/test-database.ts   # startTestDatabase(): Postgres + migrações
+│   ├── event-replay.spec.ts       # 7 testes (replay pela outbox, UNIQUE parcial, lock por agregado — Módulo 13.6b)
 │   ├── event-store.spec.ts        # 18 testes
 │   ├── graceful-shutdown.spec.ts  # 3 testes (ordem do app.close() com HTTP real, Módulo 01)
 │   ├── notifications-handler.spec.ts # 6 testes (idempotência do consumer, Módulo 13.4)
@@ -100,7 +101,7 @@ test/
 │   ├── dead-letter.streaming-spec.ts   # 4 testes (poison pill, falha desconhecida, banco fora, DLT fora — Módulo 13.5)
 │   ├── outbox-relay.streaming-spec.ts  # 2 testes (outbox → relay → Kafka → consumer, Módulo 13.3)
 │   ├── notifications.streaming-spec.ts # 4 testes (republicação, restart, falha com backoff, um trace só — Módulo 13.4)
-│   └── reports.streaming-spec.ts       # 1 teste (dois grupos no mesmo tópico, republicação — Módulo 13.6a)
+│   └── reports.streaming-spec.ts       # 2 testes (dois grupos no mesmo tópico, republicação; reconstrução pelo replay — 13.6a/b)
 └── load/                       # k6 e experimentos (NÃO são testes do Jest)
 ```
 
@@ -264,7 +265,7 @@ aleatória o broker anunciaria a porta interna. Por isso o helper escolhe uma po
 mapeia de forma fixa: anunciado e mapeado são o mesmo `localhost:<porta>` (o problema dos "dois listeners" do
 [Módulo 13](13-mensageria-kafka.md)).
 
-**Testes que provam que pegam o bug (mutação manual).** Nove testes do Módulo 13 foram conferidos quebrando o código
+**Testes que provam que pegam o bug (mutação manual).** Doze testes do Módulo 13 foram conferidos quebrando o código
 de propósito:
 
 | Mutação | Teste que falhou | O que mostrou |
@@ -277,6 +278,8 @@ de propósito:
 | Tirar a guarda de versão do `reports` (13.6a) | Integração: 3 testes | Duplicata, versão antiga e entregas simultâneas aplicadas de novo |
 | "Ler, somar e gravar" o contador no lugar de `SET coluna = coluna + delta` (13.6a) | Integração "20 tarefas em paralelo" | **`done = 3` para 20 conclusões**: 17 perdidas (*lost update*) |
 | Tirar o `FOR UPDATE` do `reports` (13.6a) | Integração "5 entregas simultâneas" | O `-1` aplicado duas vezes; quem barra é o CHECK do banco |
+| Tirar o lock por agregado do `appendMany` ou do replay (13.6b) | Integração "com o lock preso, a gravação ESPERA" | A gravação não espera: API e replay poderiam intercalar na mesma tarefa |
+| `notifications` aceitando replay (13.6b) | Streaming "reconstrução do reports" | Notifica a atribuição de uma tarefa anterior à outbox. Na 1ª versão do teste, esta mutação **sobreviveu** (problema 16) |
 | Commitar o offset mesmo sem o ack do DLT (13.5) | Streaming "DLT indisponível" | A mensagem de trás fura a fila. Na 1ª versão do teste, esta mutação **sobreviveu** (problema 14) |
 
 Um teste que nunca foi visto falhando pode estar testando nada; esta é a versão barata do *mutation testing*.
@@ -309,6 +312,7 @@ e é por isso que a mutação acima foi conferida: o teste precisa ser visto fal
 | 13 | **(13.3)** O teste das duas réplicas falhou na mutação antes de mostrar as duplicatas | A primeira asserção (houve disputa pelo lock) já falha sem lock | Rodar a mutação também sem essa asserção, para ver o efeito real (400 envios) |
 | 14 | **(13.5)** O teste "DLT indisponível" passava, e a mutação "commitar sem o ack do DLT" **também passava** | O teste dormia 12 s antes de criar o tópico do DLT; o join do grupo atrasou o 1º envio, o tópico apareceu antes do timeout de 10 s, e o envio **nunca falhou** | Esperar o erro acontecer (o log do runner) em vez de dormir. A mutação passou a quebrar o teste pelo motivo certo: a mensagem de trás furando a fila |
 | 15 | **(13.6a)** No CI, `pendingStats` falhou com idade **89,999889 s** onde o teste exige ≥ 90 (instável: nunca falhou localmente) | O teste gravava `now() - 90 s` numa coluna `TIMESTAMP(3)`, e o Postgres **arredonda** ao gravar (conferido: `.000611` vira `.001`). O instante ficava até 0,5 ms no futuro; com o `SELECT` seguinte mais rápido que isso, a idade saía abaixo de 90 | `date_trunc('milliseconds', …)` no teste. O código de produção não muda: meio milissegundo numa métrica em segundos é irrelevante. Lição: teste não pode exigir precisão abaixo da coluna |
+| 16 | **(13.6b)** O teste "o notifications ignora o replay" passava também com a proteção desligada | As mensagens de replay tinham eventIds já processados, e o `processed_events` as descartava com ou sem o header `replay` | Uma tarefa gravada só no Event Store (nunca publicada) entrou no teste: é o caso em que o header é a ÚNICA barreira. Mesma lição do problema 14, por outro caminho: a mutação mostra se o teste exercita a proteção que diz proteger |
 
 ### As lições que ficam
 
@@ -328,9 +332,9 @@ e é por isso que a mutação acima foi conferida: o teste precisa ser visto fal
 |---|---:|---:|---:|
 | Primeira versão deste módulo | 13 | 8 | 12 + 1 `todo` |
 | Antes do Módulo 13 | 166 | 27 | 38 |
-| **Hoje** | **255** | **57** | **49** |
+| **Hoje** | **261** | **64** | **49** |
 
-Mais **11 testes de streaming** (Kafka real), em ~61 s com as imagens em cache (o do DLT indisponível espera um
+Mais **12 testes de streaming** (Kafka real), em ~62 s com as imagens em cache (o do DLT indisponível espera um
 timeout real de 10 s do produtor).
 
 A suíte completa (`npm test`, em sequência) leva cerca de 3 minutos numa máquina de desenvolvimento com 8 GB

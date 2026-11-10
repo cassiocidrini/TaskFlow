@@ -23,6 +23,8 @@
     "start:consumer:notifications": "node dist/notifications-consumer",
     "consumer:reports:dev": "ts-node src/reports-consumer.ts",
     "start:consumer:reports": "node dist/reports-consumer",
+    "replay": "ts-node src/replay.ts",
+    "start:replay": "node dist/replay",
     "dev": "npm run infra:up && npm run start:dev",
     "infra:up": "docker compose up -d --wait postgres jaeger",
     "infra:up:obs": "docker compose up -d --wait postgres jaeger prometheus grafana",

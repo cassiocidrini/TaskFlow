@@ -370,6 +370,11 @@ export function toOutgoingMessage(
   if (typeof payload.correlationId === 'string') {
     headers['correlation-id'] = payload.correlationId;
   }
+  // Republicação do Event Store (13.6b): cada consumer group decide se aplica (projeção) ou ignora (efeito). Só
+  // presente quando verdadeiro: as mensagens da API continuam com os mesmos headers de antes
+  if (row.replay) {
+    headers.replay = 'true';
+  }
   Object.assign(headers, traceCarrier);
   return {
     topic: row.topic,

@@ -72,6 +72,7 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
       groupId,
       topics: [TASK_EVENTS_TOPIC],
       deadLetterTopic: NOTIFICATIONS_DLT,
+      acceptsReplay: false, // como em produção
       partitionsConsumedConcurrently: 3,
       logger,
       handle: async (message) => {
@@ -293,6 +294,7 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
       groupId: 'flaky-consumer', // grupo próprio: lê o tópico do início, sem afetar o `notifications`
       topics: [TASK_EVENTS_TOPIC],
       deadLetterTopic: NOTIFICATIONS_DLT, // 2 falhas desconhecidas: abaixo do limite, nada chega lá
+      acceptsReplay: false,
       partitionsConsumedConcurrently: 3,
       logger,
       handle: async (message) => {

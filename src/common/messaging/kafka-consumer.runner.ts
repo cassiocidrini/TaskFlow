@@ -37,6 +37,9 @@ export type HandleResult = string;
 /** Resultado de uma mensagem desviada para o dead-letter topic: saiu da partição, mas não foi processada. */
 export const DEAD_LETTERED = 'dead_lettered';
 
+/** Resultado de uma mensagem de replay num grupo que não aceita replay: commitada sem chamar o `handle`. */
+export const IGNORED_REPLAY = 'ignored_replay';
+
 export interface KafkaConsumerOptions {
   brokers: string[];
   /** Consumer group: cada grupo lê o tópico INTEIRO, independente dos outros, e guarda o próprio offset. */
@@ -57,6 +60,12 @@ export interface KafkaConsumerOptions {
   deadLetterTopic: string;
   /** Tentativas de uma falha desconhecida antes do DLT. Padrão: {@link DEFAULT_MAX_ATTEMPTS}. */
   maxAttempts?: number;
+  /**
+   * O grupo aplica mensagens de replay (header `replay: true`, Módulo 13.6b)? Projeções: SIM (reconstruir é o
+   * objetivo do replay). Efeitos colaterais, como notificações: NÃO (avisar de novo uma atribuição de meses atrás).
+   * Obrigatório: cada grupo novo precisa decidir, em vez de herdar um padrão sem pensar.
+   */
+  acceptsReplay: boolean;
   logger: Logger;
 }
 
@@ -243,6 +252,13 @@ export class KafkaConsumerRunner {
       parent,
       async (span): Promise<Outcome> => {
         try {
+          if (
+            !this.options.acceptsReplay &&
+            consumed.headers.replay === 'true'
+          ) {
+            span.setAttribute('taskflow.consumer.result', IGNORED_REPLAY);
+            return { kind: 'done', result: IGNORED_REPLAY };
+          }
           const handled = await this.options.handle(consumed);
           span.setAttribute('taskflow.consumer.result', handled);
           return { kind: 'done', result: handled };
