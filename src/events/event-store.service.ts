@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { ConflictException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { currentCorrelationId } from '../common/correlation/correlation-context';
+import { captureTraceContext } from '../common/telemetry/trace-context';
 import { PrismaService } from '../prisma/prisma.service';
 import type { EventMetadata } from './event-metadata';
 import type { OutboxMapper } from './outbox';
@@ -99,6 +100,9 @@ export class EventStoreService {
    * gravou já sabe a identidade do evento, sem reler o banco), `actorId` do contexto explícito e `correlationId`
    * da requisição corrente (`AsyncLocalStorage`; ausente fora de HTTP, sem inventar valor).
    *
+   * O contexto de trace W3C ativo também é capturado aqui e vai para `outbox.trace_context`: a linha fica parada
+   * no banco até o relay buscá-la, e sem isso o trace do `POST` terminaria no INSERT (ver `trace-context.ts`).
+   *
    * @returns a nova versão do agregado (expectedVersion se a lista estiver vazia) e os envelopes gravados.
    */
   async appendMany(
@@ -127,6 +131,7 @@ export class EventStoreService {
     // Um instante só, explícito, para `events.created_at` e o `occurredAt` do evento de integração: com o
     // DEFAULT now() do banco, os dois divergiriam por milissegundos
     const recordedAt = new Date();
+    const traceContext = options.toOutbox ? captureTraceContext() : null;
     const outbox = options.toOutbox
       ? events.flatMap((event, index) => {
           const message = options.toOutbox!({
@@ -167,6 +172,7 @@ export class EventStoreService {
               messageKey: message.key,
               eventType: message.eventType,
               payload: message.payload as Prisma.InputJsonObject,
+              traceContext: traceContext ?? Prisma.DbNull,
               createdAt: recordedAt,
             })),
           }),

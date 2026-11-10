@@ -94,6 +94,7 @@
     "@nestjs/schematics": "^12.0.0",
     "@nestjs/testing": "^12.0.1",
     "@opentelemetry/context-async-hooks": "^2.11.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0",
     "@testcontainers/postgresql": "^12.2.0",
     "@types/bcrypt": "^6.0.0",
     "@types/express": "^5.0.0",

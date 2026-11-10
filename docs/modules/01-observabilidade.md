@@ -71,6 +71,7 @@ flowchart LR
 - **Span:** uma unidade de trabalho com início e fim (ex.: "requisição HTTP", "query SQL").
 - **Trace:** a árvore de spans de uma operação completa, que mostra o que chamou o quê e quanto tempo cada parte levou.
 - **Propagação de contexto:** em sistemas distribuídos, o ID do trace viaja entre serviços em headers HTTP (`traceparent`), costurando um único trace através de vários processos.
+- **Fronteira assíncrona:** fila, tópico ou tabela de outbox. Nenhuma auto-instrumentação atravessa uma linha parada no banco: o contexto precisa ser gravado como dado (`propagation.inject`) e restaurado do outro lado (`propagation.extract`). No TaskFlow, o `traceparent` vai na coluna `outbox.trace_context` e depois no header da mensagem do Kafka ([`trace-context.ts`](../../src/common/telemetry/trace-context.ts); desenho completo no [Módulo 13](13-mensageria-kafka.md#um-trace-só-através-da-outbox-traceparent)).
 
 ### Resource e `service.name`
 
@@ -121,8 +122,9 @@ Log em texto livre (`Tarefa criada para o projeto X`) só se pesquisa com regex.
 
 Logar os dois liga o **chamado do suporte** ao **trace no Jaeger**. O `correlationId` também é gravado no envelope
 de metadados de cada evento (`events.metadata`, ver [Módulo 05](05-event-sourcing-cqrs.md#o-envelope-de-metadados))
-e aparece no histórico da tarefa: dá para ir do evento à requisição que o gerou. As mensagens de broker, outra
-fronteira assíncrona onde o trace nem sempre é propagado, ainda não existem.
+e aparece no histórico da tarefa: dá para ir do evento à requisição que o gerou. Nas mensagens do Kafka, os dois
+viajam em headers separados (`correlation-id` e `traceparent`): o relay e o consumer aparecem no **mesmo trace** do
+request, e o `correlationId` continua nos logs e nos atributos dos spans deles ([Módulo 13](13-mensageria-kafka.md)).
 
 Como funciona no TaskFlow ([`correlation-id.middleware.ts`](../../src/common/correlation/correlation-id.middleware.ts)):
 
@@ -551,6 +553,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 | Dashboard importado à mão (só existia na máquina onde foi importado) | Datasources e dashboard provisionados de `grafana/`, com teste no CI | Um ambiente novo nasce observável; mudança de dashboard é PR |
 | Métrica HTTP sem rota e contando probes | `http_route` em toda rota conhecida (inclusive 401/429); probes fora | Dá para ver qual endpoint degrada, sem a média diluída pelos probes |
 | Sem health check; `process.exit(0)` no SIGTERM do `tracing.ts` | `/health/live` + `/health/ready` e graceful shutdown pelo ciclo de vida do Nest | O orquestrador sabe quando reiniciar e quando tirar a réplica do balanceador; deploy sem cortar requisições |
+| Trace terminando no INSERT da outbox; relay e consumer em traces soltos | Contexto W3C gravado na outbox e propagado no header do Kafka: request, relay e consumer num trace só | O trace mostra onde o tempo de um evento é gasto entre processos (medido: na outbox, não no Kafka; [Módulo 13](13-mensageria-kafka.md)) |
 | Um processo, `service.name` e porta fixos no `tracing.ts` | `startTelemetry({ serviceName, metricsPort })` chamado pela API (`taskflow`, 9464) e pelo relay da outbox (`taskflow-relay`, 9465); queries sem span pai fora dos traces | O relay do [Módulo 13.3](13-mensageria-kafka.md) é outro processo: precisa aparecer separado no Jaeger e no Prometheus, sem o ruído do polling |
 
 ---
@@ -559,11 +562,10 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 
 - **Probes ainda sem consumidor:** não há manifesto Kubernetes nem `HEALTHCHECK` no Dockerfile. Os probes existem e foram testados, mas nada os chama automaticamente (Módulo 02 e a troca do Dockerfile para `node:24` não-root).
 - **Coleta de logs:** os logs saem em JSON no stdout, mas nenhum agregador os coleta localmente (ex.: Loki + Promtail no compose). Hoje se lê com `docker logs`/terminal.
-- **Trace interrompido na outbox:** o span `publish` do relay não é filho do `POST` que gravou o evento (o contexto do trace não é guardado na outbox). O `correlationId` atravessa (vai no header da mensagem); o `traceparent`, ainda não. Ver o [Módulo 13](13-mensageria-kafka.md).
 - **`correlationId` fora do HTTP:** um log emitido fora de uma requisição (boot, script) sai sem `correlationId`, e um evento gravado fora dela fica sem o campo no envelope.
 - **Sem alertas:** o dashboard mostra, mas ninguém é avisado. O próximo passo são regras de alerta (ex.: 5xx > 1% por 5 min, p95 acima do SLO) provisionadas também por arquivo.
 - **Jaeger v1:** as imagens do compose têm versão fixa (nunca `:latest`, para o ambiente de amanhã ser igual ao de hoje), mas o `jaegertracing/all-in-one:1.76.0` é a última linha do **v1**, já descontinuado. O próximo passo é migrar para o Jaeger v2 (`jaegertracing/jaeger`), que é construído sobre o OpenTelemetry Collector.
-- **Amostragem (*sampling*):** hoje 100% das requisições geram trace. Em produção com alto volume, amostra-se (ex.: 10%, ou 100% só das que têm erro) para controlar custo.
+- **Amostragem (*sampling*):** hoje 100% das requisições geram trace. Em produção com alto volume, amostra-se (ex.: 10%, ou 100% só das que têm erro) para controlar custo. Com a outbox, a decisão é tomada **na API** e vale para o relay e o consumer: o *flag* `sampled` viaja no `traceparent` gravado ([Módulo 13](13-mensageria-kafka.md)).
 
 ---
 
@@ -576,6 +578,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 - [x] Dashboard no Grafana com p50/p95/p99 e taxa de requisições
 - [x] Logs estruturados em JSON com `trace_id`, `span_id` e `correlationId`
 - [x] `X-Correlation-Id` validado, gerado, devolvido e propagado por `AsyncLocalStorage`
+- [x] Trace propagado através de uma fronteira assíncrona (outbox → Kafka → consumer)
 - [x] Liveness e readiness separados, sem vazar detalhes de infraestrutura
 - [x] Graceful shutdown: drenagem com readiness 503, HTTP antes do banco, OTel por último, watchdog
 - [x] Datasources e dashboard provisionados por arquivo, validados no CI

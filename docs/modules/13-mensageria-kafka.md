@@ -2,7 +2,8 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.4 de 13.8** (consumer `notifications` com idempotência). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **13.4 de 13.8** (consumer `notifications` com idempotência, e o trace atravessando a
+> outbox). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`docker-compose.yml`](../../docker-compose.yml) (serviços `kafka` e `kafka-init`, profile
@@ -14,7 +15,8 @@
 > relay em [`src/relay.ts`](../../src/relay.ts) e [`src/outbox-relay/`](../../src/outbox-relay/outbox-relay.service.ts) ·
 > consumer em [`src/notifications-consumer.ts`](../../src/notifications-consumer.ts),
 > [`kafka-consumer.runner.ts`](../../src/common/messaging/kafka-consumer.runner.ts) e
-> [`modules/notifications/`](../../src/modules/notifications/consumer/notifications.handler.ts)
+> [`modules/notifications/`](../../src/modules/notifications/consumer/notifications.handler.ts) ·
+> contexto de trace em [`trace-context.ts`](../../src/common/telemetry/trace-context.ts)
 
 ---
 
@@ -40,6 +42,7 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | **13.2** | **Transactional Outbox**: o evento de integração gravado na **mesma transação** do Event Store | ✅ |
 | **13.3** | **Relay**: processo *worker* que publica a outbox no Kafka (produtor idempotente, chave = `aggregateId`) | ✅ |
 | **13.4** | Consumer group `notifications` com **idempotência** (`processed_events` na mesma transação do efeito) | ✅ |
+| 13.4 + | **Um trace só** do request ao consumer: `traceparent` gravado na outbox e propagado no header do Kafka | ✅ |
 | 13.5 | **Retry com backoff** e **dead-letter topic** | 🔜 |
 | 13.6 | Consumer group `reports` (projeção `project_stats`), **replay** e painel de **lag** | 🔜 |
 | 13.7 | *(opcional)* Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda | 🔜 |
@@ -83,7 +86,8 @@ flowchart LR
 
 A API **não fala com o Kafka** em nenhuma direção: grava evento e outbox na mesma transação, e lê as notificações
 que o consumer gravou. Relay e consumer são processos separados, cada um com a sua porta de métricas e o seu
-`service.name` no Jaeger. As tabelas do contexto de notificações só são escritas pelo consumer, e o consumer não lê
+`service.name` no Jaeger, mas **um trace só** liga os três: o contexto do request vai gravado na outbox e segue no
+header `traceparent` da mensagem (ver "Um trace só através da outbox"). As tabelas do contexto de notificações só são escritas pelo consumer, e o consumer não lê
 as tabelas da API (fronteira por convenção; ver "Limitações").
 
 ---
@@ -315,7 +319,8 @@ martelado a cada 500 ms.
 | `outbox_pending_messages` | Prometheus | Tamanho da fila |
 | `outbox_relay_published_total` / `outbox_relay_failures_total` | Prometheus | Vazão e falhas |
 | `up{job="taskflow-relay"}` | Prometheus | Relay sem processo nenhum não exporta métrica: este é o sinal |
-| Span `publish taskflow.task-events.v1` | Jaeger (serviço `taskflow-relay`) | Um span `PRODUCER` por lote, com `messaging.batch.message_count` |
+| Span `create taskflow.task-events.v1` | Jaeger, **dentro do trace do request** que gravou o evento | Um por mensagem. O espaço entre o fim do request e este span é o tempo que o evento ficou parado na outbox |
+| Span `publish taskflow.task-events.v1` | Jaeger (serviço `taskflow-relay`, trace próprio) | Um span `PRODUCER` por lote, com `messaging.batch.message_count` e links para os `create` |
 | `attempts`, `last_error` | Tabela `outbox` | Diagnóstico da linha que não sai |
 
 Regras de alerta sugeridas (o provisionamento de alertas é limitação do Módulo 01):
@@ -396,6 +401,57 @@ causariam rebalances em cascata.
 **Grupo novo começa do início** (`fromBeginning: true`): na primeira subida, o grupo lê tudo o que o tópico retém
 (7 dias). Com idempotência, é seguro; para notificações, pode significar avisar algo de 6 dias atrás. É decisão de
 produto, e fica registrada.
+
+### Um trace só através da outbox (`traceparent`)
+
+**O problema.** Dentro de um processo, o OpenTelemetry carrega o span corrente no `AsyncLocalStorage`, e a
+auto-instrumentação o propaga em HTTP pelo header `traceparent` (W3C Trace Context). A outbox é uma fronteira
+**assíncrona**: a linha fica parada no banco até o relay buscá-la, e nenhum instrumentador atravessa o banco. Até
+aqui, o `POST`, o `publish` do relay e o `process` do consumer eram **três traces sem ligação**.
+
+**A solução: o contexto vira dado.** Mesmo princípio da outbox: o que precisa atravessar a fronteira é gravado na
+mesma transação.
+
+```text
+API      appendMany: propagation.inject(contexto ativo) → outbox.trace_context = {"traceparent": "00-<trace>-<span>-01"}
+relay    span "create" FILHO desse contexto → header traceparent da mensagem = contexto do create
+consumer propagation.extract(headers) → span "process" FILHO do create → queries do efeito dentro dele
+```
+
+No Jaeger, um request com responsável vira um trace só, com os três serviços (medido):
+
+```text
+     0 ms  POST /projects/:projectId/tasks                  [taskflow]          16,5 ms
+    12 ms    pg.query: BEGIN / INSERT events / INSERT outbox / COMMIT
+   187 ms    create taskflow.task-events.v1                 [taskflow-relay]    ← 170 ms parado na outbox
+   696 ms      process taskflow.task-events.v1              [taskflow-notifications]
+   710 ms        pg.query: BEGIN / INSERT processed_events / SELECT / INSERT ×2 / COMMIT
+```
+
+**Por que um span `create` por mensagem, e não só repassar o `traceparent` da API.** Repassar funcionaria, mas o
+relay sumiria do trace e, com ele, o **tempo parado na outbox**, que é justamente o sinal quando a fila atrasa. Esse
+é o desenho da convenção de mensageria do OTel para envio em lote: um `create` por mensagem, no trace de cada uma, e o
+`publish` do lote como trace próprio com **links** para os `create`. Um span não pode ser filho de N traces
+diferentes (cada mensagem do lote veio de um request); um link só referencia. O Jaeger v1 mostra links como
+`FOLLOWS_FROM`, clicáveis.
+
+**Pai × link no consumer.** A convenção também permite que o `process` só tenha um link para o `create`. Aqui ele é
+**filho**: o runner processa uma mensagem por vez, e o objetivo é abrir **um** trace no Jaeger e ver do request à
+notificação. Link é o certo quando um span processa N mensagens de traces diferentes (consumo em lote).
+
+**`correlation-id` × `traceparent`: os dois continuam.** O `correlation-id` é de negócio (o cliente o cita no
+chamado, filtra logs, está no envelope do evento); o `traceparent` é técnico (árvore de spans com tempos, e pode ser
+amostrado). Ver a tabela "`correlationId` × `trace_id`" do [Módulo 01](01-observabilidade.md).
+
+**Detalhes que importam:**
+- **`trace_context` NULL fora de um span** (script, seed): gravar `{}` diria "tem contexto". Linha sem contexto (inclusive
+  as anteriores à coluna) sai sem `traceparent`, e o `process` vira raiz, como antes.
+- **Propagador global**, que o `NodeSDK` registra como W3C por padrão: trocar para B3 ou X-Ray é configuração, não
+  código. Os headers usam os nomes do padrão, que a instrumentação de qualquer linguagem já sabe ler.
+- **Republicação = outro `create` no mesmo trace.** Lote que falha e volta, ou crash antes do COMMIT: cada tentativa
+  aparece como um `create` novo, e as tentativas ficam visíveis.
+- **Testado com o broker real:** a suíte de streaming exige que o `process` tenha o `traceId` do request e seja filho do
+  `create`. Mutação: sem o `extract` no consumer, o teste quebra (o `process` cai num trace novo).
 
 ---
 
@@ -636,6 +692,21 @@ curl -s localhost:9467/metrics | grep kafka_consumer_messages
 alguém (com a API sob `DISABLE_THROTTLE=true`, senão o throttler recusa a rajada); suba o consumer, dê `kill -9` no
 meio da fila e suba de novo. Repita com SIGTERM no lugar do `kill -9` e compare as pausas.
 
+### 9. O trace do request até a notificação
+
+Com os três processos do item 8 rodando, crie uma tarefa com responsável e pegue o trace gravado na outbox:
+
+```bash
+docker exec taskflow-postgres psql -U <usuario-do-.env> -d taskflow_db -At \
+  -c "SELECT trace_context->>'traceparent' FROM outbox ORDER BY id DESC LIMIT 1"
+# 00-3b1dd6cd6d3f5398545d6a0482ec5f77-9181b403aa513c8f-01
+#    └──────────── trace id ────────┘
+```
+
+Abra `http://localhost:16686/trace/<trace id>`: o `POST`, o `create` do relay e o `process` do consumer, com as
+queries do efeito, num trace só. No serviço `taskflow-relay`, o `publish` de cada lote aparece como trace próprio,
+com as referências `FOLLOWS_FROM` para os traces de origem.
+
 ---
 
 ## ⚠️ Problemas encontrados e soluções
@@ -716,6 +787,25 @@ meio da fila e suba de novo. Repita com SIGTERM no lugar do `kill -9` e compare 
 | Testes novos | 20 unitários (regras, leitor tolerante, ambiente), 6 de integração (duplicata, 5 entregas simultâneas, atomicidade com o efeito derrubado no banco), 5 E2E (`/me/notifications`), 3 de streaming (pipeline com republicação, restart sem reprocessar, falha com backoff sem furar a ordem) |
 | Suítes | 214 unitários · 46 integração · 44 E2E · 5 streaming (~18 s) |
 
+**Trace pela outbox** (processos em `node dist/...`, 8 requests espaçados de 1,3 s, tempos lidos dos spans no Jaeger)
+
+| Medida | Valor |
+|---|---|
+| Serviços no trace de cada request | **3 de 3** (`taskflow`, `taskflow-relay`, `taskflow-notifications`) |
+| Tempo parado na outbox (fim do `POST` → `create`) | **38 a 469 ms**: espalhado pelo intervalo de polling (500 ms), como esperado |
+| Salto pelo Kafka (`create` → início do `process`) | **7 a 8 ms** |
+| `process` (idempotência + efeito) | 4,0 a 11,5 ms |
+| Request → notificação gravada | 55 a 489 ms |
+| `publish` do lote (até o ack do broker) | ~6 ms |
+| 1ª mensagem depois de subir os processos | 509 ms de `create` → `process` (as seguintes, 7–8 ms) |
+| Testes novos | 4 unitários (headers W3C; `create` filho do request e `traceparent` apontando para ele; `publish` com links; linha sem contexto), 2 de integração (`trace_context` com o span ativo, NULL fora de um span), 1 de streaming (um trace só com o broker real) |
+| Mutação: `process` sem o contexto extraído | O teste de streaming quebra: `traceId` diferente do request |
+| Suítes | 218 unitários · 48 integração · 44 E2E · 6 streaming (~19 s, 3 execuções estáveis) |
+
+A leitura que a medida dá: **o gargalo de latência não é o Kafka, é o polling da outbox.** Para reduzir, baixar o
+`OUTBOX_POLL_INTERVAL_MS` (mais queries ociosas) ou trocar o polling por `LISTEN/NOTIFY` ou CDC (ver "Polling, CDC ou
+LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum.
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -728,6 +818,7 @@ meio da fila e suba de novo. Repita com SIGTERM no lugar do `kill -9` e compare 
 | Payload do Event Store como único formato de evento | **(13.2)** Evento de domínio (interno) × evento de integração (público), com mapeamento explícito | O agregado pode evoluir sem quebrar consumers |
 | Outbox gravada e ninguém publicando | **(13.3)** Relay em processo separado, um lote por vez (advisory lock de transação), produtor idempotente, backoff, limpeza e métricas próprias | Os eventos chegam ao Kafka em ordem por tarefa, sem acoplar a API à disponibilidade do broker |
 | Tópico sem ninguém lendo | **(13.4)** Consumer group `notifications`, idempotente, com contrato próprio e projeção local; `GET /me/notifications` na API | O primeiro efeito de verdade dos eventos fora do processo da API |
+| Três traces sem ligação: `POST`, `publish` do relay e `process` do consumer | **(13.4 +)** Um trace só, do request à notificação: `traceparent` gravado na outbox, `create` por mensagem no relay, `process` filho dele no consumer | Dá para seguir um evento pelos três processos e ver onde o tempo foi gasto (na outbox, não no Kafka) |
 | Um processo de telemetria (`tracing.ts` fixo) | **(13.3)** `startTelemetry` por processo; relay como `taskflow-relay` na porta 9465 | Dois processos observáveis separadamente ([Módulo 01](01-observabilidade.md)) |
 
 ---
@@ -747,9 +838,12 @@ meio da fila e suba de novo. Repita com SIGTERM no lugar do `kill -9` e compare 
   o passo para escalar mantendo a ordem.
 - **Transação aberta durante o envio** (até 10 s com o Kafka fora). Aceitável com um lote por vez e timeout curto;
   com muitas réplicas, cada uma seguraria uma conexão do pool esperando o lock só por instantes (`try`, não espera).
-- **Trace interrompido:** o span `publish` e o `process` do consumer não são filhos do `POST` que gravou o evento. O
-  `correlationId` atravessa (header e atributo do span); o `traceparent`, não, porque exigiria guardar o contexto do
-  trace na outbox. Decidido na 13.4: PR próprio, logo depois desta etapa.
+- **Amostragem decidida na API:** com amostragem (hoje é 100%, limitação do [Módulo 01](01-observabilidade.md)),
+  o *flag* `sampled` do `traceparent` gravado manda nos três processos: um request fora da amostra não terá o
+  relay nem o consumer no Jaeger. É o comportamento certo (o trace é inteiro ou não é), e muda a leitura de "não
+  achei o span do consumer".
+- **Traces longos quando a fila atrasa:** com o relay parado por uma hora, o `create` aparece uma hora depois do
+  `POST`, no mesmo trace. É verdade (foi o que aconteceu), mas alguns backends cortam traces por janela de tempo.
 - **Sem health check do worker:** o relay não tem HTTP. Num orquestrador, o sinal seria o `up` da métrica ou um probe
   de exec; entra junto com a decisão sobre Kubernetes.
 - **Limpeza sem índice em `published_at`:** o DELETE varre as linhas publicadas (no máximo 72 h de eventos). Com
@@ -786,6 +880,7 @@ meio da fila e suba de novo. Repita com SIGTERM no lugar do `kill -9` e compare 
 - [x] Métricas e traces do relay; suíte de streaming com Kafka real no CI (13.3)
 - [x] Consumer idempotente: marca e efeito na mesma transação, offset depois do COMMIT (13.4)
 - [x] Leitor tolerante com contrato próprio e projeção local no consumer (13.4)
+- [x] Um trace só do request ao consumer, com o tempo na outbox visível (`traceparent` pela outbox)
 - [ ] Retry e dead-letter topic (13.5)
 - [ ] Replay e painel de lag (13.6)
 - [ ] Kafka × SQS no mesmo sistema (13.7, opcional)

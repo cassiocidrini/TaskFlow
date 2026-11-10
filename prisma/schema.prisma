@@ -87,6 +87,9 @@ model OutboxMessage {
   // Diagnóstico de uma linha travada (relay, 13.3)
   attempts    Int       @default(0)
   lastError   String?   @map("last_error")
+  // Contexto de trace W3C (`traceparent`/`tracestate`) de quem gravou o evento: o relay o continua e o põe nos
+  // headers da mensagem, e o trace atravessa a outbox (Módulo 13). NULL = gravado fora de um span (scripts, seed)
+  traceContext Json?    @map("trace_context")
 
   // Parcial: o relay só procura pendentes, e o índice não cresce com o que já foi publicado
   @@index([id], map: "outbox_pending_idx", where: raw("published_at IS NULL"))

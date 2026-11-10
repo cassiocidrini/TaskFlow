@@ -9,8 +9,11 @@
  *   simultâneas (só a vencedora gera mensagem);
  * - mapper que devolve `null` (evento interno) e store sem mapper: evento gravado, nada na outbox;
  * - de ponta a ponta pelo repositório real: o evento de integração leva o `projectId` do agregado;
- * - o índice parcial das pendentes existe com o predicado certo (o relay da 13.3 depende dele).
+ * - o índice parcial das pendentes existe com o predicado certo (o relay da 13.3 depende dele);
+ * - o contexto de trace ATIVO na gravação vai para `trace_context` (é dali que o relay continua o trace); fora de
+ *   um span, NULL (e não `{}`, que diria "tem contexto").
  */
+import { trace } from '@opentelemetry/api';
 import { PrismaClient } from '@prisma/client';
 import {
   ConcurrencyConflictError,
@@ -20,6 +23,10 @@ import {
 import type { OutboxMapper } from '../../src/events/outbox';
 import { TaskAggregate } from '../../src/modules/tasks/domain/task.aggregate';
 import { EventSourcedTaskRepository } from '../../src/modules/tasks/infrastructure/event-sourced-task.repository';
+import {
+  startInMemoryTracing,
+  type InMemoryTracing,
+} from '../support/in-memory-tracing';
 import { startTestDatabase, TestDatabase } from './support/test-database';
 
 describe('Transactional Outbox (integração)', () => {
@@ -235,5 +242,47 @@ describe('Transactional Outbox (integração)', () => {
       SELECT indexdef FROM pg_indexes WHERE tablename = 'outbox' AND indexname = 'outbox_pending_idx'`;
 
     expect(index.indexdef).toMatch(/WHERE \(published_at IS NULL\)/);
+  });
+  describe('contexto de trace', () => {
+    let tracing: InMemoryTracing;
+
+    beforeAll(() => {
+      tracing = startInMemoryTracing();
+    });
+    afterAll(async () => {
+      await tracing.stop();
+    });
+
+    it('gravado dentro de um span (o request HTTP): trace_context com o traceparent DESTE span', async () => {
+      const origin = await trace
+        .getTracer('test')
+        .startActiveSpan('POST /tasks', async (span) => {
+          await eventStore.appendMany(
+            [evento('task-1', 'TaskCreated')],
+            0,
+            ator,
+            comOutbox,
+          );
+          span.end();
+          return span.spanContext();
+        });
+
+      const [row] = await prisma.outboxMessage.findMany();
+      expect(row.traceContext).toEqual({
+        traceparent: `00-${origin.traceId}-${origin.spanId}-01`,
+      });
+    });
+
+    it('gravado fora de um span (script, seed): trace_context NULL', async () => {
+      await eventStore.appendMany(
+        [evento('task-1', 'TaskCreated')],
+        0,
+        ator,
+        comOutbox,
+      );
+
+      const [row] = await prisma.outboxMessage.findMany();
+      expect(row.traceContext).toBeNull();
+    });
   });
 });
