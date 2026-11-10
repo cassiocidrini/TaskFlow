@@ -262,7 +262,10 @@ describe('Relay da outbox (integração)', () => {
       { key: 'task-1', version: 1 },
       { key: 'task-2', version: 1 },
     ]);
-    await prisma.$executeRaw`UPDATE outbox SET created_at = (now() AT TIME ZONE 'UTC') - interval '90 seconds' WHERE message_key = 'task-1'`;
+    // date_trunc: a coluna é TIMESTAMP(3), e o Postgres ARREDONDA ao gravar (.000611 vira .001). Sem truncar, o
+    // instante gravado podia ficar até 0,5 ms no futuro e, com o SELECT seguinte mais rápido que isso, a idade
+    // saía 89,999889 s (falhou uma vez no CI; Módulo 07, problema 15)
+    await prisma.$executeRaw`UPDATE outbox SET created_at = date_trunc('milliseconds', now() AT TIME ZONE 'UTC') - interval '90 seconds' WHERE message_key = 'task-1'`;
 
     const stats = await store.pendingStats();
     expect(stats.pending).toBe(2);
