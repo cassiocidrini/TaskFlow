@@ -249,7 +249,12 @@ if (!task || task.projectId !== target.projectId) {
 não existe id de usuário na rota para alguém trocar: o filtro `userId` vem do token. É anti-IDOR **por construção**,
 e o E2E prova que cada usuário vê só as próprias notificações.
 
-**6c. Menor privilégio entre processos.** O relay da outbox e o consumer de notificações têm schemas de ambiente
+**6c. Recurso de outro contexto, mesma autorização.** `GET /projects/:projectId/stats` ([Módulo 13.6a](13-mensageria-kafka.md))
+lê uma tabela que outro processo (o consumer `reports`) escreve, mas autoriza do mesmo jeito que o resto do projeto:
+`assertOwner` antes de ler, e projeto alheio ou inexistente = o **mesmo 404**. Uma rota nova não ganha regra de
+acesso própria; passa pelo ponto único. O E2E prova dono × intruso × inexistente.
+
+**6d. Menor privilégio entre processos.** O relay da outbox e os consumers do Kafka têm schemas de ambiente
 próprios e **não recebem** o `JWT_SECRET` ([`relay-env.schema.ts`](../../src/config/relay-env.schema.ts),
 [`consumer-env.schema.ts`](../../src/config/consumer-env.schema.ts)): um vazamento de ambiente num worker não
 entrega o segredo que assina tokens.

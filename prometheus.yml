@@ -16,3 +16,8 @@ scrape_configs:
   - job_name: 'taskflow-notifications'
     static_configs:
       - targets: ['host.docker.internal:9467']
+
+  # Consumer group `reports` (Módulo 13.6a): mesmo tópico, outro grupo, outro processo
+  - job_name: 'taskflow-reports'
+    static_configs:
+      - targets: ['host.docker.internal:9468']

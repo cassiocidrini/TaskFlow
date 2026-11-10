@@ -1,5 +1,5 @@
 /**
- * Ambiente do consumer de notificações (`consumerEnvSchema`) — Módulo 13.4.
+ * Ambiente dos consumers do Kafka (`consumerEnvSchema`) — Módulos 13.4 e 13.6a.
  *
  * Mesmo contrato do relay: sobe SEM `JWT_SECRET` (menor privilégio), com defaults de desenvolvimento, e reaproveita
  * a validação de `KAFKA_BROKERS` do relay (uma regra só para os dois processos).
@@ -13,6 +13,7 @@ describe('consumerEnvSchema', () => {
     expect(validateConsumerEnv(minimo)).toMatchObject({
       KAFKA_BROKERS: ['localhost:9092'],
       NOTIFICATIONS_METRICS_PORT: 9467,
+      REPORTS_METRICS_PORT: 9468, // cada consumer na sua porta: dois no mesmo host não disputam a 9467
     });
   });
 

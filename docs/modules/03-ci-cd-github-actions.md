@@ -91,7 +91,7 @@ flowchart LR
 **O 4º job, `streaming` (Módulo 13.3).** A suíte `test:streaming` sobe um **Kafka real** (`apache/kafka:4.3.2`, a
 mesma imagem do compose) além do Postgres, e prova o caminho outbox → relay → tópico. Ganhou job próprio, em vez de
 entrar no de integração, pelos mesmos motivos da tabela: só ela paga o custo do broker (~400 MB, ~10 s de boot), e
-um vermelho nela aponta direto para a mensageria. Com a 13.5, a suíte passou de ~19 s para ~54 s: o teste do DLT
+um vermelho nela aponta direto para a mensageria. Com a 13.5, a suíte passou de ~19 s para ~54 s (~61 s com o `reports` da 13.6a): o teste do DLT
 indisponível espera um timeout **real** do produtor (10 s), porque é a única forma de provar que a mensagem não sai da
 partição sem o ack.
 

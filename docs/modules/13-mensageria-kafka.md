@@ -2,8 +2,8 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.5 de 13.8** (retry classificado e dead-letter topic no consumer). Cada etapa
-> acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **13.6a de 13.8** (consumer group `reports`, com idempotência pela versão do
+> agregado). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`docker-compose.yml`](../../docker-compose.yml) (serviços `kafka` e `kafka-init`, profile
@@ -17,7 +17,9 @@
 > [`kafka-consumer.runner.ts`](../../src/common/messaging/kafka-consumer.runner.ts) e
 > [`modules/notifications/`](../../src/modules/notifications/consumer/notifications.handler.ts) ·
 > contexto de trace em [`trace-context.ts`](../../src/common/telemetry/trace-context.ts) ·
-> classificação de falhas e DLT em [`consumer-errors.ts`](../../src/common/messaging/consumer-errors.ts)
+> classificação de falhas e DLT em [`consumer-errors.ts`](../../src/common/messaging/consumer-errors.ts) ·
+> relatórios em [`src/reports-consumer.ts`](../../src/reports-consumer.ts) e
+> [`modules/reports/`](../../src/modules/reports/consumer/reports.handler.ts)
 
 ---
 
@@ -45,13 +47,15 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | **13.4** | Consumer group `notifications` com **idempotência** (`processed_events` na mesma transação do efeito) | ✅ |
 | 13.4 + | **Um trace só** do request ao consumer: `traceparent` gravado na outbox e propagado no header do Kafka | ✅ |
 | **13.5** | **Retry classificado** (banco fora nunca vai ao DLT) e **dead-letter topic** por consumer group | ✅ |
-| 13.6 | Consumer group `reports` (projeção `project_stats`), **replay** e painel de **lag** | 🔜 |
+| **13.6a** | Consumer group `reports` (projeção `project_stats`) com **idempotência pela versão** do agregado, e `GET /projects/:projectId/stats` | ✅ |
+| 13.6b | **Replay** a partir do Event Store, *redrive* do DLT e limpeza de `processed_events` | 🔜 |
+| 13.6c | `kafka-exporter`, painel de **lag** e regras de alerta | 🔜 |
 | 13.7 | *(opcional)* Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda | 🔜 |
 | 13.8 | ADRs e o diagrama final | 🔜 |
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 13.5)
+## 🏗️ Arquitetura (estado atual: 13.6a)
 
 ```mermaid
 flowchart LR
@@ -83,7 +87,13 @@ flowchart LR
     C --> NT
     C --> NO
     API -.->|"GET /me/notifications<br/>(só leitura)"| NO
-    T1 -.->|"13.6"| REP["group reports"]
+    subgraph rep["Processo do consumer (group reports)"]
+        RC["ReportsConsumer<br/>métricas :9468"]
+    end
+    T1 -->|"mesmo tópico, outro grupo<br/>(offset próprio)"| RC
+    RC -->|"UMA transação:<br/>guarda de versão + delta"| RS[("report_tasks<br/>project_stats")]
+    RC -->|"mensagem envenenada"| RDLT[("taskflow.reports-dlt.v1")]
+    API -.->|"GET /projects/:id/stats<br/>(só leitura)"| RS
 ```
 
 A API **não fala com o Kafka** em nenhuma direção: grava evento e outbox na mesma transação, e lê as notificações
@@ -114,7 +124,8 @@ as tabelas da API (fronteira por convenção; ver "Limitações").
 a mensagem continua no log até a retenção vencer. Por isso, no Kafka:
 
 - um consumidor novo pode ler o histórico desde o início (`fromBeginning`);
-- um consumidor com bug pode **voltar o offset** e reprocessar (*replay*, etapa 13.6);
+- um consumidor com bug pode **voltar o offset** e reprocessar (*replay*; o item 11 de "Como reproduzir" refaz o
+  grupo `reports` do início);
 - vários grupos leem o mesmo fato sem que o broker precise copiar a mensagem para cada um.
 
 ### Partições: paralelismo e ordem são a mesma decisão
@@ -213,7 +224,7 @@ O formato publicado (envelope + `data`), real, tirado da outbox:
 |---|---|
 | `eventId` | Chave de idempotência: "já processei este?" (13.4). É o mesmo `metadata.eventId` do Event Store |
 | `eventType` + `eventVersion` | Rotear e escolher como ler o `data`. `eventVersion` é do **contrato**, independente do `schemaVersion` interno |
-| `aggregateId` + `aggregateVersion` | Ordem: o consumer detecta evento repetido ou atrasado ("já estou na versão 3, ignoro a 2") — 13.6 |
+| `aggregateId` + `aggregateVersion` | Ordem: o consumer detecta evento repetido ou atrasado ("já estou na versão 3, ignoro a 2"). É a idempotência do `reports` (13.6a) |
 | `projectId` | Contexto. O `TaskCompleted` de domínio **não tem** `projectId`; sem ele, um consumer de relatório por projeto teria que consultar a nossa API para cada evento |
 | `actorId`, `correlationId` | Auditoria e rastreio da requisição de origem (Módulo 01) nos logs do consumer |
 | `occurredAt` | Quando foi gravado. É o **mesmo instante** de `events.created_at` (um `new Date()` só, explícito, para os dois) |
@@ -327,7 +338,7 @@ martelado a cada 500 ms.
 
 Regras de alerta sugeridas (o provisionamento de alertas é limitação do Módulo 01):
 `outbox_oldest_pending_age_seconds > 60` por 2 min, `up{job="taskflow-relay"} == 0` por 1 min e
-`increase(outbox_relay_failures_total[5m]) > 0`. O painel no Grafana entra junto com o de lag dos consumers (13.6).
+`increase(outbox_relay_failures_total[5m]) > 0`. O painel no Grafana entra junto com o de lag dos consumers (13.6c).
 
 ### O consumer idempotente (13.4)
 
@@ -348,7 +359,7 @@ COMMIT;
 | Escolha | Por quê |
 |---|---|
 | Marca e efeito na **mesma transação** | Marca sem efeito = notificação perdida para sempre; efeito sem marca = notificação duplicada na reentrega. É o dual-write da 13.2, agora do lado do consumer. Prova: com a marca fora da transação, o teste "efeito falhou" mostra o evento marcado e nenhuma notificação |
-| PK `(consumer_group, event_id)` | Cada grupo deduplica sozinho: o `reports` (13.6) processa o mesmo evento por conta própria |
+| PK `(consumer_group, event_id)` | Cada grupo deduplica sozinho. (O `reports`, 13.6a, acabou usando outra forma de idempotência: a versão do agregado) |
 | Duas entregas **simultâneas** | O 2º `INSERT` espera o lock da PK até o 1º COMMIT e então não insere nada. Testado com 5 entregas paralelas: 1 `processed`, 4 `duplicate` |
 | Offset commitado **depois** do COMMIT | Crash no meio = reentrega, que a marca absorve. Commitar **antes** seria *at-most-once*: um crash perderia o evento sem ninguém saber |
 | `processed_events` em vez de um `UNIQUE` na tabela de efeito | Quando o efeito é um INSERT, um `UNIQUE(event_id)` também deduplicaria. A tabela de marcas generaliza para efeitos que não são INSERT (atualizar um saldo, chamar uma API externa com chave de idempotência) |
@@ -442,7 +453,7 @@ o `TaskCompleted` passaria na frente do `TaskAssigned` que está esperando, e es
 quem notificar. Vale quando a ordem não importa; aqui, não.
 
 **Um DLT por consumer group** (`taskflow.notifications-dlt.v1`), e não um `taskflow.task-events.v1.dlt` compartilhado.
-A falha é do **consumer**, não do evento: o grupo `reports` (13.6) pode processar normalmente a mesma mensagem. E
+A falha é do **consumer**, não do evento: o grupo `reports` (13.6a) pode processar normalmente a mesma mensagem. E
 reprocessar a partir de um DLT compartilhado reentregaria a mensagem a todos os grupos. Retenção de **30 dias**, maior
 que os 7 do tópico de origem: é o prazo para alguém investigar.
 
@@ -518,7 +529,77 @@ UPDATE outbox
  WHERE id = <id>;
 ```
 
-Nada se perde: o evento continua no Event Store (a fonte da verdade), e republicá-lo depois é o replay da 13.6.
+Nada se perde: o evento continua no Event Store (a fonte da verdade), e republicá-lo depois é o replay da 13.6b.
+
+### Dois grupos, um tópico: o consumer `reports` (13.6a)
+
+O grupo `reports` lê o **mesmo** `taskflow.task-events.v1` que o `notifications`, com **offset próprio**: cada grupo
+recebe todas as mensagens, um não espera o outro, e o lag é medido por grupo. No trace de um request, o mesmo `create`
+do relay tem dois filhos, um em cada processo, rodando em paralelo (medido: os dois `process` começaram 8 ms depois do
+`create`). É o *fan-out* que no SNS+SQS exigiria uma fila por assinante.
+
+Ele mantém, por projeto: tarefas por status, abertas sem responsável e lead time médio (criação → conclusão), lidos pela
+API em `GET /projects/:projectId/stats`.
+
+**Outra forma de idempotência: pela versão do agregado.** O `notifications` deduplica com uma tabela de marcas
+(`processed_events`), porque o efeito dele (inserir uma notificação) não tem estado com o que comparar. O `reports`
+mantém **estado com versão**: `report_tasks` guarda, por tarefa, a última `aggregateVersion` aplicada.
+
+```text
+BEGIN
+  SELECT report_tasks WHERE task_id = X FOR UPDATE        versão guardada >= versão do evento → duplicata, sai
+  UPDATE report_tasks (status, responsável, versão do evento)
+  UPDATE project_stats SET pending = pending + $delta, …    incremento atômico
+COMMIT
+```
+
+| | `notifications` (13.4) | `reports` (13.6a) |
+|---|---|---|
+| Idempotência | Tabela de marcas por `eventId` | Versão do agregado (monotônica) |
+| Custo | Uma linha por evento, para sempre (a limpeza é a 13.6b) | Uma linha por **tarefa**, que não cresce com os eventos |
+| Reconhece versão antiga chegando depois da nova | Não (o `eventId` é outro) | Sim |
+| Serve quando | O efeito não tem estado para comparar | Há estado por chave e ordem por chave |
+
+**Guarda `>=` (já aplicada), e não "tem que ser a versão seguinte".** Ser estrito detectaria buracos, mas o contrato
+permite eventos internos que o mapper não publica (o `null` da 13.2): um buraco de versão pode ser legítimo.
+
+**Concorrência, nos dois níveis:**
+- **mesma tarefa:** sempre na mesma partição, mas um rebalance pode deixar dois consumers com a mesma mensagem por um
+  instante. O `FOR UPDATE` serializa, e o segundo vê a versão já aplicada. Mutação: sem o `FOR UPDATE`, 5 entregas
+  simultâneas aplicaram o `-1` de "sem responsável" duas vezes, e quem barrou foi o **CHECK** do banco;
+- **mesmo projeto:** tarefas diferentes, em partições diferentes, atualizam a **mesma linha** de `project_stats` em
+  paralelo. `SET done = done + $delta` é atômico no Postgres. Mutação: com "ler, somar no Node e gravar", **20
+  conclusões em paralelo viraram `done = 3`** (17 contagens perdidas, *lost update*), nas 2 execuções.
+
+**A linha do projeto nasce no `TaskCreated`, por upsert** (`INSERT … ON CONFLICT DO UPDATE SET total = total + 1`):
+duas primeiras tarefas de um projeto em partições diferentes não disputam o INSERT. Os outros eventos fazem `UPDATE`
+puro. A divisão não é estética: o Postgres avalia o CHECK na **linha candidata do INSERT antes de resolver o
+`ON CONFLICT`**, e um delta negativo no `VALUES` era recusado mesmo indo para o UPDATE (problema 25).
+
+**CHECK de contadores não negativos.** Fica no SQL da migração (o Prisma não modela CHECK, e por isso não o vê como
+drift; conferido com uma migração vazia). Um bug de delta vira erro na transação (e o DLT), em vez de um número
+errado gravado em silêncio. Já pegou dois defeitos: o do upsert, no primeiro teste, e a mutação sem `FOR UPDATE`.
+
+**Dois casos de borda, com destino diferente:**
+
+| Caso | Resultado | Por quê |
+|---|---|---|
+| Evento de tarefa sem `TaskCreated` conhecido (criada antes da outbox) | `unknown_task`, nada escrito, aviso no log | Não está envenenado: falta histórico. Quem corrige é o replay do Event Store (13.6b) |
+| Evento que diz outro projeto que o guardado para a tarefa | `InvalidReportMessageError` → **DLT na 1ª falha** | Uma tarefa não muda de projeto; a mensagem contradiz o que a projeção sabe. Somar no projeto do evento descasaria os dois. Achado com dados reais (problema 26) |
+
+**`asOf` na resposta.** É o `occurredAt` do evento mais recente aplicado ao projeto, e só avança (`GREATEST`, porque
+eventos de partições diferentes chegam fora de ordem entre si). É a consistência eventual **visível** para o cliente:
+"estes números valem até 19:10:59". Projeto sem nenhum evento devolve zeros e `asOf: null`, e não 404: o projeto
+existe, só não há o que contar.
+
+**A pergunta que um entrevistador faria: por que não `SELECT status, count(*) FROM tasks_read GROUP BY status`?**
+Nesta escala, **seria mais simples**, e responderia em milissegundos. O consumer se justifica em três pontos, nenhum
+deles de desempenho hoje:
+1. **independência:** em microsserviços, o serviço de relatórios não teria acesso ao banco da API; ele só tem o tópico;
+2. **reconstrução:** é o primeiro read model alimentado pelo **tópico**, e não pelo `EventBus` em memória. Pode ser
+   refeito por replay (13.6b), e é o caminho que as limitações do [Módulo 05](05-event-sourcing-cqrs.md) apontam para
+   as projeções internas;
+3. **escala:** com milhões de tarefas, os contadores e o lead time pré-calculados evitam varrer tudo a cada leitura.
 
 ### Um trace só através da outbox (`traceparent`)
 
@@ -851,6 +932,39 @@ curl -s localhost:9467/metrics | grep -E "kafka_consumer_(messages|retries)_tota
 ~45 s e `docker start taskflow-postgres`. O log mostra as tentativas `infrastructure` passando do limite (500 ms →
 30 s), o DLT não recebe nada, e tudo é processado depois que o banco volta.
 
+### 11. O consumer de relatórios (13.6a)
+
+```bash
+npm run consumer:reports:dev     # build: npm run start:consumer:reports (métricas em :9468)
+```
+
+Com API, relay e os dois consumers rodando, crie tarefas num projeto, mude status e conclua uma:
+
+```bash
+curl -s localhost:3000/projects/$PROJECT_ID/stats -H "authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "projectId": "263ede8a-…", "total": 3,
+  "byStatus": { "pending": 1, "inProgress": 1, "done": 1 },
+  "unassignedOpen": 2, "avgLeadTimeSeconds": 1, "asOf": "2026-11-10T19:10:59.206Z"
+}
+```
+
+```bash
+# Os dois grupos no mesmo tópico, cada um com o seu offset e o seu lag
+for g in notifications reports; do
+  docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+    --bootstrap-server localhost:9092 --describe --group $g
+done
+
+# Reconstruir a projeção do zero a partir do que o tópico retém (7 dias): pare o consumer e então
+docker compose --profile streaming exec kafka /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --delete --group reports
+# TRUNCATE report_tasks, project_stats; e suba o consumer de novo (grupo novo lê do início)
+```
+
 ---
 
 ## ⚠️ Problemas encontrados e soluções
@@ -881,6 +995,8 @@ curl -s localhost:9467/metrics | grep -E "kafka_consumer_(messages|retries)_tota
 | 22 | **(13.5)** O teste "DLT indisponível" passava, mas a mutação "commitar sem o ack do DLT" **sobrevivia** | Corrida: o teste dormia 12 s e criava o DLT; o join do grupo atrasou o 1º envio, e o tópico apareceu **antes** do timeout de 10 s. O envio nunca falhou | O teste espera a falha acontecer (o log do runner) antes de criar o DLT. Com a mutação, quebra mostrando a mensagem de trás furando a fila. Lição: um teste só prova um caminho de erro se o erro **aconteceu** |
 | 23 | **(13.5)** O teste comparava o `event-id` do DLT com `undefined` | O cliente converte os headers da mensagem enviada para o formato interno **no próprio objeto** passado ao `send` | Valores copiados antes do envio |
 | 24 | **(13.5)** O header `dlt-error-message` saía em várias linhas no `kafka-console-consumer` | A mensagem de erro do zod tem quebras de linha | Espaços normalizados (uma linha só) e tamanho limitado a 500 caracteres; coberto no teste de streaming |
+| 25 | **(13.6a)** No primeiro teste, todo evento depois do `TaskCreated` falhava com `violates check constraint` | O upsert único (`INSERT … VALUES ($delta) ON CONFLICT DO UPDATE`) mandava o delta negativo na linha candidata, e o Postgres avalia o CHECK **antes** de resolver o `ON CONFLICT` | Upsert só no `TaskCreated` (deltas sempre positivos); os outros eventos fazem `UPDATE` puro, e a linha ausente vira erro. O CHECK pegou um defeito do próprio desenho no primeiro teste |
+| 26 | **(13.6a)** Na 1ª subida sobre o tópico de desenvolvimento: 33 falhas `unknown`, 6 mensagens no DLT por esgotamento e as partições presas ~7,5 s por mensagem | O script da demo da 13.5 gerava um `projectId` aleatório **por evento**: o `TaskAssigned` de uma tarefa dizia outro projeto que o `TaskCreated`. O handler confiava no projeto de cada evento e não achava a linha | Evento que contradiz o projeto guardado da tarefa é `InvalidReportMessageError` (DLT na 1ª falha). Refeita do zero: 70 mensagens assim foram ao DLT sem nenhuma nova tentativa, e o grupo zerou o lag em 3,4 s. O dado era lixo de demo; a premissa não verificada era real |
 
 ---
 
@@ -967,6 +1083,20 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Testes novos | 18 unitários (classificação com os formatos reais de erro, decisão, backoff), 4 de streaming (poison pill + restart, falha desconhecida até o DLT, banco fora sem DLT, DLT indisponível sem perda) |
 | Suítes | 236 unitários · 48 integração · 44 E2E · 10 streaming (~54 s, 3 execuções estáveis) |
 
+**13.6a — consumer `reports`** (processos em `node dist/...`)
+
+| Experimento | Resultado |
+|---|---|
+| 1ª subida do grupo sobre o tópico de desenvolvimento (1009 mensagens, semanas de dados e demos) | Lag 0 em **3,4 s** (com o boot do processo): **934 `processed` + 3 `duplicate` + 72 `dead_lettered`** = 1009. No DLT: 70 eventos com projeto trocado (lixo do script da 13.5) e as 2 *poison pills*, todos na 1ª tentativa |
+| Pela API: 3 tarefas, uma em andamento, uma concluída | `total 3`, `pending 1`, `inProgress 1`, `done 1`, `unassignedOpen 2`, lead time ~1 s, `asOf` preenchido; outro usuário recebe 404 |
+| Trace de uma conclusão | `create` do relay com **dois** `process` filhos (`taskflow-reports` e `taskflow-notifications`), os dois 8 ms depois, em paralelo |
+| Lag dos dois grupos depois da demo | 0 e 0, cada um com os próprios offsets |
+| **Mutação:** sem a guarda de versão | 3 testes quebram (mesma mensagem 2×, versão antiga depois da nova, 5 entregas simultâneas) |
+| **Mutação:** "ler, somar e gravar" no lugar do incremento | 20 conclusões em paralelo → **`done = 3`** (17 perdidas) |
+| **Mutação:** sem `FOR UPDATE` | 5 entregas simultâneas: o CHECK recusa o contador negativo (segunda linha de defesa) |
+| Testes novos | 19 unitários (deltas de cada transição, invariante do ciclo, leitor tolerante, ambiente), 9 de integração (guarda de versão, concorrência nos dois níveis, tarefa desconhecida, projeto trocado, `asOf`, CHECK), 5 E2E (rota, dono × intruso, projeto vazio), 1 de streaming (dois grupos e republicação) |
+| Suítes | 255 unitários · 57 integração · 49 E2E · 11 streaming (~61 s, 3 execuções estáveis) |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -981,14 +1111,20 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Tópico sem ninguém lendo | **(13.4)** Consumer group `notifications`, idempotente, com contrato próprio e projeção local; `GET /me/notifications` na API | O primeiro efeito de verdade dos eventos fora do processo da API |
 | Três traces sem ligação: `POST`, `publish` do relay e `process` do consumer | **(13.4 +)** Um trace só, do request à notificação: `traceparent` gravado na outbox, `create` por mensagem no relay, `process` filho dele no consumer | Dá para seguir um evento pelos três processos e ver onde o tempo foi gasto (na outbox, não no Kafka) |
 | Mensagem envenenada travava a partição para sempre | **(13.5)** Falhas classificadas: contrato violado vai ao DLT na hora, banco fora tenta para sempre, o resto 5 vezes; DLT por grupo, com ack antes do commit | Uma *poison pill* não para mais 1/3 do sistema, e uma queda do banco não esvazia o tópico no DLT |
+| Um consumer group no tópico | **(13.6a)** Dois grupos, `notifications` e `reports`, cada um com offset, processo, DLT e forma de idempotência próprios; `GET /projects/:projectId/stats` | O primeiro read model alimentado pelo tópico, reconstruível, com a idempotência pela versão do agregado |
 | Um processo de telemetria (`tracing.ts` fixo) | **(13.3)** `startTelemetry` por processo; relay como `taskflow-relay` na porta 9465 | Dois processos observáveis separadamente ([Módulo 01](01-observabilidade.md)) |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
+- **Tarefas anteriores à outbox ficam fora dos relatórios** (`unknown_task`): o `TaskCreated` delas nunca foi
+  publicado. O replay do Event Store (13.6b) resolve.
+- **Reconstruir a projeção depende da retenção do tópico (7 dias)** enquanto não houver replay do Event Store (13.6b).
+- **`project_stats` é uma linha quente por projeto:** em escala, um projeto muito ativo serializa os UPDATEs nela.
+  O próximo passo seria contadores particionados (N linhas por projeto, somadas na leitura).
 - **DLT sem reprocessamento automático.** Hoje se inspeciona com o `kafka-console-consumer`; reenviar a mensagem
-  corrigida é o *redrive*, que entra com o replay (13.6).
+  corrigida é o *redrive*, que entra com o replay (13.6b).
 - **O DLT troca ordem por disponibilidade:** as mensagens seguintes da mesma tarefa passam sem a desviada (ver "O
   trade-off honesto"). Estacionar a chave fica registrado, não implementado.
 - **Banco fora para a partição inteira, por quanto tempo durar**, e a volta leva até 30 s (o teto do backoff). É a
@@ -998,7 +1134,7 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - **Contagem de tentativas em memória:** um restart ou rebalance recomeça a contagem de uma falha `unknown`. Só atrasa
   o DLT; não perde nada.
 - **`processed_events` cresce para sempre.** A marca precisa durar pelo menos a retenção do tópico (7 dias) mais a
-  janela de um replay; uma limpeza por data entra junto com o replay (13.6).
+  janela de um replay; uma limpeza por data entra junto com o replay (13.6b).
 - **Fronteira entre contextos por convenção:** API e consumer usam o mesmo Postgres. Em microsserviços seriam bancos
   separados; aqui a regra (o consumer não lê as tabelas da API; a API só **lê** as notificações) está no AGENTS.md.
 - **Grupo novo lê o histórico retido:** a primeira subida de um consumer notifica eventos de até 7 dias atrás.
@@ -1022,9 +1158,9 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - **As projeções internas continuam no `EventBus` em memória**, depois do commit. Se o processo cair entre o commit e
   a projeção, o read model fica desatualizado (o dual-write do [Módulo 05](05-event-sourcing-cqrs.md)). A outbox
   resolve o caminho do **Kafka**, não esse. O caminho natural seria a projeção consumir do tópico, como os consumer
-  groups das etapas 13.4 e 13.6.
+  groups `notifications` e `reports` já fazem.
 - **Eventos gravados antes da 13.2 não estão na outbox.** Publicá-los é um replay a partir da tabela `events`
-  (etapa 13.6).
+  (etapa 13.6b).
 - **`partialIndexes` é preview feature do Prisma.** Se mudar de forma numa versão futura, o índice vai para o SQL da
   migração com uma exceção documentada para o drift.
 - **Um nó só:** RF 1, sem ISR; perder o broker é perder o log. É ambiente de desenvolvimento.
@@ -1054,7 +1190,9 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - [x] Um trace só do request ao consumer, com o tempo na outbox visível (`traceparent` pela outbox)
 - [x] Retry classificado e dead-letter topic por grupo, com ack antes do commit (13.5)
 - [x] DLQ no relay avaliada e recusada, com runbook (13.5)
-- [ ] Replay e painel de lag (13.6)
+- [x] Segundo consumer group no mesmo tópico, com idempotência pela versão do agregado e concorrência provada (13.6a)
+- [ ] Replay, *redrive* do DLT e limpeza de `processed_events` (13.6b)
+- [ ] Painel de lag e alertas (13.6c)
 - [ ] Kafka × SQS no mesmo sistema (13.7, opcional)
 - [ ] ADRs (13.8)
 
