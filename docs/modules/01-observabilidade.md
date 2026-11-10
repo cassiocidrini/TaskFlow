@@ -187,6 +187,9 @@ scrape_configs:
   - job_name: 'taskflow-relay'          # relay da outbox (Módulo 13.3), processo separado
     static_configs:
       - targets: ['host.docker.internal:9465']
+  - job_name: 'taskflow-notifications'  # consumer group notifications (Módulo 13.4)
+    static_configs:
+      - targets: ['host.docker.internal:9467']
 ```
 
 ```bash

@@ -15,6 +15,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { TasksModule } from './modules/tasks/tasks.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ProjectsModule } from './modules/projects/projects.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
 
 /**
  * Módulo raiz: compõe a aplicação.
@@ -28,7 +29,7 @@ import { ProjectsModule } from './modules/projects/projects.module';
  * - **Logs JSON (`nestjs-pino`):** um log de acesso por requisição e os `Logger` do Nest encaminhados ao pino
  *   (`app.useLogger` no `main.ts`), todos com `correlationId`, `trace_id` e `span_id`. Configuração em
  *   `common/logging/logger.options.ts`.
- * - **Ordem dos imports = ordem de dependência** (Auth → Projects → Tasks), só para leitura: o Nest resolve
+ * - **Ordem dos imports = ordem de dependência** (Auth → Projects → Tasks → Notifications), só para leitura: o Nest resolve
  *   qualquer ordem.
  */
 @Module({
@@ -51,6 +52,7 @@ import { ProjectsModule } from './modules/projects/projects.module';
     AuthModule,
     ProjectsModule,
     TasksModule,
+    NotificationsModule,
     HealthModule,
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],

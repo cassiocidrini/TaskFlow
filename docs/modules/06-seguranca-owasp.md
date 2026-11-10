@@ -1,6 +1,6 @@
 # Módulo 06 — Segurança (OWASP Top 10)
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 18/10/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
 >
 > **Onde vive no código:** [`src/app.setup.ts`](../../src/app.setup.ts) (Helmet, CORS, validação) ·
 > [`src/modules/auth/`](../../src/modules/auth/) · [`projects.service.ts`](../../src/modules/projects/projects.service.ts)
@@ -244,6 +244,15 @@ if (!task || task.projectId !== target.projectId) {
   throw new NotFoundException('Tarefa não encontrada');   // o MESMO 404
 }
 ```
+
+**6b. Recurso "meu" sem id na URL (`/me/...`).** Em `GET /me/notifications` ([Módulo 13.4](13-mensageria-kafka.md)),
+não existe id de usuário na rota para alguém trocar: o filtro `userId` vem do token. É anti-IDOR **por construção**,
+e o E2E prova que cada usuário vê só as próprias notificações.
+
+**6c. Menor privilégio entre processos.** O relay da outbox e o consumer de notificações têm schemas de ambiente
+próprios e **não recebem** o `JWT_SECRET` ([`relay-env.schema.ts`](../../src/config/relay-env.schema.ts),
+[`consumer-env.schema.ts`](../../src/config/consumer-env.schema.ts)): um vazamento de ambiente num worker não
+entrega o segredo que assina tokens.
 
 **7. Autorização antes de qualquer efeito.** Num Event Store *append-only*, um evento gravado indevidamente **nunca
 mais sai**. Por isso a verificação vem **antes** do `append`, e um teste prova que, sem permissão, **zero eventos**

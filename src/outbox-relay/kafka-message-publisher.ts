@@ -2,6 +2,7 @@ import { BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { KafkaJS } from '@confluentinc/kafka-javascript';
 import type { RelayEnv } from '../config/relay-env.schema';
+import { toKafkaLogger } from '../common/messaging/kafka-logger';
 import { MessagePublisher, type OutgoingMessage } from './message-publisher';
 
 /**
@@ -97,39 +98,4 @@ export class KafkaMessagePublisher
     });
     await this.connected;
   }
-}
-
-/**
- * Logs da librdkafka pelo Logger do Nest (pino no processo do relay). O logger padrão do cliente faz
- * `console.warn({ ...objeto })`: um objeto multilinha fora do JSON, que um agregador de logs quebraria em vários
- * registros soltos. Aqui sai uma linha JSON por evento, com os campos da librdkafka em `kafka`.
- */
-export function toKafkaLogger(
-  logger: Logger,
-  initial = KafkaJS.logLevel.WARN,
-): KafkaJS.Logger {
-  let level = initial;
-  const entry = (message: string, extra?: object) => ({
-    msg: message,
-    kafka: extra,
-  });
-  const adapter: KafkaJS.Logger = {
-    error: (message, extra) => {
-      if (level >= KafkaJS.logLevel.ERROR) logger.error(entry(message, extra));
-    },
-    warn: (message, extra) => {
-      if (level >= KafkaJS.logLevel.WARN) logger.warn(entry(message, extra));
-    },
-    info: (message, extra) => {
-      if (level >= KafkaJS.logLevel.INFO) logger.log(entry(message, extra));
-    },
-    debug: (message, extra) => {
-      if (level >= KafkaJS.logLevel.DEBUG) logger.debug(entry(message, extra));
-    },
-    namespace: () => adapter,
-    setLogLevel: (newLevel) => {
-      level = newLevel;
-    },
-  };
-  return adapter;
 }
