@@ -17,6 +17,7 @@ funciona; os ADRs registram **por que** ela é assim e **quando** a decisão dei
 | [0009](0009-idempotencia-de-requisicoes-na-transacao-do-efeito.md) | Idempotência de requisições (`Idempotency-Key`) na mesma transação do efeito | Aceito | 14.5 |
 | [0010](0010-feature-flags-proprias.md) | Feature flags em módulo próprio (porta + Postgres), e não um serviço gerenciado | Aceito | 14.6 |
 | [0011](0011-criterio-de-avanco-do-rollout.md) | Critério de avanço do rollout da `task-list-with-stats` (variante × controle, relativo E absoluto) | Aceito | 14.7 |
+| [0012](0012-versionamento-da-api-e-janela-de-suporte.md) | Versionamento da API (sem versão na URL por padrão) e janela de suporte (6 meses, 90 dias de aviso) | Aceito | 14.8 |
 
 ## Formato
 

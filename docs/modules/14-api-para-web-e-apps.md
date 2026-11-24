@@ -2,8 +2,8 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
-> **Status:** 🚧 em construção, etapa **14.7 de 14.8** (a primeira funcionalidade atrás de uma flag, com critério de avanço). Cada etapa acrescenta a sua parte a
-> este documento; o mapa completo está em "Roteiro do módulo", logo abaixo.
+> **Status:** ✅ concluído (14.1 a 14.8). Comece por "A política em uma página", logo abaixo do objetivo: ela liga cada
+> decisão à etapa e ao ADR que a sustentam.
 >
 > **Onde vive no código:** [`src/common/client/`](../../src/common/client/client-info.ts) (headers, parser de versão,
 > middleware e `@AppClient()`) · [`request-span.ts`](../../src/common/telemetry/request-span.ts) ·
@@ -37,6 +37,39 @@ e todos os apps que ainda estão por aí. As perguntas que o módulo responde:
 3. **Como mudar a API sem quebrar quem não atualizou?** (14.3, 14.4)
 4. **Como sobreviver à rede ruim do celular, que repete requisições?** (14.5)
 5. **Como ligar e desligar funcionalidades sem publicar versão nova na loja?** (14.6, 14.7)
+6. **Qual é a regra que junta tudo isso?** (14.8)
+
+---
+
+## 📌 A política em uma página
+
+A resposta para *"como vocês versionam a API?"* ([ADR-0012](../adr/0012-versionamento-da-api-e-janela-de-suporte.md)):
+**sem versão na URL por padrão.** A API evolui só com mudanças compatíveis, o cliente é um leitor tolerante (ignora o
+que não conhece), e o que precisa quebrar passa por depreciação com prazo. `/v2` só para redesenho de um recurso.
+
+**A janela de suporte:**
+
+| Regra | Valor |
+|---|---|
+| Versões do app suportadas | As lançadas nos **últimos 6 meses** |
+| Subir a versão mínima | Só até uma versão lançada há 6 meses ou mais; bug grave ou de segurança: **na hora** |
+| Aviso de depreciação | `Sunset` pelo menos **90 dias** depois do `Deprecation` (o CI confere) |
+| Web | Sem janela; abas abertas recebem a versão mínima do web |
+
+**O mapa de decisão: "o que eu uso para esta mudança?"**
+
+| Mudança | Ferramenta | Etapa · ADR |
+|---|---|---|
+| Campo ou rota novo, opcional | Só fazer: o oasdiff confirma que é compatível | 14.3 |
+| Renomear ou mudar o formato de um campo | Expand → `Sunset` → versão mínima → contract (código e banco em deploys separados) | 14.4 · [0008](../adr/0008-depreciacao-e-remocao-de-campos-da-api.md) |
+| Funcionalidade nova arriscada | Feature flag, rollout por variante com critério escrito antes, e data para a flag sair | 14.6, 14.7 · [0010](../adr/0010-feature-flags-proprias.md), [0011](../adr/0011-criterio-de-avanco-do-rollout.md) |
+| Versão do app quebrada | Versão mínima → 426, sem deploy | 14.2 |
+| Operação que não pode duplicar | `Idempotency-Key`, com a chave na transação do efeito | 14.5 · [0009](../adr/0009-idempotencia-de-requisicoes-na-transacao-do-efeito.md) |
+| Redesenho de um recurso | `/v2` em paralelo, durante a janela de suporte | [0012](../adr/0012-versionamento-da-api-e-janela-de-suporte.md) |
+
+**O que o CI garante, e o que é decisão** (a lição da 14.4b): o CI pega a quebra **acidental** (o oasdiff sobre o
+contrato versionado) e o aviso curto demais (o teste da lista de campos depreciados). A quebra **planejada** é decidida
+pelos critérios: o `Sunset`, a versão mínima, a métrica de uso.
 
 ---
 
@@ -53,27 +86,35 @@ e todos os apps que ainda estão por aí. As perguntas que o módulo responde:
 | **14.5** | `Idempotency-Key` no `POST /tasks`: a nova tentativa devolve a mesma resposta; a chave gravada na mesma transação da tarefa (ADR-0009) | ✅ |
 | **14.6** | Feature flags em módulo próprio (ADR-0010): kill switch, restrições de plataforma e versão, lista de usuários, porcentagem por bucket; `GET /me/features`; `npm run feature-flag` com auditoria | ✅ |
 | **14.7** | `stats` do projeto na listagem atrás da flag `task-list-with-stats`; métricas por variante, painel e 2 alertas testados; critério de avanço no ADR-0011 | ✅ |
-| 14.8 | Estratégia de versionamento com janela de suporte | 🔜 |
+| **14.8** | A política que junta tudo (ADR-0012): sem versão na URL por padrão, janela de suporte de 6 meses, 90 dias de aviso conferidos no CI, o mapa de decisão | ✅ |
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 14.2)
+## 🏗️ Arquitetura
+
+O caminho de uma requisição de app, com a etapa de cada camada:
 
 ```text
-                 app.use() (Express)                                  middlewares de módulo (Nest)
-request ─▶ correlationId ─▶ clientInfo ─▶ helmet · cors ─▶ pino-http ─▶ VersionGate ─▶ guards (JWT…) ─▶ handler
-                             │                               │            │                               │
-                             ├─ req.appClient ───────────────┼─ log       ├─ abaixo da mínima: 426        └─ @AppClient()
-                             ├─ span: taskflow.client.*      │  client{…} ├─ abaixo da recomendada:
-                             └─ taskflow_app_requests_total  │            │  X-App-Update: recommended
-                                                             │            └─ política: VersionPolicyService
-                                                             │                (cache 30 s) ◀── app_version_policies
-                                                             │                                 ▲
-                                                             │            npm run app-version ─┘ (+ auditoria)
-```
+request (app ou web)
+  │
+  ├─ correlationId (Módulo 01)
+  ├─ clientInfo (14.1) ─────── plataforma + versão → req.appClient, span do request, log, taskflow_app_requests_total
+  ├─ helmet · cors (expõe X-App-Update, Deprecation/Sunset/Link, Idempotent-Replayed)
+  ├─ pino-http (log de acesso, com o cliente)
+  ├─ VersionGate (14.2) ────── abaixo da mínima → 426 APP_UPDATE_REQUIRED · abaixo da recomendada → X-App-Update
+  │                              (política em app_version_policies, cache 30 s, fail-open)
+  ├─ guards: JWT, throttler
+  ├─ validação do DTO ─────── forbidNonWhitelisted; due { at com fuso, timezone IANA } (14.4)
+  └─ handler
+       ├─ GET  /me/features (14.6) ───────────── FeatureFlags (porta) → Postgres (cache 5 s, fail-closed): só o resultado
+       ├─ GET  /projects/:id/tasks (14.7) ─────── flag task-list-with-stats → stats na 1ª página + métrica por variante
+       └─ POST /projects/:id/tasks (14.5) ─────── Idempotency-Key: repete a resposta guardada, ou grava a chave
+                                                   NA transação do TaskCreated (evento v2 + outbox + chave)
 
-O cliente é resolvido **uma vez**, logo depois do `X-Correlation-Id`, e cada destino recebe a forma certa para ele. O
-bloqueio roda depois do log de acesso (o 426 fica registrado) e antes dos guards (o app antigo recebe 426, não 401).
+Leitura do Event Store: upcaster TaskCreated v1 → v2 (14.4), para sempre
+CI: docs/api/openapi.json (14.3) · oasdiff: incompatível sem a label = vermelho · aviso de depreciação ≥ 90 dias (14.8)
+Operação: npm run app-version · npm run feature-flag (com auditoria) · painéis Clientes e Rollout · alertas TaskListStats*
+```
 
 ---
 
@@ -809,6 +850,14 @@ npm run app-version -- --platform android --min none --recommended none         
 | Testes novos | 6 unitários (o handler com e sem `stats`, a métrica por variante), 3 E2E, 4 casos de alerta |
 | Suítes | 384 unitários · 95 integração (o teste dos alertas no `promtool` incluso) · 79 E2E · 13 streaming |
 
+**14.8 — a política**
+
+| Experimento | Resultado |
+|---|---|
+| Teste da política de depreciação | A lista real (vazia) passa; com exemplos, 89 dias de aviso falham, 90 e o `dueDate` (97) passam |
+| Descrição do Swagger | Ganhou o parágrafo da compatibilidade (leitor tolerante, 90 dias, 6 meses); oasdiff: só a descrição mudou |
+| Suítes | 386 unitários (2 novos) · 95 integração · 79 E2E · 13 streaming |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -825,6 +874,7 @@ npm run app-version -- --platform android --min none --recommended none         
 | Repetir o `POST /tasks` criava outra tarefa | **(14.5)** `Idempotency-Key`: a mesma chave devolve a mesma resposta; a chave gravada na transação da tarefa | A rede do celular falha no meio; o cliente precisa poder repetir sem medo |
 | Toda funcionalidade nova ia para todos de uma vez, e desligar exigia deploy (e loja) | **(14.6)** Feature flags com kill switch, restrições, lista de usuários e porcentagem; `GET /me/features` | Liberar aos poucos e desligar em segundos, sem depender da aprovação da loja |
 | Flags existiam, sem nenhuma funcionalidade atrás | **(14.7)** `stats` na listagem atrás da `task-list-with-stats`, medido por variante, com critério de avanço e alertas | Liberar é decidir com números; e a flag nasce com data para sair |
+| Ferramentas de compatibilidade sem uma regra que dissesse quando usar cada uma | **(14.8)** A política em uma página: sem versão na URL por padrão, janela de 6 meses, 90 dias de aviso no CI, o mapa de decisão | Responder "como vocês versionam a API?" com uma política, e não com uma lista de ferramentas |
 | CORS só com `Content-Type`, `Authorization` e `X-Correlation-Id` | **(14.1)** Também `X-Platform` e `X-App-Version` | Sem isso, o preflight barraria o front web que os envia |
 
 ---
@@ -861,6 +911,8 @@ npm run app-version -- --platform android --min none --recommended none         
   por variante e os dois alertas. Cada rollout arriscado exige a sua métrica e os seus alertas (um mecanismo genérico
   por flag seria o próximo passo).
 - **Os limites do critério são escolhidos, não derivados de um SLO** (1,2× e 50 ms).
+- **A janela de 6 meses não é imposta pelo código:** o `app-version` não sabe a data de lançamento de cada versão (um
+  dado da loja). Quem sobe a versão mínima consulta o painel "Clientes" e a data de lançamento (ADR-0012).
 - **Até 5 s de propagação** de qualquer mudança de flag, inclusive do kill switch (o cache por réplica).
 - **Política por comando, sem interface:** em produção, uma configuração gerenciada (AWS AppConfig) daria versões,
   rollback e deploy gradual da própria configuração.
@@ -883,7 +935,7 @@ npm run app-version -- --platform android --min none --recommended none         
 - [x] `Idempotency-Key` no `POST /tasks`, com a chave na mesma transação da tarefa (14.5)
 - [x] Feature flags em módulo próprio, com kill switch, restrições, lista de usuários, bucket determinístico e monotônico, `GET /me/features` (14.6)
 - [x] Uma funcionalidade real atrás de uma flag, medida por variante, com critério de avanço (ADR-0011) e alertas testados (14.7)
-- [ ] Estratégia de versionamento (14.8)
+- [x] A política de versionamento e a janela de suporte (ADR-0012), com o aviso mínimo de depreciação conferido no CI (14.8)
 
 ---
 

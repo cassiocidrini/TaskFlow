@@ -27,6 +27,7 @@ teste que a comprova; o que **não** está implementado aparece em [Limitações
 | **Kafka para fatos, SQS para trabalho** | O consumer de notificações grava o fato e enfileira o push no SQS **dentro da transação** (fila fora = rollback e retry infinito, nunca DLT); Lambda idempotente no DynamoDB (reserva com prazo), `batchItemFailures` e DLQ após 3 recebimentos, tudo em Terraform. SQS pausado: 0 notificações durante a queda, 0 no DLT, push enviado na volta | [Módulo 13.7](docs/modules/13-mensageria-kafka.md) · [`lambdas/push-sender/`](lambdas/push-sender/batch-processor.ts) · [`push.tf`](terraform/push.tf) |
 | **Idempotency-Key** | Repetir o `POST /tasks` (rede do celular caiu) devolve a mesma resposta, sem criar outra tarefa: a chave é gravada **na mesma transação** da tarefa, e a chave primária decide a corrida (10 requisições simultâneas = 1 tarefa, o mesmo `taskId` nas 10) | [ADR-0009](docs/adr/0009-idempotencia-de-requisicoes-na-transacao-do-efeito.md) · [`idempotency.spec.ts`](test/integration/idempotency.spec.ts) |
 | **Feature flags** | Módulo próprio atrás de uma porta: kill switch absoluto, restrições de plataforma e versão do app, lista de usuários e rollout por `sha256(flag:usuário) mod 100` (determinístico, monotônico e independente entre flags, verificado com 10 mil usuários simulados); *fail-closed*; `GET /me/features` devolve só o resultado. A primeira funcionalidade atrás de uma flag (`stats` na listagem) é medida **por variante**, com critério de avanço escrito antes e dois alertas testados (ao vivo, em 50%: 19 × 21 usuários, p95 4,80 × 4,77 ms) | [ADR-0010](docs/adr/0010-feature-flags-proprias.md) · [ADR-0011](docs/adr/0011-criterio-de-avanco-do-rollout.md) · [`feature-flag.rules.ts`](src/modules/feature-flags/feature-flag.rules.ts) |
+| **Versionamento da API** | Sem versão na URL por padrão: mudanças compatíveis, cliente leitor tolerante e quebra só por depreciação com prazo. Janela de suporte de 6 meses para o app, `Sunset` ≥ 90 dias **conferido no CI**, e um mapa de decisão que diz qual ferramenta usar para cada mudança | [ADR-0012](docs/adr/0012-versionamento-da-api-e-janela-de-suporte.md) · [Módulo 14](docs/modules/14-api-para-web-e-apps.md#-a-política-em-uma-página) |
 | **Fail-fast de configuração** | Variáveis de ambiente validadas com `zod` no boot: configuração inválida impede a app de subir | [`env.schema.ts`](src/config/env.schema.ts) |
 | **Testes com infraestrutura real** | 384 unitários · 95 de integração, 79 E2E e 13 de streaming contra **PostgreSQL e Kafka reais** via Testcontainers | [Testes](#-testes) |
 | **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas com `http_route`, sem os probes); Grafana **provisionado** com dashboard RED + banco + event loop; logs JSON com `correlationId` e `trace_id`; **um trace só** do request ao consumer do Kafka (contexto W3C gravado na outbox); dashboard de mensageria (outbox, lag pelo broker, DLTs) e **11 alertas como código testados com `promtool`** (inclusive o critério de rollout de uma feature flag) | [`tracing.ts`](src/tracing.ts) · [`grafana/`](grafana/dashboards/taskflow-api.json) |
@@ -250,8 +251,8 @@ a menos que o PR tenha a label `breaking-change`.
 
 ## 🧭 Decisões de design
 
-As decisões da mensageria (Kafka, outbox, chave de partição, contrato, idempotência, DLT, Kafka × SQS) a política de
-depreciação de campos da API, a idempotência de requisições, as feature flags e o critério de rollout têm **ADRs** próprios, com as alternativas recusadas, o que cada uma piora e quando revisitar: [`docs/adr/`](docs/adr/README.md).
+As decisões da mensageria (Kafka, outbox, chave de partição, contrato, idempotência, DLT, Kafka × SQS), a política de
+depreciação de campos da API, a idempotência de requisições, as feature flags, o critério de rollout e o versionamento da API com a janela de suporte têm **ADRs** próprios, com as alternativas recusadas, o que cada uma piora e quando revisitar: [`docs/adr/`](docs/adr/README.md).
 
 | Decisão | Alternativa descartada | Por quê |
 |---|---|---|
@@ -363,7 +364,7 @@ reproduzir, **problemas reais encontrados** e onde o resultado vive no código. 
 | [11](docs/modules/11-nodejs-internals.md) | Node.js internals (event loop, thread pool, streams, leaks) | `labs/node-internals/` |
 | [12](docs/modules/12-design-patterns.md) | Design patterns | ver [Padrões de projeto aplicados](#padrões-de-projeto-aplicados) |
 | [13](docs/modules/13-mensageria-kafka.md) | Mensageria e streaming com Kafka (e SQS + Lambda para trabalho) | `docker-compose.yml` (profile `streaming`), `events/`, `outbox-relay/`, `replay/`, `redrive/`, `modules/*/consumer/`, `common/messaging/`, `lambdas/push-sender/`, `terraform/push.tf`, [ADRs](docs/adr/README.md) |
-| [14](docs/modules/14-api-para-web-e-apps.md) | Uma API para web e apps (🚧 14.7 de 14.8) | `common/client/` (`X-Platform`, `X-App-Version`, `@AppClient()`, versão mínima), `app-version.ts`, painel Clientes, contrato em `docs/api/openapi.json` + `scripts/openapi/` |
+| [14](docs/modules/14-api-para-web-e-apps.md) | Uma API para web e apps | `common/client/` (`X-Platform`, `X-App-Version`, `@AppClient()`, versão mínima), `app-version.ts`, painel Clientes, contrato em `docs/api/openapi.json` + `scripts/openapi/` |
 
 ---
 
