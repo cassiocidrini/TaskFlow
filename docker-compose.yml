@@ -32,7 +32,7 @@ services:
       - COLLECTOR_OTLP_ENABLED=true
 
   prometheus:
-    image: prom/prometheus:v3.15.0
+    image: prom/prometheus:v3.16.0
     container_name: taskflow-prometheus
     ports:
       - "9090:9090"
