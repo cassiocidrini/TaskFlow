@@ -211,6 +211,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 **Processo**
 - ❌ Push direto na `main` ou merge com CI vermelho (4 jobs obrigatórios: quality, integration, e2e, streaming).
+- ❌ Decisão de arquitetura nova sem ADR em `docs/adr/` no mesmo PR; editar um ADR aceito (decisão que muda = ADR novo que o substitui).
 
 ---
 

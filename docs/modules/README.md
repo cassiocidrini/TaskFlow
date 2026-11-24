@@ -3,6 +3,8 @@
 Cada módulo documenta um tema estudado **e aplicado no TaskFlow**: conceitos, como reproduzir,
 problemas reais encontrados (e como foram resolvidos) e onde o resultado vive no código.
 
+> O **porquê** das decisões de arquitetura está nos [ADRs](../adr/README.md).
+>
 > Os módulos refletem o estado **atual** do código. Quando um conceito foi estudado mas não
 > implementado aqui, isso está dito explicitamente no texto.
 
@@ -20,4 +22,4 @@ problemas reais encontrados (e como foram resolvidos) e onde o resultado vive no
 | 10 | [Performance e load testing (k6)](10-performance-load-testing.md) | ✅ revisado |
 | 11 | [Node.js internals](11-nodejs-internals.md) | ✅ revisado |
 | 12 | [Design patterns](12-design-patterns.md) | ✅ revisado |
-| 13 | [Mensageria e streaming de eventos com Kafka](13-mensageria-kafka.md) | 🚧 em construção (13.7 de 13.8) |
+| 13 | [Mensageria e streaming de eventos com Kafka](13-mensageria-kafka.md) | ✅ revisado |
