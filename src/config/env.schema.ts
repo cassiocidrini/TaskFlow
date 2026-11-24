@@ -47,6 +47,10 @@ export const envSchema = z.object({
   SHUTDOWN_DRAIN_MS: z.coerce.number().int().min(0).max(60_000).default(0),
   SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(8_000),
 
+  // Por quanto tempo a política de versão do app (Módulo 14.2) fica em cache: uma mudança vale em até este tempo.
+  // 0 = sem cache (só nos testes E2E, que mudam a política e precisam ver o efeito na hora).
+  APP_VERSION_POLICY_CACHE_TTL_MS: z.coerce.number().int().min(0).max(600_000).default(30_000),
+
   DISABLE_THROTTLE: z
     .enum(['true', 'false'])
     .default('false')

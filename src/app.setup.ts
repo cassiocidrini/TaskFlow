@@ -4,6 +4,11 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { APP_VERSION_HEADER, PLATFORM_HEADER } from './common/client/client-info';
 import { createClientInfoMiddleware } from './common/client/client-info.middleware';
+import {
+  APP_RECOMMENDED_VERSION_HEADER,
+  APP_UPDATE_HEADER,
+  APP_UPDATE_REQUIRED,
+} from './common/client/version-gate.middleware';
 import { CORRELATION_ID_HEADER, correlationIdMiddleware } from './common/correlation/correlation-id.middleware';
 import type { Env } from './config/env.schema';
 
@@ -23,6 +28,8 @@ export function configureApp(app: INestApplication): void {
   // Logo depois: quem é o cliente (plataforma e versão do app). Antes dos guards, para a versão mínima (14.2) valer
   // até em rota pública; e antes do log de acesso, que registra o cliente
   app.use(createClientInfoMiddleware());
+  // A versão mínima (14.2) NÃO entra aqui: é middleware de módulo (VersionPolicyModule), para rodar depois do log de
+  // acesso e ainda antes dos guards
 
   // ~15 headers de segurança numa linha: anti-clickjacking, HSTS, nosniff, CSP… (OWASP A05)
   app.use(helmet());
@@ -36,7 +43,7 @@ export function configureApp(app: INestApplication): void {
     // Sem os headers do cliente aqui, o preflight do navegador barraria o front web que os envia
     allowedHeaders: ['Content-Type', 'Authorization', CORRELATION_ID_HEADER, PLATFORM_HEADER, APP_VERSION_HEADER],
     // Sem isto, o JavaScript de um front em outra origem não consegue LER o header da resposta (só o envia)
-    exposedHeaders: [CORRELATION_ID_HEADER],
+    exposedHeaders: [CORRELATION_ID_HEADER, APP_UPDATE_HEADER, APP_RECOMMENDED_VERSION_HEADER],
   });
 
   // Validação global de TODA entrada. whitelist + forbidNonWhitelisted = defesa contra mass assignment:
@@ -81,6 +88,10 @@ export function setupSwagger(app: INestApplication): void {
           '**Cliente:** apps e front web devem enviar `X-Platform` (`ios`, `android` ou `web`) e `X-App-Version` ' +
             '(`MAJOR.MINOR.PATCH`, a versão de loja ou do build). São opcionais; ausentes ou inválidos, a chamada segue ' +
             'como cliente desconhecido.',
+          '',
+          '**Versão mínima:** abaixo da versão mínima da plataforma, qualquer rota responde `426` com ' +
+            `\`code: "${APP_UPDATE_REQUIRED}"\` e a \`minVersion\`. Abaixo da recomendada, a resposta é normal e traz ` +
+            '`X-App-Update: recommended` e `X-App-Recommended-Version`. Cheque o `code`, não só o status.',
         ].join('\n'),
       )
       .setVersion('1.0')
@@ -111,6 +122,12 @@ export function setupSwagger(app: INestApplication): void {
           schema: { type: 'string', pattern: '^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$' },
         },
       )
+      .addGlobalResponse({
+        status: 426,
+        description:
+          `Versão do app abaixo da mínima da plataforma (\`code: "${APP_UPDATE_REQUIRED}"\`, com \`platform\` e ` +
+          '`minVersion`). Só para quem envia `X-Platform` e `X-App-Version`.',
+      })
       // O cadeado aparece só nas rotas marcadas com @ApiBearerAuth(): register e login ficam públicos
       .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' })
       .addTag('auth', 'Cadastro, login (emissão de JWT) e identificação do usuário')

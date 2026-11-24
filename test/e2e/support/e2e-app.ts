@@ -42,6 +42,8 @@ export async function startE2EApp(): Promise<E2EContext> {
   process.env.JWT_EXPIRES_IN = '1h';
   // Uma linha de log de acesso por requisição só polui a saída do Jest; o comportamento HTTP testado é o mesmo
   process.env.LOG_LEVEL = 'silent';
+  // Sem cache da política de versão (14.2): os testes mudam a política e precisam ver o efeito na hora
+  process.env.APP_VERSION_POLICY_CACHE_TTL_MS = '0';
 
   execSync('npx prisma migrate deploy', {
     env: { ...process.env, DATABASE_URL: connectionString },
@@ -77,7 +79,7 @@ export async function startE2EApp(): Promise<E2EContext> {
 export async function resetDatabase(prisma: PrismaClient): Promise<void> {
   // String constante (sem interpolação de entrada) — o "Unsafe" aqui não abre brecha de SQL injection
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE "tasks_read", "events", "outbox", "notifications", "notification_tasks", "processed_events", "report_tasks", "project_stats", "Task", "Project", "User" RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE "tasks_read", "events", "outbox", "notifications", "notification_tasks", "processed_events", "report_tasks", "project_stats", "app_version_policies", "app_version_policy_changes", "Task", "Project", "User" RESTART IDENTITY CASCADE',
   );
 }
 

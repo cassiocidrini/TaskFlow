@@ -259,3 +259,39 @@ model DltRedrive {
   @@id([dltTopic, dltPartition, dltOffset])
   @@map("dlt_redrives")
 }
+
+// Módulo 14.2: versão mínima e recomendada do app, por plataforma. Mudada pelo comando `npm run app-version`,
+// lida pela API com cache curto: bloquear uma versão quebrada não espera deploy.
+// Sem linha para uma plataforma = sem política (tudo passa).
+model AppVersionPolicy {
+  platform           AppPlatform @id
+  // `MAJOR.MINOR.PATCH`. Abaixo dela: 426 APP_UPDATE_REQUIRED. Formato e "mínima <= recomendada" têm CHECK na migração
+  minVersion         String?     @map("min_version")
+  // Abaixo dela (e acima da mínima): passa, com o header `X-App-Update: recommended`
+  recommendedVersion String?     @map("recommended_version")
+  updatedBy          String      @map("updated_by")
+  updatedAt          DateTime    @default(now()) @map("updated_at")
+
+  @@map("app_version_policies")
+}
+
+// Auditoria das mudanças de política (append-only): "quem bloqueou o iOS 2.9, e quando?"
+model AppVersionPolicyChange {
+  id                         BigInt      @id @default(autoincrement())
+  platform                   AppPlatform
+  previousMinVersion         String?     @map("previous_min_version")
+  previousRecommendedVersion String?     @map("previous_recommended_version")
+  minVersion                 String?     @map("min_version")
+  recommendedVersion         String?     @map("recommended_version")
+  changedBy                  String      @map("changed_by")
+  changedAt                  DateTime    @default(now()) @map("changed_at")
+
+  @@index([platform, changedAt(sort: Desc)])
+  @@map("app_version_policy_changes")
+}
+
+enum AppPlatform {
+  ios
+  android
+  web
+}
