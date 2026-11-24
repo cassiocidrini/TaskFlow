@@ -30,6 +30,24 @@ describe('consumerEnvSchema', () => {
     ).toThrow('maior que a retenção do tópico');
   });
 
+  it('push (13.7): sem fila = desligado; vazia no .env também; URL inválida recusa o boot', () => {
+    const semFila = validateConsumerEnv(minimo);
+    expect(semFila.PUSH_QUEUE_URL).toBeUndefined();
+    expect(semFila.AWS_REGION).toBe('us-east-1');
+
+    const vazias = validateConsumerEnv({
+      ...minimo,
+      PUSH_QUEUE_URL: '',
+      AWS_ENDPOINT_URL: '',
+    });
+    expect(vazias.PUSH_QUEUE_URL).toBeUndefined();
+    expect(vazias.AWS_ENDPOINT_URL).toBeUndefined();
+
+    expect(() =>
+      validateConsumerEnv({ ...minimo, PUSH_QUEUE_URL: 'taskflow-push' }),
+    ).toThrow('PUSH_QUEUE_URL');
+  });
+
   it('deve recusar broker sem porta (mesma regra do relay)', () => {
     expect(() =>
       validateConsumerEnv({ ...minimo, KAFKA_BROKERS: 'kafka' }),

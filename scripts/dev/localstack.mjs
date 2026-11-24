@@ -1,10 +1,10 @@
 /**
  * Ambiente AWS local (LocalStack + Terraform, Módulo 09), igual em Windows, Linux e macOS.
  *
- *   npm run aws:up         sobe o LocalStack, cria o bucket do state e aplica o Terraform
+ *   npm run aws:up         sobe o LocalStack, cria o bucket do state, compila a Lambda e aplica o Terraform
  *   npm run aws:down       remove o LocalStack e o volume dele (recursos E state somem juntos)
  *   npm run aws:recreate   down + up
- *   npm run aws:resources  lista filas SQS e buckets S3 criados
+ *   npm run aws:resources  lista filas SQS, buckets S3, tabelas DynamoDB e Lambdas criados
  *
  * Substitui `terraform-setup.ps1`, `terraform-clean.ps1`, `terraform-recreate.ps1` e `checkResources.ps1`.
  * Na migração, dois bugs dos scripts antigos foram corrigidos:
@@ -21,7 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { rmSync } from 'node:fs';
 
 const STATE_BUCKET = 'taskflow-terraform-state';
-const REQUIRED_SERVICES = ['sqs', 's3', 'dynamodb', 'sns', 'iam'];
+const REQUIRED_SERVICES = ['sqs', 's3', 'dynamodb', 'sns', 'iam', 'lambda', 'logs'];
 
 /** Executa mostrando a saída; aborta se falhar (a menos que `allowFailure`). Devolve o exit code. */
 function run(command, { allowFailure = false, quiet = false } = {}) {
@@ -67,6 +67,8 @@ async function up() {
   if (exists === 0) console.log(`[OK] Bucket ${STATE_BUCKET} já existe`);
   else run(`docker compose exec -T localstack awslocal s3 mb s3://${STATE_BUCKET}`);
 
+  // O Terraform empacota a Lambda do push a partir do JavaScript compilado (push.tf): sem build, não há o que zipar
+  run('npm run lambda:build');
   run('terraform -chdir=terraform init -reconfigure -input=false');
   run('terraform -chdir=terraform apply -auto-approve -input=false'); // o apply já imprime os outputs
   console.log('\n[OK] Infraestrutura AWS local aplicada. Veja: npm run aws:resources\n');
@@ -86,6 +88,12 @@ function resources() {
   run('docker compose exec -T localstack awslocal sqs list-queues');
   console.log('\n=== Buckets S3 ===');
   run('docker compose exec -T localstack awslocal s3 ls');
+  console.log('\n=== Tabelas DynamoDB ===');
+  run('docker compose exec -T localstack awslocal dynamodb list-tables');
+  console.log('\n=== Lambdas (estado e runtime) ===');
+  run(
+    "docker compose exec -T localstack awslocal lambda list-functions --query 'Functions[].[FunctionName,Runtime,State]' --output text",
+  );
 }
 
 async function recreate() {

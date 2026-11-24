@@ -5,10 +5,11 @@
 # calcula o que criar, alterar ou destruir. Por isso o ciclo é sempre `plan` (revisar) → `apply`: remover um
 # `resource` deste arquivo DESTRÓI o recurso real no próximo apply.
 #
-# Alvo atual: LocalStack (AWS emulada em localhost:4566), sem custo. Os recursos são PROVISIONADOS, mas a API
-# ainda não os usa — o EventBus do TaskFlow roda em memória; SNS/SQS são a base de um EventBus distribuído.
+# Alvo atual: LocalStack (AWS emulada em localhost:4566), sem custo. A fila de sincronização, o bucket e o SNS são
+# PROVISIONADOS e ainda sem uso; o que o sistema usa de verdade é o envio de push (push.tf, Módulo 13.7).
 #
-# Arquivos: main.tf (versões, provider, SQS, S3) · sns.tf (SNS + IAM) · backend.tf (onde o state mora).
+# Arquivos: main.tf (versões, provider, SQS, S3) · sns.tf (SNS + IAM) · push.tf (fila, DLQ, DynamoDB e Lambda do
+# push) · backend.tf (onde o state mora).
 # =============================================================================
 
 terraform {
@@ -22,6 +23,11 @@ terraform {
       # "~> 5.0" = qualquer 5.x, nunca 6.0: atualizações de correção sim, breaking changes não.
       # A versão EXATA baixada fica travada no .terraform.lock.hcl (gerado — não editar à mão).
       version = "~> 5.0"
+    }
+    # Empacota a Lambda do push (push.tf) num zip a partir do código compilado
+    archive = {
+      source  = "hashicorp/archive"
+      version = "~> 2.7"
     }
   }
 }
@@ -51,6 +57,9 @@ provider "aws" {
     sqs = "http://localhost:4566"
     sns = "http://localhost:4566"
     iam = "http://localhost:4566"
+    # Módulo 13.7: tabela de idempotência e Lambda do push
+    dynamodb = "http://localhost:4566"
+    lambda   = "http://localhost:4566"
   }
 }
 

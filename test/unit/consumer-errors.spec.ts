@@ -15,6 +15,7 @@ import { Prisma } from '@prisma/client';
 import {
   classifyFailure,
   DEFAULT_MAX_ATTEMPTS,
+  InfrastructureError,
   isInfrastructureError,
   MAX_RETRY_BACKOFF_MS,
   nextStep,
@@ -98,6 +99,12 @@ describe('classifyFailure', () => {
   it('erro de banco é infraestrutura; o resto, desconhecido', () => {
     expect(classifyFailure(unreachable)).toBe('infrastructure');
     expect(classifyFailure(new TypeError('bug no handler'))).toBe('unknown');
+  });
+
+  it('InfrastructureError (dependência declarada por um adapter, ex.: SQS do push) é infraestrutura', () => {
+    expect(classifyFailure(new InfrastructureError('SQS fora'))).toBe(
+      'infrastructure',
+    );
   });
 });
 

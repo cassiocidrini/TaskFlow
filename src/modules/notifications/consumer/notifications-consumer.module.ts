@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { TelemetryShutdownHook } from '../../../common/lifecycle/telemetry-shutdown';
@@ -10,13 +10,20 @@ import {
 import { PrismaModule } from '../../../prisma/prisma.module';
 import { NotificationsConsumer } from './notifications.consumer';
 import { NotificationsHandler } from './notifications.handler';
+import { DisabledPushQueue, PushQueue } from './push-queue';
+import { SqsPushQueue } from './sqs-push-queue';
+
+const logger = new Logger('NotificationsConsumerModule');
 
 /**
  * Módulo raiz do processo consumer de notificações (`src/notifications-consumer.ts`). Como o do relay: sem HTTP,
  * sem auth, sem CQRS; config com schema próprio, logs JSON, Prisma e telemetria.
  *
- * Encerramento: `NotificationsConsumer.onModuleDestroy` (termina a mensagem e desconecta do Kafka) → Prisma e
- * OpenTelemetry (`onApplicationShutdown`).
+ * O adapter do push (Módulo 13.7) é escolhido pela configuração: `SqsPushQueue` com `PUSH_QUEUE_URL`,
+ * `DisabledPushQueue` sem ela. A troca é só aqui; o handler conhece apenas a porta `PushQueue`.
+ *
+ * Encerramento: `NotificationsConsumer.onModuleDestroy` (termina a mensagem e desconecta do Kafka) → Prisma, cliente
+ * do SQS e OpenTelemetry (`onApplicationShutdown`).
  */
 @Module({
   imports: [
@@ -39,6 +46,25 @@ import { NotificationsHandler } from './notifications.handler';
     NotificationsHandler,
     NotificationsConsumer,
     TelemetryShutdownHook,
+    {
+      provide: PushQueue,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService<ConsumerEnv, true>): PushQueue => {
+        const queueUrl = config.get('PUSH_QUEUE_URL', { infer: true });
+        if (!queueUrl) {
+          logger.warn(
+            'PUSH_QUEUE_URL não configurada: notificações gravadas sem envio de push',
+          );
+          return new DisabledPushQueue();
+        }
+        logger.log(`Push enfileirado no SQS: ${queueUrl}`);
+        return new SqsPushQueue({
+          queueUrl,
+          region: config.get('AWS_REGION', { infer: true }),
+          endpoint: config.get('AWS_ENDPOINT_URL', { infer: true }),
+        });
+      },
+    },
   ],
 })
 export class NotificationsConsumerModule {}

@@ -36,6 +36,7 @@ npm run consumer:notifications:dev      # consumer group notifications (build: n
 npm run consumer:reports:dev            # consumer group reports (build: npm run start:consumer:reports)
 npm run replay                          # republica o Event Store pela outbox (--aggregate <taskId>; build: start:replay)
 npm run redrive -- --group notifications --dry-run   # DLT → tópico de origem, só para o grupo (auditoria em dlt_redrives)
+npm run lambda:build                    # compila a Lambda do push (lambdas/push-sender → dist; o aws:up já roda)
 
 # Qualidade — rodar SEMPRE antes de commitar
 npx tsc --noEmit && npm run lint && npm run test:unit
@@ -96,9 +97,9 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `replay.ts` + `replay/` | Comando `npm run replay` (`--aggregate <id>`): republica o Event Store **pela outbox** (`replay = true`), com o mesmo mapper da API e o envelope original | Todo escritor da outbox pega `lockAggregateForOutbox` antes de gravar (senão a ordem por tarefa quebra); reconstruir projeção = runbook do Módulo 13 |
 | `redrive.ts` + `redrive/` | Comando `npm run redrive -- --group <g>` (`--dry-run`, `--include-permanent`, `--by`): DLT → tópico de origem com `redrive-group` | Política por grupo em `redrive-policy.ts`; só `exhausted` por padrão; ack do tópico ANTES de gravar `dlt_redrives`; o runner ignora `redrive-group` de outro grupo |
 | `config/relay-env.schema.ts`, `config/consumer-env.schema.ts` | Ambiente do relay e dos consumers (sem `JWT_SECRET`) | Campo comum aos processos reaproveita `envSchema.shape.X` / `relayEnvSchema.shape.KAFKA_BROKERS` |
-| `common/messaging/` | `KafkaConsumerRunner` (laço genérico de consumer group), `consumer-errors.ts` (classificação de falhas e decisão retry × DLT) `processed-events.cleaner.ts` (limpeza por data da tabela de marcas) e `toKafkaLogger` | Offset commitado **depois** do efeito; falha `permanent` (`NonRetryableError`) → DLT na hora, `infrastructure` (banco fora) → retry para sempre, `unknown` → 5 tentativas e DLT; ack do DLT **antes** do commit; `sessionTimeout` explícito; span `process` filho do `traceparent` do header |
+| `common/messaging/` | `KafkaConsumerRunner` (laço genérico de consumer group), `consumer-errors.ts` (classificação de falhas e decisão retry × DLT; `NonRetryableError` e `InfrastructureError` para o adapter declarar a classe) `processed-events.cleaner.ts` (limpeza por data da tabela de marcas) e `toKafkaLogger` | Offset commitado **depois** do efeito; falha `permanent` (`NonRetryableError`) → DLT na hora, `infrastructure` (banco fora) → retry para sempre, `unknown` → 5 tentativas e DLT; ack do DLT **antes** do commit; `sessionTimeout` explícito; span `process` filho do `traceparent` do header |
 | `common/telemetry/trace-context.ts` | `captureTraceContext`, `carrierFor`, `contextFromCarrier` | Contexto de trace que atravessa a outbox e o Kafka (W3C). Sempre pelo propagador global, nunca montando o `traceparent` à mão |
-| `modules/notifications/` | API: `GET /me/notifications` (só leitura). `consumer/`: `NotificationsHandler` (idempotente), contrato próprio (`task-event.message.ts`, zod), regras puras (`notification-rules.ts`), processo em `notifications-consumer.ts` | Marca em `processed_events` e efeito na **mesma** `$transaction`; o consumer **não importa** o contrato do produtor nem lê tabelas da API; a API só **lê** `notifications` |
+| `modules/notifications/` | API: `GET /me/notifications` (só leitura). `consumer/`: `NotificationsHandler` (idempotente), contrato próprio (`task-event.message.ts`, zod), regras puras (`notification-rules.ts`), porta `PushQueue` → `SqsPushQueue` / `DisabledPushQueue` (13.7), processo em `notifications-consumer.ts` | Marca em `processed_events` e efeito na **mesma** `$transaction`; o `SendMessage` do push é a **última** escrita antes do COMMIT, com `pushId` = `eventId`; o consumer **não importa** o contrato do produtor nem lê tabelas da API; a API só **lê** `notifications` |
 | `modules/reports/` | API: `GET /projects/:projectId/stats` (só leitura, `assertOwner`). `consumer/`: `ReportsHandler` (idempotência pela **versão** do agregado), contrato próprio (`task-event.message.ts`), deltas puros (`report-rules.ts`), processo em `reports-consumer.ts` | Guarda `version >=` + `FOR UPDATE` na mesma `$transaction` do delta; contador só por incremento atômico (`coluna = coluna + delta`), nunca ler-somar-gravar; upsert de `project_stats` só no `TaskCreated` (CHECK avalia a linha candidata); evento que muda o projeto da tarefa = `InvalidReportMessageError` |
 | `common/logging/logger.options.ts` | Opções do `nestjs-pino` (JSON, serializers, nível por status) | Serializers são **allowlist**: não adicione headers ao log |
 
@@ -110,13 +111,15 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `grafana/` | Datasources e dashboards **provisionados** (`taskflow-api`, `taskflow-messaging`) (montados no compose) | Mudança de dashboard = editar o JSON + PR; métrica nova no painel entra em `KNOWN_METRICS` de `test/unit/grafana-dashboard.spec.ts`; nunca agrupar por label de alta cardinalidade |
 | `prometheus.yml` | Jobs `taskflow` (9464), `taskflow-relay` (9465), `taskflow-notifications` (9467), `taskflow-reports` (9468) e `kafka` (`kafka-exporter:9308`, lag pelo broker) | Processo novo com métricas = job novo com porta própria |
 | `prometheus/alerts.yml` + `alerts.test.yml` | 9 regras de alerta e os testes delas (`promtool test rules`, rodado por `test/integration/alert-rules.spec.ts`) | Alerta novo = regra + caso de teste com `exp_annotations`; contador de alerta publicado com 0 na subida; janela de `rate()` ≥ 4× a coleta; editou? `docker restart taskflow-prometheus` |
+| `lambdas/push-sender/` | Lambda do push (Módulo 13.7), deployable próprio: `batch-processor.ts` (`batchItemFailures`), `idempotency.ts` (reserva condicional no DynamoDB), `push-request.ts` (contrato próprio, sem zod), `handler.ts` (só monta dependências) | Só o `@aws-sdk/client-dynamodb` (vem no runtime): dependência nova exige bundler; lógica testável sem AWS em `test/unit/push-sender.spec.ts`; nunca importar de `src/` |
+| `terraform/push.tf` | Fila `taskflow-push` + DLQ, tabela de idempotência com TTL, Lambda (`nodejs22.x`) e event source mapping | Tempos amarrados: timeout da Lambda < `LEASE_SECONDS` < visibility timeout; `ReportBatchItemFailures` obrigatório; IAM só nos ARNs desta fila e tabela |
 | `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4), `kafka/smoke.ts` (Módulo 13) | Script novo de dev entra aqui, **nunca** em `src/` |
 | `load/k6/`, `load/autocannon/` | Testes de carga da API (Módulo 10) | Medem a API rodando; não são testes do Jest |
 | `labs/node-internals/` | Experimentos do runtime (Módulo 11) | Arquivos gerados (`*.txt`, ~100 MB) são ignorados pelo Git |
 
 ### Padrões aplicados (e onde)
 
-CQRS (`commands/` × `queries/`) · Event Sourcing (`TaskAggregate` + Event Store) · **Repository** (`TaskRepository` → `EventSourcedTaskRepository`) · Template Method funcional (`TaskCommandRunner`) · Strategy (`task-priority.strategy.ts`) · Observer (`EventBus` → projeções) · **Transactional Outbox** (`appendMany` + tabela `outbox`, Módulo 13.2) + **relay** com advisory lock (Módulo 13.3) · **Ports & Adapters** (`MessagePublisher` → `KafkaMessagePublisher`) · **Idempotent Consumer** (`processed_events`, Módulo 13.4; pela versão do agregado em `report_tasks`, Módulo 13.6a) · **Tolerant Reader** (contrato do consumer em zod).
+CQRS (`commands/` × `queries/`) · Event Sourcing (`TaskAggregate` + Event Store) · **Repository** (`TaskRepository` → `EventSourcedTaskRepository`) · Template Method funcional (`TaskCommandRunner`) · Strategy (`task-priority.strategy.ts`) · Observer (`EventBus` → projeções) · **Transactional Outbox** (`appendMany` + tabela `outbox`, Módulo 13.2) + **relay** com advisory lock (Módulo 13.3) · **Ports & Adapters** (`MessagePublisher` → `KafkaMessagePublisher`; `PushQueue` → `SqsPushQueue`, Módulo 13.7) · **Idempotent Consumer** (`processed_events`, Módulo 13.4; pela versão do agregado em `report_tasks`, Módulo 13.6a; reserva condicional no DynamoDB na Lambda do push, Módulo 13.7) · **Tolerant Reader** (contrato do consumer em zod).
 **Não existe** Factory no código — não referencie nem gere uma sem pedido explícito.
 
 ### Ordem crítica no `main.ts` (e no `relay.ts`)
@@ -187,6 +190,9 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ `PROCESSED_EVENTS_RETENTION_DAYS` menor ou igual à retenção do tópico (o schema recusa; se a retenção do tópico mudar, mude o mínimo junto).
 - ❌ Histograma customizado sem buckets explícitos (`advice.explicitBucketBoundaries`): os padrões do OTel são para ms, e o percentil de uma métrica em segundos sai inventado.
 - ❌ DLQ no relay da outbox: decidido contra no Módulo 13.5 (falhas ali são de infraestrutura e atingem todas as mensagens); use o runbook.
+- ❌ Enviar o push depois do COMMIT (crash no meio = push perdido) ou usar como chave de idempotência um id gerado na tentativa (o id da notificação): a chave é o `eventId`.
+- ❌ Chamada de rede dentro de transação confiando só no `requestTimeout` do SDK da AWS: sem `throwOnRequestTimeout` ele só avisa (pendurou o consumer, problema 37 do Módulo 13); use também `AbortSignal.timeout`.
+- ❌ Lambda de SQS lançando exceção pelo lote ou sem `ReportBatchItemFailures` no event source mapping: as mensagens boas voltam junto com a ruim.
 - ❌ Consumer criando o span `process` sem o contexto do header (o trace do request se partiria); use o `KafkaConsumerRunner`.
 - ❌ Consumer importando código do produtor (`tasks/`) para ler a mensagem, ou consultando tabelas da API: contrato próprio + projeção local.
 - ❌ Projeção não idempotente (usar `createMany({ skipDuplicates })` / `updateMany`).
@@ -225,7 +231,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · *upcasters* de eventos · agregador de logs (Loki) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · roteamento de alertas (Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · trace pelo SQS/Lambda (o `traceparent` para no consumer) · provedor de push real e registro de dispositivos · *upcasters* de eventos · agregador de logs (Loki) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · roteamento de alertas (Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

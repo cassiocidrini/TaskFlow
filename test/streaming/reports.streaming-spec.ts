@@ -25,6 +25,7 @@ import type { RelayEnv } from '../../src/config/relay-env.schema';
 import { EventStoreService } from '../../src/events/event-store.service';
 import { NOTIFICATIONS_DLT } from '../../src/modules/notifications/consumer/notifications.consumer';
 import { NotificationsHandler } from '../../src/modules/notifications/consumer/notifications.handler';
+import { DisabledPushQueue } from '../../src/modules/notifications/consumer/push-queue';
 import { REPORTS_DLT } from '../../src/modules/reports/consumer/reports.consumer';
 import { ReportsHandler } from '../../src/modules/reports/consumer/reports.handler';
 import { TaskAggregate } from '../../src/modules/tasks/domain/task.aggregate';
@@ -187,7 +188,11 @@ describe('Evento → Kafka → consumer de relatórios (streaming)', () => {
     );
     await startGroup(
       'notifications',
-      (m) => new NotificationsHandler(prisma as never).handle(m),
+      (m) =>
+        new NotificationsHandler(
+          prisma as never,
+          new DisabledPushQueue(),
+        ).handle(m),
       NOTIFICATIONS_DLT,
     );
 

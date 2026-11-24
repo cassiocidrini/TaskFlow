@@ -18,6 +18,7 @@ import {
 } from '../../src/common/messaging/kafka-consumer.runner';
 import { NOTIFICATIONS_DLT } from '../../src/modules/notifications/consumer/notifications.consumer';
 import { NotificationsHandler } from '../../src/modules/notifications/consumer/notifications.handler';
+import { DisabledPushQueue } from '../../src/modules/notifications/consumer/push-queue';
 import { REPORTS_DLT } from '../../src/modules/reports/consumer/reports.consumer';
 import { ReportsHandler } from '../../src/modules/reports/consumer/reports.handler';
 import { TASK_EVENTS_TOPIC } from '../../src/modules/tasks/events/task.integration-events';
@@ -123,7 +124,10 @@ describe('Redrive do DLT (streaming)', () => {
     await producer.connect();
     redriver = new DltRedriver(prisma, kafka.brokers, logger);
 
-    const notifications = new NotificationsHandler(prisma as never);
+    const notifications = new NotificationsHandler(
+      prisma as never,
+      new DisabledPushQueue(),
+    );
     const reports = new ReportsHandler(prisma as never);
     for (const runner of [
       new KafkaConsumerRunner({

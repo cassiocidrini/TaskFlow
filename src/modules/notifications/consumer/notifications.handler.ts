@@ -4,7 +4,12 @@ import type {
   HandleResult,
 } from '../../../common/messaging/kafka-consumer.runner';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { decide } from './notification-rules';
+import { decide, type NotificationDraft } from './notification-rules';
+import {
+  PUSH_REQUEST_VERSION,
+  PushQueue,
+  type PushRequest,
+} from './push-queue';
 import { parseTaskEvent, type TaskEvent } from './task-event.message';
 
 /** Nome do consumer group no Kafka E a chave em `processed_events`: um só nome para as duas coisas. */
@@ -26,12 +31,26 @@ export const NOTIFICATIONS_GROUP = 'notifications';
  *
  * Duas entregas SIMULTÂNEAS do mesmo evento (rebalance no meio do processamento) também ficam corretas: o segundo
  * INSERT espera o lock da PK até o primeiro COMMIT e então não insere nada.
+ *
+ * **O push (Módulo 13.7): o fato fica aqui, o trabalho vai para a fila.** A notificação gravada é o fato; enviar o
+ * push é trabalho para fazer uma vez, e vai para o SQS ({@link PushQueue}) DENTRO da transação, antes do COMMIT:
+ * - fila fora → `InfrastructureError` → rollback (nem marca nem notificação) → o runner tenta de novo;
+ * - COMMIT falha DEPOIS do envio → o Kafka reentrega e o push é enfileirado de novo, com o mesmo `pushId` (o
+ *   `eventId`): a Lambda descarta a duplicata.
+ *
+ * At-least-once na fila + consumidor idempotente na ponta, sem segunda outbox. Enviar DEPOIS do COMMIT perderia o
+ * push num crash entre os dois (a reentrega bateria em `processed_events` e sairia como `duplicate`). O preço é a
+ * transação aberta durante o envio, por isso os timeouts curtos do `SqsPushQueue`, e o acoplamento: com a fila fora,
+ * as notificações também param (a partição espera).
  */
 @Injectable()
 export class NotificationsHandler {
   private readonly logger = new Logger(NotificationsHandler.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly pushQueue: PushQueue,
+  ) {}
 
   async handle(message: ConsumedMessage): Promise<HandleResult> {
     const parsed = parseTaskEvent(message.value);
@@ -75,6 +94,10 @@ export class NotificationsHandler {
             eventId: event.eventId,
           },
         });
+        // ÚLTIMA escrita antes do COMMIT, de propósito: uma falha do banco acontece antes de a fila receber algo
+        await this.pushQueue.enqueue(
+          toPushRequest(event, decision.notification),
+        );
       }
       if (!current && event.eventType !== 'TaskCreated') {
         this.logger.warn(
@@ -84,4 +107,21 @@ export class NotificationsHandler {
       return 'processed';
     });
   }
+}
+
+/** O pedido de push de uma notificação, mapeado campo a campo (é contrato público com a Lambda, sem `...spread`). */
+export function toPushRequest(
+  event: TaskEvent,
+  notification: NotificationDraft,
+): PushRequest {
+  return {
+    version: PUSH_REQUEST_VERSION,
+    pushId: event.eventId,
+    userId: notification.userId,
+    type: notification.type,
+    body: notification.message,
+    taskId: event.aggregateId,
+    projectId: event.projectId,
+    requestedAt: new Date().toISOString(),
+  };
 }

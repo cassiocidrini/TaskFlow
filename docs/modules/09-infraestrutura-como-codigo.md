@@ -79,11 +79,20 @@ resolve só metade do problema**, e o TaskFlow está exatamente nessa metade (ve
 | SNS `taskflow-events` | `sns.tf` | Publicação de eventos (pub/sub) |
 | IAM role `taskflow-lambda-sync-role` | `sns.tf` | Identidade de uma futura Lambda de sincronização |
 | IAM policy `taskflow-lambda-sync-policy` | `sns.tf` | Permissões dessa Lambda |
+| SQS `taskflow-push` (standard) + DLQ `taskflow-push-dlq` | `push.tf` | Envio de push (Módulo 13.7): visibilidade 60 s, DLQ após 3 recebimentos, `redrive_allow_policy` |
+| DynamoDB `taskflow-push-deliveries` (on-demand, TTL) | `push.tf` | Idempotência do envio |
+| Lambda `taskflow-push-sender` + event source mapping | `push.tf` | Consome a fila em lotes com `ReportBatchItemFailures`, concorrência máxima 2 |
+| IAM role e policy `taskflow-push-sender-*` | `push.tf` | Só esta fila e esta tabela, só as ações que o código usa |
 
 Todos com tags padronizadas (`Environment`, `Project`, `ManagedBy = Terraform`) e com `output`s dos ARNs e URLs.
 
-> **Escopo honesto:** esses recursos são **provisionados**, mas a API ainda **não os usa**. O EventBus do TaskFlow
-> roda em memória (Módulo 05). O SNS e o SQS são a infraestrutura que um EventBus distribuído usaria.
+> **Escopo honesto:** os recursos do `push.tf` são **usados** pelo sistema (o consumer de notificações enfileira, a
+> Lambda envia; [Módulo 13.7](13-mensageria-kafka.md)). Os demais (`taskflow-sync-queue`, SNS, bucket e a role
+> `lambda_sync`) continuam só **provisionados**: o transporte de eventos ficou com o Kafka (Módulo 13).
+
+**Dois providers e um pacote gerado:** o `push.tf` usa o provider `hashicorp/archive` para zipar a Lambda a partir de
+`lambdas/push-sender/dist` (gerado por `npm run lambda:build`, que o `aws:up` roda antes do `apply`). O
+`source_code_hash` muda quando o código muda, e só então o Terraform publica uma versão nova da função.
 
 ### IAM de menor privilégio
 
@@ -149,7 +158,7 @@ O `backend "s3"` ([`backend.tf`](../../terraform/backend.tf)) guarda o state em
 npm run aws:up          # sobe o LocalStack (--wait no healthcheck), cria o bucket do state, init + apply
 npm run aws:down        # remove o container e o volume do LocalStack: recursos E state somem juntos
 npm run aws:recreate    # down + up
-npm run aws:resources   # lista filas SQS e buckets S3
+npm run aws:resources   # lista filas SQS, buckets S3, tabelas DynamoDB e Lambdas
 ```
 
 Funciona igual em Linux, macOS e Windows (Node puro). Exige `LOCALSTACK_AUTH_TOKEN` no `.env` e o `terraform`
@@ -210,13 +219,15 @@ docker exec taskflow-localstack awslocal iam list-roles
 - **Tudo num diretório só, sem variáveis:** nomes, região e endpoints estão fixos. O próximo passo é `variable`s + um `.tfvars` por ambiente (`dev`, `prod`), ou *workspaces*.
 - **Sem módulos:** o padrão SQS + policy poderia virar um `module` reutilizável.
 - **IaC fora do CI:** um job com `terraform fmt -check`, `validate` e `plan` em cada PR, com o plano publicado como comentário.
-- **Recursos sem uso pela API:** SNS e SQS existem, mas o EventBus ainda é em memória.
+- **Recursos sem uso:** `taskflow-sync-queue`, SNS, bucket e a role `lambda_sync` existem sem consumidor (o que é usado é o push do `push.tf`).
+- **Provider AWS 5.x:** o lock trava a 5.100, que não aceita o runtime `nodejs24.x`; a Lambda roda em `nodejs22.x`. Subir para a 6.x é um PR próprio (major com breaking changes).
 
 ---
 
 ## ✅ Checklist
 
 - [x] 5 recursos AWS provisionados de forma declarativa (S3, SQS, SNS, IAM role e policy)
+- [x] Fila com DLQ, Lambda com event source mapping e DynamoDB com TTL, usados pelo sistema (Módulo 13.7)
 - [x] IAM de menor privilégio, restrito a ARNs específicos
 - [x] State em backend remoto (S3 no LocalStack)
 - [x] Scripts de setup, limpeza e recriação

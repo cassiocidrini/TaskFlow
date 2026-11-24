@@ -1,8 +1,8 @@
 # Módulo 13 — Mensageria e streaming de eventos com Kafka
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.6d de 13.8** (lag, painel de mensageria e alertas como código). Cada etapa
+> **Status:** 🚧 em construção, etapa **13.7 de 13.8** (push por SQS + Lambda: Kafka para fatos, SQS para trabalho). Cada etapa
 > acrescenta a sua parte a
 > este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
 >
@@ -25,7 +25,9 @@
 > [`src/redrive/`](../../src/redrive/dlt-redriver.ts) · limpeza em
 > [`processed-events.cleaner.ts`](../../src/common/messaging/processed-events.cleaner.ts) · alertas em
 > [`prometheus/alerts.yml`](../../prometheus/alerts.yml) · painel em
-> [`taskflow-messaging.json`](../../grafana/dashboards/taskflow-messaging.json)
+> [`taskflow-messaging.json`](../../grafana/dashboards/taskflow-messaging.json) · push em
+> [`push-queue.ts`](../../src/modules/notifications/consumer/push-queue.ts),
+> [`lambdas/push-sender/`](../../lambdas/push-sender/batch-processor.ts) e [`terraform/push.tf`](../../terraform/push.tf)
 
 ---
 
@@ -57,12 +59,12 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | **13.6b** | **Replay** do Event Store pela outbox (lock por agregado, header `replay`) e runbook de reconstrução de projeção | ✅ |
 | **13.6c** | *Redrive* do DLT (com auditoria, só para o grupo que falhou) e limpeza de `processed_events` | ✅ |
 | **13.6d** | `kafka-exporter` (lag visto pelo broker), painel "TaskFlow Mensageria" e **9 alertas como código**, testados com `promtool` | ✅ |
-| 13.7 | *(opcional)* Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda | 🔜 |
+| **13.7** | Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda, idempotente e com DLQ | ✅ |
 | 13.8 | ADRs e o diagrama final | 🔜 |
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 13.6a)
+## 🏗️ Arquitetura (estado atual: 13.7)
 
 ```mermaid
 flowchart LR
@@ -101,6 +103,16 @@ flowchart LR
     RC -->|"UMA transação:<br/>guarda de versão + delta"| RS[("report_tasks<br/>project_stats")]
     RC -->|"mensagem envenenada"| RDLT[("taskflow.reports-dlt.v1")]
     API -.->|"GET /projects/:id/stats<br/>(só leitura)"| RS
+    subgraph aws["AWS (LocalStack)"]
+        PQ[("taskflow-push<br/>(SQS standard)")]
+        PDLQ[("taskflow-push-dlq")]
+        L["Lambda push-sender<br/>batchItemFailures"]
+        DD[("DynamoDB<br/>push-deliveries")]
+    end
+    C -->|"SendMessage DENTRO da transação<br/>(o trabalho)"| PQ
+    PQ --> L
+    L -->|"reserva condicional<br/>(idempotência)"| DD
+    PQ -->|"3 recebimentos sem sucesso"| PDLQ
 ```
 
 A API **não fala com o Kafka** em nenhuma direção: grava evento e outbox na mesma transação, e lê as notificações
@@ -789,6 +801,107 @@ alerta, esperado × obtido) na mensagem.
 silêncio durante deploy) é decisão de quem opera, e fica como próximo passo. Em desenvolvimento, `RelayDown` e
 `ConsumerDown` disparam sempre que o processo não está rodando: é o comportamento certo, só barulhento num laptop.
 
+### Kafka para fatos, SQS para trabalho: o envio de push (13.7)
+
+**O critério.** Um evento no Kafka diz "algo aconteceu": quem quiser reage, cada grupo no seu ritmo, e o histórico
+pode ser relido (replay, grupo novo). Uma mensagem no SQS diz "alguém precisa fazer isto **uma vez**": quem pega faz,
+a mensagem é apagada, e a fila cuida do retry e da DLQ. A notificação gravada pelo `notifications` é um **fato** (fica
+no banco, aparece em `GET /me/notifications`). Mandar o push para o celular é **trabalho**: não tem por que ser relido
+num replay, nem lido por outro consumidor, e precisa de retry por mensagem com um provedor externo que falha.
+
+```text
+tópico Kafka ──▶ consumer notifications ── UMA transação no Postgres ───────────────────────┐
+                   1. marca processed_events                                               │
+                   2. grava a notificação (o FATO)                                         │
+                   3. SendMessage no SQS (o TRABALHO) ◀── falhou: rollback + retry         │
+                   COMMIT ─▶ commita o offset no Kafka                                     │
+                                                                                           ▼
+           fila taskflow-push (standard) ──▶ Lambda push-sender (lotes de até 10)
+                 │ 3 recebimentos sem sucesso        ├─ idempotência: reserva condicional no DynamoDB (pushId)
+                 ▼                                   ├─ provedor de push (simulado)
+           taskflow-push-dlq (14 dias)               └─ batchItemFailures: só as que falharam voltam
+```
+
+**O dual-write que voltaria, e como ele não volta.** Gravar no Postgres e enviar ao SQS são duas escritas em dois
+sistemas, o mesmo problema que a outbox resolveu na 13.2. Aqui, o `SendMessage` é a **última escrita dentro da
+transação**, antes do COMMIT ([`notifications.handler.ts`](../../src/modules/notifications/consumer/notifications.handler.ts)):
+
+| Falha | O que acontece |
+|---|---|
+| SQS fora do ar | `InfrastructureError` → rollback (nem marca, nem notificação) → o runner tenta de novo, para sempre, nunca DLT |
+| Banco falha antes do envio | Nada foi enviado (por isso o envio é a ÚLTIMA escrita) |
+| COMMIT falha **depois** do envio | O Kafka reentrega, o push é enfileirado de novo com o **mesmo `pushId`**, e a Lambda descarta a duplicata |
+
+É *at-least-once* na fila com consumidor idempotente na ponta, o mesmo raciocínio do módulo inteiro. As alternativas
+recusadas:
+- **Uma segunda outbox** (`push_requests` + um relay para o SQS): a mais forte, mas é outro processo para operar só
+  para garantir o que a idempotência da Lambda já garante.
+- **Enviar depois do COMMIT:** um crash entre o COMMIT e o envio perderia o push para sempre (a reentrega bateria em
+  `processed_events` e sairia como `duplicate`).
+
+O preço da escolha: a transação fica aberta durante o envio (por isso o orçamento de tempo abaixo), e com o SQS fora as
+**notificações também param** (a partição espera). Para um push de "você foi atribuído", aceitável; para um efeito
+crítico e independente, a segunda outbox seria a escolha.
+
+**A chave de idempotência é o `eventId`, não o id da notificação.** O id da notificação é gerado de novo a cada
+tentativa (a transação desfeita leva o anterior junto): duas tentativas seriam dois pushes "diferentes". O `eventId` é
+o mesmo em toda reentrega do Kafka.
+
+**`InfrastructureError`: o adapter declara a classe da falha.** A classificação da 13.5 reconhecia o banco pelos
+códigos do Prisma; um erro do SDK da AWS cairia em `unknown` e, depois de 5 tentativas, um SQS fora esvaziaria o tópico
+no DLT. Nenhum erro do `SendMessage` é culpa do evento (o corpo é pequeno e montado por nós), então o
+[`SqsPushQueue`](../../src/modules/notifications/consumer/sqs-push-queue.ts) embrulha **qualquer** falha em
+`InfrastructureError`, a contraparte da `NonRetryableError` em
+[`consumer-errors.ts`](../../src/common/messaging/consumer-errors.ts). Quem conhece a dependência decide a classe; o
+runner continua genérico.
+
+**O orçamento de tempo, em duas camadas.** A transação do Prisma expira em 5 s; o envio precisa desistir antes. Por
+tentativa: conexão 1 s, resposta 1,5 s, 2 tentativas. E um `AbortSignal` de 3,5 s na chamada inteira. A segunda camada
+existe porque a primeira **falhou na demo** (problema 37): com o LocalStack pausado, o `requestTimeout` do SDK só
+emitia um aviso, e o consumer ficou pendurado sem logar nada.
+
+**Fila standard, não FIFO.** A ordem dos pushes não importa, e a idempotência está na Lambda. A FIFO limita a vazão e
+deduplica só numa janela de 5 minutos, o que não substitui a idempotência.
+
+**Idempotência na Lambda: reserva com prazo** ([`idempotency.ts`](../../lambdas/push-sender/idempotency.ts), o padrão do
+Powertools for AWS Lambda, reimplementado). "Já enviei?" simples não serve: marcar **antes** de enviar perde o push se o
+envio falhar; marcar **depois** deixa duas invocações simultâneas enviarem as duas. O registro tem três estados:
+
+1. `PutItem` **condicional**: grava `IN_PROGRESS` com prazo, só se o registro não existe ou se é uma reserva vencida
+   (a invocação que a fez morreu). O DynamoDB avalia a condição atomicamente, como o `ON CONFLICT` do Postgres.
+2. Envio deu certo → `COMPLETED` (TTL de 48 h). Deu errado → apaga a reserva e devolve a mensagem.
+3. Já `COMPLETED` → duplicata: sai da fila sem enviar. `IN_PROGRESS` dentro do prazo → outra invocação está enviando:
+   volta para a fila.
+
+Os tempos são amarrados ([`push.tf`](../../terraform/push.tf)): **timeout da Lambda (10 s) < prazo da reserva (30 s) <
+visibility timeout (60 s)**. Reserva maior que a Lambda: uma invocação viva nunca perde a reserva. Reserva menor que a
+visibilidade: quando a mensagem de uma invocação morta voltar, a reserva já venceu e o envio é refeito.
+
+Um detalhe que é fácil errar: se o push **saiu** e só a marca `COMPLETED` falhou, a mensagem **não** volta para a fila.
+Voltar enviaria de novo quando a reserva vencesse; a reserva expira pelo TTL.
+
+**`batchItemFailures` + `ReportBatchItemFailures`** ([`batch-processor.ts`](../../lambdas/push-sender/batch-processor.ts)).
+Sem isso, a Lambda só diz "o lote deu certo" (o SQS apaga as 10) ou "falhou" (as 10 voltam): uma mensagem ruim
+reenviaria as 9 boas a cada tentativa, e todas iriam juntas para a DLQ. Com a lista, só as falhas voltam. Cada mensagem
+tem o seu `try`: uma exceção solta derrubaria a invocação e o lote inteiro voltaria. E a lista só vale com
+`function_response_types = ["ReportBatchItemFailures"]` no event source mapping; sem isso, o SQS **ignora** a resposta.
+
+**Mensagem inválida no SQS × no Kafka.** O runner do Kafka manda uma `NonRetryableError` direto para o DLT. O SQS não
+tem "mande para a DLQ agora": a mensagem inválida é tentada `maxReceiveCount` vezes (3) e então movida. Custo pequeno,
+e o motivo fica no log da Lambda.
+
+**Outros pontos do desenho:**
+- **Leitor tolerante dos dois lados:** a Lambda tem a própria cópia do contrato
+  ([`push-request.ts`](../../lambdas/push-sender/push-request.ts)), com `version`, como os consumers do Kafka. Sem zod:
+  o pacote leva só o código compilado (o SDK do DynamoDB já vem no runtime da Lambda).
+- **Porta `PushQueue`:** sem `PUSH_QUEUE_URL`, entra o `DisabledPushQueue` (a notificação é gravada, o push não). Dev
+  sem AWS, CI e a suíte de streaming continuam iguais.
+- **Replay não gera push:** o `notifications` já ignora replay (`acceptsReplay = false`, 13.6b).
+- **Concorrência máxima 2** no event source mapping: um pico na fila não vira um pico no provedor de push.
+- **Menor privilégio:** a role da Lambda só lê ESTA fila e só escreve NESTA tabela, com as quatro ações que o código usa.
+- **Runtime `nodejs22.x`**, não 24: o provider AWS travado no lock (5.100) ainda não aceita o `nodejs24.x` (problema 39).
+  A Lambda é outro deployable, com runtime próprio.
+
 ### Um trace só através da outbox (`traceparent`)
 
 **O problema.** Dentro de um processo, o OpenTelemetry carrega o span corrente no `AsyncLocalStorage`, e a
@@ -1197,6 +1310,52 @@ docker run --rm -v "$PWD/prometheus:/rules:ro" -w /rules --entrypoint promtool p
 O Prometheus não recarrega as regras sozinho (o endpoint `/-/reload` fica desligado: ele também permite desligar o
 servidor por HTTP). Depois de editar `alerts.yml`: `docker restart taskflow-prometheus`.
 
+### 15. Push por SQS + Lambda (13.7)
+
+Precisa do Terraform instalado e do `LOCALSTACK_AUTH_TOKEN` no `.env`. Sem eles, tudo o mais funciona: o consumer só não
+enfileira o push.
+
+```bash
+npm run aws:up            # LocalStack + build da Lambda + Terraform (fila, DLQ, tabela, Lambda, event source mapping)
+npm run aws:resources     # filas, tabelas e a Lambda (estado Active)
+```
+
+No `.env`, para o consumer de notificações (o valor sai no output `push_queue_url` do `aws:up`):
+
+```bash
+PUSH_QUEUE_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/taskflow-push
+AWS_ENDPOINT_URL=http://localhost:4566
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+```
+
+Com a API, o relay e o `npm run consumer:notifications:dev` rodando (o log diz `Push enfileirado no SQS`), crie uma
+tarefa já atribuída a outro usuário, e então:
+
+```bash
+alias aws-local='docker compose exec -T localstack awslocal'
+
+# O que a Lambda fez (uma linha JSON por evento)
+aws-local logs filter-log-events --log-group-name /aws/lambda/taskflow-push-sender \
+  --query 'events[].message' --output text | tr '\t' '\n' | grep '^{'
+
+# A idempotência: um item por push, COMPLETED depois do envio
+aws-local dynamodb scan --table-name taskflow-push-deliveries --query 'Items[].[pushId.S,status.S]' --output text
+```
+
+**Provocar cada caminho:**
+- **Duplicata:** mande à fila duas mensagens com o mesmo `pushId` (`aws-local sqs send-message --queue-url <url>
+  --message-body '{"version":1,"pushId":"p1",...}'`). A 2ª sai como `push duplicado descartado`.
+- **Falha e DLQ:** crie uma tarefa com `[push-fail]` no título. A Lambda falha, a mensagem volta a cada 60 s
+  (visibility timeout) e, no 3º recebimento, vai para a DLQ (~3 min):
+  `aws-local sqs receive-message --queue-url <push_dlq_url> --visibility-timeout 0`.
+- **SQS fora:** `docker pause taskflow-localstack`, crie uma tarefa atribuída. A API responde 201; o consumer loga
+  `Falha ao processar mensagem (infrastructure, tentativa N…)` com backoff, e a notificação **não** é gravada.
+  `docker unpause taskflow-localstack`: em segundos, notificação gravada e push enviado; nada no DLT.
+
+O cadastro aceita 3 usuários por minuto (throttler do [Módulo 06](06-seguranca-owasp.md)): numa demo com vários
+usuários, espere a janela ou use um UUID qualquer como `assigneeId` (a notificação vai para esse id).
+
 ---
 
 ## ⚠️ Problemas encontrados e soluções
@@ -1239,6 +1398,9 @@ servidor por HTTP). Depois de editar `alerts.yml`: `docker restart taskflow-prom
 | 34 | **(13.6d)** O primeiro teste das regras falhava em todos os alertas que disparavam | O `promtool` compara também as anotações, e o teste não as declarava | `exp_annotations` em cada caso: o texto que o plantão lê também é testado |
 | 35 | **(13.6d)** Com o Kafka fora, o lag sumia do painel e o `ConsumerLagHigh` ficava cego; o único sinal era o `OutboxStalled`, 3,5 min depois | A coleta do exporter falha com o broker parado (`up{job="kafka"} = 0`, observado), e sem dados nenhuma regra de lag avalia | Alerta `KafkaUnreachable` (`up{job="kafka"} == 0` por 1 min), com caso de teste |
 | 36 | **(13.6d)** O alerta do DLT dizia "1.0029457627118645 mensagem(ns)" | `increase()` extrapola a janela e devolve número quebrado | `printf "%.0f"` na anotação. Achado lendo o alerta ao vivo, não no teste (as séries sintéticas davam 1 exato) |
+| 37 | **(13.7)** Com o LocalStack pausado, o consumer ficou **pendurado** no envio ao SQS: nenhuma falha no log, transação aberta, partição parada | O `requestTimeout` do `@smithy/node-http-handler` (SDK v3 recente) só emite um **aviso** ao estourar, a menos que `throwOnRequestTimeout` esteja ligado. O teste unitário com porta fechada não pegava: conexão recusada falha na hora, conexão aceita e muda, não | `throwOnRequestTimeout: true` + `AbortSignal.timeout(3,5 s)` na chamada (o orçamento vale aconteça o que acontecer no SDK). Teste com um servidor TCP que aceita e não responde; com a correção desligada, ele estoura o tempo |
+| 38 | **(13.7)** O primeiro desenho usava o id da notificação como chave de idempotência do push | Esse id é gerado a cada tentativa: a transação desfeita leva o anterior junto, e duas tentativas viram dois pushes "diferentes" | `pushId` = `eventId` do evento de origem, o mesmo em toda reentrega do Kafka |
+| 39 | **(13.7)** O runtime `nodejs24.x` não é aceito pelo Terraform | O provider AWS travado no lock (5.100) é anterior a esse runtime e valida o valor contra a lista dele | `nodejs22.x` na Lambda (deployable com runtime próprio). Subir o provider para a 6.x fica como próximo passo, com o próprio PR |
 
 ---
 
@@ -1382,6 +1544,21 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Testes novos | 5 unitários (o dashboard novo no teste existente), 3 de integração (`check rules`, `test rules` com 10 casos, imagem igual à do compose) |
 | Suítes | 272 unitários · 71 integração · 49 E2E · 13 streaming (~75 s, 3 execuções estáveis) |
 
+**13.7 — push por SQS + Lambda** (LocalStack 2026.9.0, processos em `node dist/...`)
+
+| Experimento | Resultado |
+|---|---|
+| `npm run aws:up` | 14 recursos criados, Lambda `nodejs22.x` ativa |
+| Push normal direto na fila | Enviado, item `COMPLETED` no DynamoDB |
+| A mesma mensagem (mesmo `pushId`) de novo | `push duplicado descartado`, lote com `duplicate: 1`, nenhum envio |
+| Mensagem com `[push-fail]` | Falhou com `receiveCount` 1, 2 e 3 e foi movida para a DLQ (2 de 2 mensagens assim) |
+| Fluxo completo: API → outbox → relay → Kafka → consumer → SQS → Lambda | Push enviado ao responsável, com `pushId` = `eventId` do `TaskCreated` |
+| SQS **pausado** + tarefa atribuída | API: 201. Consumer: `infrastructure`, backoff 500 ms → 8 s, **ainda tentando na 5ª** (um `unknown` iria ao DLT). 0 notificações durante a queda; SQS de volta: 1 notificação, push enviado, 0 mensagens no DLT |
+| Envio contra servidor que aceita e não responde | Antes da correção: **pendurado** (> 15 s, só um aviso no log). Depois: `InfrastructureError` em **3,0 s** |
+| **Mutação:** timeout que só avisa, sem `AbortSignal` | O teste unitário do servidor mudo estoura o tempo |
+| Testes novos | 13 unitários (Lambda: lote, duplicata, reserva em andamento, marca que falha, contrato; adapter SQS com conexão recusada e servidor mudo; classificação; schema) e 3 de integração (push na transação, rollback com a fila fora, duplicata não reenfileira) |
+| Suítes | 285 unitários · 74 integração · 13 streaming (as suítes de streaming usam o adapter desligado) |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -1389,7 +1566,7 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Antes | Hoje (13.1) | Por quê |
 |---|---|---|
 | `EventBus` em memória como único meio de entregar eventos | Broker Kafka disponível no compose, ainda **não** usado pela API | A infraestrutura entra e é validada antes do código que depende dela |
-| SQS/SNS provisionados no Terraform e sem uso | Inalterado | O papel do SQS (fila de trabalho) entra na etapa 13.7 |
+| SQS/SNS provisionados no Terraform e sem uso | **(13.7)** Fila `taskflow-push` com DLQ, Lambda `push-sender` (idempotente no DynamoDB, `batchItemFailures`), alimentada pelo consumer `notifications` dentro da transação | O critério "Kafka para fatos, SQS para trabalho" deixa de ser só texto: os dois no mesmo sistema, cada um no que faz melhor |
 | Nenhum registro do que deveria sair do serviço | **(13.2)** Tabela `outbox` gravada na mesma transação dos eventos, com o contrato público `taskflow.task-events.v1` | Sem dual-write: o que for publicado será exatamente o que foi gravado |
 | Payload do Event Store como único formato de evento | **(13.2)** Evento de domínio (interno) × evento de integração (público), com mapeamento explícito | O agregado pode evoluir sem quebrar consumers |
 | Outbox gravada e ninguém publicando | **(13.3)** Relay em processo separado, um lote por vez (advisory lock de transação), produtor idempotente, backoff, limpeza e métricas próprias | Os eventos chegam ao Kafka em ordem por tarefa, sem acoplar a API à disponibilidade do broker |
@@ -1405,6 +1582,23 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 ---
 
 ## 🚧 Limitações e próximos passos
+
+- **Push simulado e sem registro de dispositivos:** a Lambda não fala com APNs nem FCM, e o projeto não sabe quais
+  aparelhos cada usuário tem. O registro (`POST /me/devices`, token por plataforma) é tema do Módulo 14; num provedor
+  real, o `pushId` iria na chave de colapso (`apns-collapse-id`, `collapse_key`), a última defesa contra o push duplo.
+- **Push duplo ainda possível num caso:** a Lambda morre entre o provedor aceitar e a marca `COMPLETED`. Quando a
+  reserva vence, o envio é refeito. É o limite honesto de *exactly-once* com um sistema externo.
+- **SQS fora para as notificações também:** o envio está dentro da transação, então a partição espera a fila voltar.
+  Efeito crítico e independente pediria uma segunda outbox.
+- **Sem teste automatizado contra AWS:** o LocalStack exige token, que não vai para o CI. A Lambda e o adapter são
+  testados com fakes e falhas reais de rede; a condição do DynamoDB e o `ReportBatchItemFailures` são exercidos no
+  roteiro manual (passo 15 do "Como reproduzir").
+- **O trace para no SQS:** o `traceparent` não segue na mensagem da fila, e a Lambda não exporta spans. Próximo passo:
+  atributo de mensagem com o contexto W3C e a camada OTel da Lambda.
+- **Push velho na DLQ:** reenviar a DLQ dias depois manda "você foi atribuído" atrasado. O `requestedAt` está no
+  contrato para a Lambda poder descartar o que passou do prazo; a regra não foi implementada.
+- **Recursos antigos ainda sem uso no Terraform:** `taskflow-sync-queue`, o tópico SNS e a role `lambda_sync` (Módulo 09)
+  continuam provisionados sem consumidor.
 
 - **Alertas sem roteamento:** sem Alertmanager, disparam em `/alerts` do Prometheus e ninguém é avisado. Próximo passo:
   rotas por `severity` (critical → plantão, warning → canal) e silêncio durante deploy.
@@ -1493,7 +1687,7 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - [x] Replay do Event Store pela outbox, sem quebrar a ordem por tarefa nem disparar efeitos, e runbook de reconstrução (13.6b)
 - [x] *Redrive* do DLT com política por grupo e auditoria, e limpeza de `processed_events` com retenção validada (13.6c)
 - [x] Lag pelo broker, painel de mensageria e alertas como código testados no CI (13.6d)
-- [ ] Kafka × SQS no mesmo sistema (13.7, opcional)
+- [x] Kafka (fatos) × SQS (trabalho) no mesmo sistema: push com DLQ, Lambda idempotente e `batchItemFailures` (13.7)
 - [ ] ADRs (13.8)
 
 ---

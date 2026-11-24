@@ -166,7 +166,8 @@ services:
     ports:
       - "4566:4566"
     environment:
-      - SERVICES=sqs,s3,dynamodb,sns,iam
+      # lambda + logs: Lambda do push (Módulo 13.7), executada em container próprio pelo socket do Docker abaixo
+      - SERVICES=sqs,s3,dynamodb,sns,iam,lambda,logs
       - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
