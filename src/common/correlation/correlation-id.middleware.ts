@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { trace } from '@opentelemetry/api';
 import type { NextFunction, Request, Response } from 'express';
+import { currentRequestSpan } from '../telemetry/request-span';
 import { runWithCorrelationId } from './correlation-context';
 
 /** Header de entrada e de saída. O Express normaliza os nomes de header recebidos para minúsculas. */
@@ -40,7 +40,8 @@ export function correlationIdMiddleware(req: Request, res: Response, next: NextF
 
   // Devolvido em toda resposta, inclusive erros: o cliente sempre tem o id para citar
   res.setHeader(CORRELATION_ID_HEADER, correlationId);
-  trace.getActiveSpan()?.setAttribute(CORRELATION_ID_SPAN_ATTRIBUTE, correlationId);
+  // No span do REQUEST, e não no do middleware (que é o ativo aqui dentro): ver `currentRequestSpan`
+  currentRequestSpan()?.setAttribute(CORRELATION_ID_SPAN_ATTRIBUTE, correlationId);
 
   runWithCorrelationId(correlationId, next);
 }

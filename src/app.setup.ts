@@ -2,6 +2,8 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
+import { APP_VERSION_HEADER, PLATFORM_HEADER } from './common/client/client-info';
+import { createClientInfoMiddleware } from './common/client/client-info.middleware';
 import { CORRELATION_ID_HEADER, correlationIdMiddleware } from './common/correlation/correlation-id.middleware';
 import type { Env } from './config/env.schema';
 
@@ -18,6 +20,9 @@ export function configureApp(app: INestApplication): void {
   // PRIMEIRO middleware: o correlationId precisa existir antes de qualquer outro (inclusive do log de acesso).
   // Os middlewares de módulo (o pino-http do nestjs-pino) só são montados no init/listen, então rodam depois deste.
   app.use(correlationIdMiddleware);
+  // Logo depois: quem é o cliente (plataforma e versão do app). Antes dos guards, para a versão mínima (14.2) valer
+  // até em rota pública; e antes do log de acesso, que registra o cliente
+  app.use(createClientInfoMiddleware());
 
   // ~15 headers de segurança numa linha: anti-clickjacking, HSTS, nosniff, CSP… (OWASP A05)
   app.use(helmet());
@@ -28,7 +33,8 @@ export function configureApp(app: INestApplication): void {
     origin: config.get('CORS_ORIGINS', { infer: true }),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization', CORRELATION_ID_HEADER],
+    // Sem os headers do cliente aqui, o preflight do navegador barraria o front web que os envia
+    allowedHeaders: ['Content-Type', 'Authorization', CORRELATION_ID_HEADER, PLATFORM_HEADER, APP_VERSION_HEADER],
     // Sem isto, o JavaScript de um front em outra origem não consegue LER o header da resposta (só o envia)
     exposedHeaders: [CORRELATION_ID_HEADER],
   });
@@ -71,6 +77,10 @@ export function setupSwagger(app: INestApplication): void {
           '**Correlação:** toda resposta traz o header `X-Correlation-Id`. Envie o seu (até 64 caracteres: letras, ' +
             'dígitos, `.`, `_`, `-`) para rastrear a chamada de ponta a ponta; ausente ou inválido, a API gera um UUID. ' +
             'Cite esse id ao reportar um problema.',
+          '',
+          '**Cliente:** apps e front web devem enviar `X-Platform` (`ios`, `android` ou `web`) e `X-App-Version` ' +
+            '(`MAJOR.MINOR.PATCH`, a versão de loja ou do build). São opcionais; ausentes ou inválidos, a chamada segue ' +
+            'como cliente desconhecido.',
         ].join('\n'),
       )
       .setVersion('1.0')
@@ -83,6 +93,24 @@ export function setupSwagger(app: INestApplication): void {
           'se ausente ou inválido, a API gera um UUID.',
         schema: { type: 'string', maxLength: 64, pattern: '^[A-Za-z0-9._-]{1,64}$' },
       })
+      .addGlobalParameters(
+        {
+          in: 'header',
+          name: PLATFORM_HEADER,
+          required: false,
+          description: 'Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).',
+          schema: { type: 'string', enum: ['ios', 'android', 'web'] },
+        },
+        {
+          in: 'header',
+          name: APP_VERSION_HEADER,
+          required: false,
+          description:
+            'Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, ' +
+            'nunca para autorização: o valor é controlado pelo cliente.',
+          schema: { type: 'string', pattern: '^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$' },
+        },
+      )
       // O cadeado aparece só nas rotas marcadas com @ApiBearerAuth(): register e login ficam públicos
       .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' })
       .addTag('auth', 'Cadastro, login (emissão de JWT) e identificação do usuário')

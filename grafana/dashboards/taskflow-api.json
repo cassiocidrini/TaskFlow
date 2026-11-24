@@ -693,6 +693,117 @@
           "legendFormat": "{{v8js_gc_type}}"
         }
       ]
+    },
+    {
+      "type": "row",
+      "id": 16,
+      "title": "Clientes (Módulo 14): plataforma e versão do app, pelos headers X-Platform e X-App-Version",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 41
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 17,
+      "title": "Requisições por segundo, por plataforma",
+      "description": "Quem chama a API: ios, android, web ou unknown (sem header ou com valor inválido). Probes /health não entram.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "taskflow-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 42
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "taskflow-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (platform) (rate(taskflow_app_requests_total[$__rate_interval]))",
+          "legendFormat": "{{platform}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 18,
+      "title": "Requisições por segundo, por versão do app (MAJOR.MINOR)",
+      "description": "A pergunta antes de subir a versão mínima (Módulo 14.2): quantos clientes ainda estão abaixo dela? \"none\" = sem versão; \"other\" = fora da faixa aceita como label.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "taskflow-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 42
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "taskflow-prometheus"
+          },
+          "refId": "A",
+          "expr": "sum by (platform, app_version) (rate(taskflow_app_requests_total[$__rate_interval]))",
+          "legendFormat": "{{platform}} {{app_version}}"
+        }
+      ]
     }
   ]
 }

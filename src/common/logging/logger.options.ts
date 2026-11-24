@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Params } from 'nestjs-pino';
 import { isHealthCheck } from '../../health/health-paths';
+import { describeClient } from '../client/client-info';
+import type { RequestWithClient } from '../client/client-info.middleware';
 import { currentCorrelationId } from '../correlation/correlation-context';
 
 /** O subconjunto do ambiente que o logger usa (facilita o teste unitário sem montar o `Env` inteiro). */
@@ -34,6 +36,9 @@ export function accessLogLevel(res: ServerResponse, err?: Error): 'error' | 'war
  * - **Serializers por allowlist** (método, url, status): o log de acesso nunca contém headers, então
  *   `Authorization` e cookies não vazam (OWASP A09). Allowlist é mais seguro que uma lista de `redact`: um header
  *   sensível novo não precisa ser lembrado.
+ * - **`client` (plataforma e versão do app, Módulo 14.1) em cada linha da requisição**, lido do que o
+ *   `clientInfoMiddleware` já validou, e não do header cru: o suporte filtra "erros do Android 2.13" sem que um
+ *   header inventado entre no log.
  */
 export function buildLoggerOptions(env: LoggerEnv): Params {
   return {
@@ -42,6 +47,10 @@ export function buildLoggerOptions(env: LoggerEnv): Params {
       // Fora de uma requisição (ex.: boot) não há contexto; gerar um id evita linhas de acesso sem correlação
       genReqId: () => currentCorrelationId() ?? randomUUID(),
       customAttributeKeys: { reqId: 'correlationId' },
+      customProps: (req: IncomingMessage) => {
+        const client = (req as IncomingMessage & RequestWithClient).appClient;
+        return client ? { client: describeClient(client) } : {};
+      },
       quietReqLogger: true,
       // Probes rodam a cada poucos segundos: seriam ~17 mil linhas/dia por réplica sem informação nenhuma.
       // Uma falha de readiness continua no log, pelo warn do indicador e pelo log de erro do terminus.
