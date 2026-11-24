@@ -1,6 +1,7 @@
 import type {
   OpenTaskStatus,
   TaskDomainEvent,
+  TaskDue,
   TaskPriority,
   TaskStatus,
 } from '../events/task.events';
@@ -31,7 +32,7 @@ export class TaskAggregate {
   private _priority!: TaskPriority;
   private _status: TaskStatus = 'PENDING';
   private _assigneeId?: string;
-  private _dueDate?: string;
+  private _due?: TaskDue;
   private _completedAt?: string;
 
   /** Quantos eventos já estão PERSISTIDOS — é o expectedVersion do próximo append. */
@@ -102,7 +103,7 @@ export class TaskAggregate {
   get priority() { return this._priority; }
   get status() { return this._status; }
   get assigneeId() { return this._assigneeId; }
-  get dueDate() { return this._dueDate; }
+  get due() { return this._due; }
   get completedAt() { return this._completedAt; }
   get version() { return this._version; }
 
@@ -130,7 +131,7 @@ export class TaskAggregate {
         this._title = event.data.title;
         this._priority = event.data.priority;
         this._assigneeId = event.data.assigneeId;
-        this._dueDate = event.data.dueDate;
+        this._due = event.data.due;
         this._status = 'PENDING';
         return;
       case 'TaskAssigned':

@@ -66,7 +66,7 @@ describe('CreateTaskHandler', () => {
         assigneeId: 'u1',
         priority: 'MEDIUM',
       },
-      schemaVersion: 1,
+      schemaVersion: 2, // TaskCreated v2 (Módulo 14.4)
     }, 0, { actorId: userId }, { toOutbox: expect.any(Function) }); // versão 0 (agregado novo); autor = userId do JWT
   });
 
@@ -169,26 +169,38 @@ describe('CreateTaskHandler', () => {
   // ============================================================
   // Prioridade e prazo atravessando o fluxo (antes eram descartados)
   // ============================================================
-  describe('priority e dueDate', () => {
-    const dueDate = new Date('2026-12-31T23:59:59.000Z');
+  describe('priority e prazo (due)', () => {
+    // Entrada com offset -03:00: o evento guarda o instante em UTC + o fuso (Módulo 14.4)
+    const due = { at: new Date('2026-12-31T23:59:59-03:00'), timezone: 'America/Sao_Paulo' };
 
-    it('deve gravar o dueDate (ISO) no payload do Event Store', async () => {
-      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa', undefined, dueDate));
+    it('deve gravar o prazo como { at em UTC, timezone } no payload v2 do Event Store', async () => {
+      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa', undefined, due));
 
       const [stored] = eventStore.append.mock.calls[0];
-      expect(stored.payload.dueDate).toBe('2026-12-31T23:59:59.000Z');
+      expect(stored.payload.due).toEqual({ at: '2027-01-01T02:59:59.000Z', timezone: 'America/Sao_Paulo' });
+      expect(stored.payload).not.toHaveProperty('dueDate'); // o formato antigo não é mais gravado
+      expect(stored.schemaVersion).toBe(2);
     });
 
-    it('deve publicar priority e dueDate no TaskCreatedEvent (chegam ao Read Model)', async () => {
-      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Corrigir bug urgente', undefined, dueDate));
+    it('prazo do formato antigo (fuso desconhecido): timezone null, nunca inventado', async () => {
+      await handler.execute(
+        new CreateTaskCommand(userId, 'p1', 'Tarefa', undefined, { at: new Date('2026-12-31T23:59:59Z'), timezone: null }),
+      );
+
+      const [stored] = eventStore.append.mock.calls[0];
+      expect(stored.payload.due).toEqual({ at: '2026-12-31T23:59:59.000Z', timezone: null });
+    });
+
+    it('deve publicar priority e due no TaskCreatedEvent (chegam ao Read Model)', async () => {
+      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Corrigir bug urgente', undefined, due));
 
       const published = eventBus.publish.mock.calls[0][0] as TaskCreatedEvent;
       expect(published.priority).toBe('HIGH'); // "bug" e "urgente" → KeywordPriorityStrategy
-      expect(published.dueDate).toBe('2026-12-31T23:59:59.000Z');
+      expect(published.due).toEqual({ at: '2027-01-01T02:59:59.000Z', timezone: 'America/Sao_Paulo' });
     });
 
     it('evento GRAVADO e evento PUBLICADO devem carregar exatamente os mesmos dados', async () => {
-      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa', 'u1', dueDate));
+      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa', 'u1', due));
 
       const [stored] = eventStore.append.mock.calls[0];
       const published = eventBus.publish.mock.calls[0][0] as TaskCreatedEvent;

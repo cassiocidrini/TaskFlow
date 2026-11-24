@@ -10,6 +10,7 @@ import {
   APP_UPDATE_REQUIRED,
 } from './common/client/version-gate.middleware';
 import { CORRELATION_ID_HEADER, correlationIdMiddleware } from './common/correlation/correlation-id.middleware';
+import { DEPRECATION_HEADERS } from './common/deprecation/deprecation';
 import type { Env } from './config/env.schema';
 
 /**
@@ -43,7 +44,7 @@ export function configureApp(app: INestApplication): void {
     // Sem os headers do cliente aqui, o preflight do navegador barraria o front web que os envia
     allowedHeaders: ['Content-Type', 'Authorization', CORRELATION_ID_HEADER, PLATFORM_HEADER, APP_VERSION_HEADER],
     // Sem isto, o JavaScript de um front em outra origem não consegue LER o header da resposta (só o envia)
-    exposedHeaders: [CORRELATION_ID_HEADER, APP_UPDATE_HEADER, APP_RECOMMENDED_VERSION_HEADER],
+    exposedHeaders: [CORRELATION_ID_HEADER, APP_UPDATE_HEADER, APP_RECOMMENDED_VERSION_HEADER, ...DEPRECATION_HEADERS],
   });
 
   // Validação global de TODA entrada. whitelist + forbidNonWhitelisted = defesa contra mass assignment:

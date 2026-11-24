@@ -4,6 +4,48 @@ import { GetTasksQuery } from './get-tasks.query';
 import { PrismaService } from '../../../prisma/prisma.service';
 import { ProjectsService } from '../../projects/projects.service';
 import type { CursorPage } from '../../../common/dto/pagination.dto';
+import type { TaskDue } from '../events/task.events';
+
+/**
+ * Uma tarefa como a listagem a devolve. Mapeada campo a campo a partir da linha do Read Model, e não a linha crua:
+ * colunas internas (as do expand/contract do Módulo 14.4: `due_at`, `due_timezone`, `due_date`) não podem vazar para
+ * o contrato só porque existem na tabela.
+ */
+export interface TaskListItem {
+  id: string;
+  projectId: string;
+  title: string;
+  status: TaskRead['status'];
+  priority: TaskRead['priority'];
+  assigneeId: string | null;
+  /** Depreciado (Módulo 14.4): o mesmo instante de `due.at`, para o app que ainda não migrou. */
+  dueDate: Date | null;
+  due: TaskDue | null;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * Durante o expand, `due_at ?? due_date`: uma linha criada pela versão anterior da API no meio do deploy (depois do
+ * backfill) só tem a coluna antiga, e continua aparecendo certa. Sai no contract (14.4b), junto com a coluna.
+ */
+export function toTaskListItem(row: TaskRead): TaskListItem {
+  const at = row.dueAt ?? row.dueDate;
+  return {
+    id: row.id,
+    projectId: row.projectId,
+    title: row.title,
+    status: row.status,
+    priority: row.priority,
+    assigneeId: row.assigneeId,
+    dueDate: at,
+    due: at ? { at: at.toISOString(), timezone: row.dueTimezone } : null,
+    completedAt: row.completedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
 
 /**
  * Lado de LEITURA do CQRS: lista as tarefas a partir do Read Model `tasks_read`.
@@ -22,7 +64,7 @@ export class GetTasksHandler implements IQueryHandler<GetTasksQuery> {
     private readonly projects: ProjectsService,
   ) {}
 
-  async execute(query: GetTasksQuery): Promise<CursorPage<TaskRead>> {
+  async execute(query: GetTasksQuery): Promise<CursorPage<TaskListItem>> {
     // Autorização primeiro: 404 se o projeto não for do usuário
     await this.projects.assertOwner(query.projectId, query.userId);
 
@@ -40,7 +82,7 @@ export class GetTasksHandler implements IQueryHandler<GetTasksQuery> {
     const items = hasNextPage ? rows.slice(0, query.limit) : rows;
 
     return {
-      items,
+      items: items.map(toTaskListItem),
       nextCursor: hasNextPage ? items[items.length - 1].id : null,
     };
   }

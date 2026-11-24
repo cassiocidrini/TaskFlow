@@ -41,7 +41,7 @@ describe('Projeções do tasks_read (integração)', () => {
     projectId: '22222222-2222-4222-8222-222222222222',
     title: 'Tarefa de integração',
     priority: 'HIGH',
-    dueDate: '2026-12-31T23:59:59.000Z',
+    due: { at: '2026-12-31T23:59:59.000Z', timezone: 'America/Sao_Paulo' },
   });
   const { taskId } = taskCreated;
 

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { CqrsModule } from '@nestjs/cqrs';
+import { DeprecationNotifier } from '../../common/deprecation/deprecation';
 import { TasksController } from './tasks.controller';
 import { CreateTaskHandler } from './commands/create-task.handler';
 import { GetTasksHandler } from './queries/get-tasks.handler';
@@ -55,6 +56,7 @@ const EventHandlers = [
     EventStoreService,
     { provide: TaskRepository, useClass: EventSourcedTaskRepository },
     TaskCommandRunner,
+    DeprecationNotifier,
     ...CommandHandlers,
     ...QueryHandlers,
     ...EventHandlers,

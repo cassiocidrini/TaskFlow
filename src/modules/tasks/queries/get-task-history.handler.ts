@@ -5,7 +5,7 @@ import { EventStoreService } from '../../../events/event-store.service';
 import { ProjectsService } from '../../projects/projects.service';
 import { TaskAggregate } from '../domain/task.aggregate';
 import { toDomainEvent } from '../infrastructure/event-sourced-task.repository';
-import type { TaskDomainEvent, TaskPriority, TaskStatus } from '../events/task.events';
+import type { TaskDomainEvent, TaskDue, TaskPriority, TaskStatus } from '../events/task.events';
 import { GetTaskHistoryQuery } from './get-task-history.query';
 
 /**
@@ -33,7 +33,9 @@ export interface TaskHistory {
     status: TaskStatus;
     priority: TaskPriority;
     assigneeId?: string;
+    /** Depreciado (Módulo 14.4): o mesmo instante de `due.at`. */
     dueDate?: string;
+    due?: TaskDue;
     completedAt?: string;
     version: number;
   };
@@ -74,7 +76,7 @@ export class GetTaskHistoryHandler implements IQueryHandler<GetTaskHistoryQuery,
         status: task.status,
         priority: task.priority,
         assigneeId: task.assigneeId,
-        dueDate: task.dueDate,
+        ...(task.due ? { dueDate: task.due.at, due: task.due } : {}),
         completedAt: task.completedAt,
         version: task.version,
       },

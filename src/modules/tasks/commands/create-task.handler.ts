@@ -49,9 +49,10 @@ export class CreateTaskHandler implements ICommandHandler<CreateTaskCommand> {
       taskId,
       projectId: command.projectId,
       title: command.title,
-      priority: this.priorityStrategy.calculate(command.title, command.dueDate),
+      priority: this.priorityStrategy.calculate(command.title, command.due?.at),
       assigneeId: command.assigneeId,
-      dueDate: command.dueDate?.toISOString(),
+      // O instante em UTC + o fuso: juntos, reconstroem a hora local do usuário (Módulo 14.4)
+      ...(command.due ? { due: { at: command.due.at.toISOString(), timezone: command.due.timezone } } : {}),
     };
 
     await this.eventStore.append(
