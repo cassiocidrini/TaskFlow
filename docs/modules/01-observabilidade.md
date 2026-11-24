@@ -309,8 +309,10 @@ curl -i -H 'X-Correlation-Id: a b<script>' http://localhost:3000   # inválido �
 Do log ao trace: copie o `trace_id` da linha e abra `http://localhost:16686/trace/<trace_id>`. Do chamado ao
 trace: no Jaeger, *Search* → *Tags* `correlation.id=chamado-1234`.
 
-> O atributo `correlation.id` fica no span `middleware - correlationIdMiddleware` (é o span ativo quando o
-> middleware roda), não no span raiz do HTTP. A busca por tag encontra o trace inteiro do mesmo jeito.
+> O atributo `correlation.id` fica no span **do request** (`GET /`), e não no `middleware - correlationIdMiddleware`,
+> que é o span ativo enquanto o middleware roda. Até o [Módulo 14.1](14-api-para-web-e-apps.md) ele ficava no do
+> middleware (a busca por tag achava o trace mesmo assim); o helper `currentRequestSpan()` pega o span do request no
+> contexto do OpenTelemetry (problema 23).
 
 ### 7. Onde olhar
 
@@ -526,6 +528,7 @@ Problemas **reais**, na ordem em que apareceram:
 | 20 | **(Módulo 13.3)** O relay da outbox, parado, gerava um trace a cada 500 ms no Jaeger (`pg.query:BEGIN`, `SELECT`…), cerca de 7 mil por hora sem informação | O polling roda fora de qualquer requisição: cada query virava um trace raiz | `'@opentelemetry/instrumentation-pg': { requireParentSpan: true }`. Conferido no Jaeger: o relay ocioso não gera traces de query, e o `POST /tasks` da API continua com os 9 spans de query dentro do span HTTP |
 | 21 | **(Módulo 13.3)** Uma 2ª réplica do relay no mesmo host subia normalmente, mas sem métricas | A porta de métricas já estava em uso, e o `PrometheusExporter` **não** falha nem avisa | Porta configurável (`RELAY_METRICS_PORT`). Em produção, cada réplica tem o seu IP e o padrão basta. E `up{job="taskflow-relay"}` acusa uma réplica sem coleta |
 | 22 | **(Módulo 13.6d)** O dashboard novo não aparecia no Grafana, e o da API estava com o título antigo | O bind mount do Docker aponta para a PASTA original (o inode), não para o caminho. A pasta `grafana/` foi recriada por um checkout de branch, e o container ficou preso à antiga, que não existia mais: 2.766 erros `failed to walk provisioned dashboards` no log, por um dia, sem nenhum sintoma visível (o Grafana seguia mostrando a cópia que tinha no banco) | `docker compose up -d --force-recreate grafana` (usuários e senha ficam no volume `grafana_data`). Lição: depois de trocar de branch com pastas montadas, recriar os containers; e um dashboard que "não muda" pede uma olhada no log do provisionamento |
+| 23 | **(Módulo 14.1)** O `correlation.id` ficava no span `middleware - correlationIdMiddleware`, e não no span do request | Dentro de um middleware Express, o span ATIVO é o que o `instrumentation-express` cria para o próprio middleware. Estava documentado como peculiaridade (a busca por tag achava o trace), e veio à tona quando os atributos do cliente caíram no mesmo lugar | [`currentRequestSpan()`](../../src/common/telemetry/request-span.ts): o span do request vem do `rpcMetadata` que o `instrumentation-http` guarda no contexto (o mesmo do `RouteTelemetryGuard`). Teste unitário que reproduz o Express (span do middleware ativo dentro do do request); com o helper devolvendo o span ativo, ele falha |
 
 ---
 
