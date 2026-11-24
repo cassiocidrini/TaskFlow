@@ -603,7 +603,8 @@ curl -s -o /dev/null localhost:3000/                                            
 curl -s localhost:9464/metrics | grep taskflow_app_requests_total
 ```
 
-- **Log de acesso:** cada linha da requisição traz `"client":{"platform":"ios","appVersion":"2.14.7"}`.
+- **Log de acesso:** a linha de acesso traz `"client":{"platform":"ios","appVersion":"2.14.7"}`, uma vez só. As
+  outras linhas da requisição não repetem o cliente: o `correlationId` as liga à linha de acesso.
 - **Jaeger** (`http://localhost:16686`, serviço `taskflow`): *Tags* `correlation.id=demo-14`; o span `GET /` tem
   `taskflow.client.platform` e `taskflow.client.app_version`.
 - **Grafana** (`http://localhost:3001`): dashboard da API → linha **Clientes**, requisições por plataforma e por versão.
@@ -715,6 +716,7 @@ npm run app-version -- --platform android --min none --recommended none         
 | 14 | **(14.5)** O `tsc` não acusou que o controller continuava tratando o retorno do handler como texto | O `CommandBus.execute` devolve `any`: a mudança de `string` para `{ taskId, replayed }` compilaria e a resposta viraria `{ "taskId": { ... } }` | Tipo explícito no controller (`const result: CreateTaskResult`) e o E2E conferindo o corpo. Lição: onde a API do framework devolve `any`, o tipo não protege |
 | 15 | **(14.7)** A primeira demonstração do rollout deu 3 usuários com `stats` e 17 sem, em 50% | 9 cadastros foram recusados (nome com menos de 3 caracteres) e o script contava a listagem que falhou com 401 como "controle": os números não fechavam (165 listagens contadas para 20 × 15) | Dados válidos e o script contando falhas à parte. Lição: conferir se o experimento criou a condição que pretendia (a mesma do problema 18 do Módulo 13) |
 | 16 | **(14.7)** O alerta de erro por variante morreria calado no caso mais comum | Sem nenhum erro no controle, a série de erro dele não existe, e a subtração `variante - controle` sai vazia | `or vector(0)` no numerador; teste do `promtool` com o controle sem erro, e a mutação sem ele falhando |
+| 17 | **(depois do módulo)** A linha de acesso saía com `"client"` **duas vezes**; achado lendo o log do container na Etapa E.1 (Módulo 03) | O pino-http chama o `customProps` no início e no fim da requisição e evita a duplicata comparando texto, depois de apagar TODAS as chaves `{}` do JSON: com um objeto aninhado a comparação nunca casa. Nenhum teste viu: o unitário conferia só a função (certa), e o `JSON.parse` aceita chave duplicada em silêncio | O `client` entra pelos ganchos que montam a linha (`customSuccessObject`/`customErrorObject`). Teste com o pino-http real conferindo a linha **crua** (1 ocorrência em 201, 426 e 500); mutação com o `customProps` antigo: 2 ocorrências, vermelho. De quebra: a doc dizia "em cada linha da requisição", mas as linhas da aplicação nunca tiveram o `client` (só o `correlationId`); a doc foi corrigida |
 
 ---
 
@@ -726,7 +728,7 @@ npm run app-version -- --platform android --min none --recommended none         
 |---|---|
 | 7 requisições: 3 `ios 2.14.7`, 1 `Android 2.13.1` (401), 1 `web 5.0.0`, 1 só `999.0.0`, 1 sem headers, + 1 probe | `/metrics`: `ios/2.14` = 3, `android/2.13` = 1, `web/5.0` = 1, `unknown/other` = 1, `unknown/none` = 1; o probe não contou |
 | A mesma consulta no Prometheus (a do painel) | As 5 séries, com os mesmos valores |
-| Log de acesso | `client` em todas as linhas, com a versão completa (`999.0.0` inclusive); o 401 também registrado |
+| Log de acesso | `client` em todas as linhas de acesso, com a versão completa (`999.0.0` inclusive); o 401 também registrado. **Duplicado** em cada linha até a correção do problema 17 |
 | Jaeger, antes da correção | Atributos no span do middleware; `GET /` sem eles |
 | Jaeger, depois | `GET /` com `correlation.id`, `taskflow.client.platform` e `taskflow.client.app_version`; nenhum outro span com eles |
 | **Mutação:** contador criado no import | 2 testes falham (nada é contado) |
@@ -857,6 +859,14 @@ npm run app-version -- --platform android --min none --recommended none         
 | Teste da política de depreciação | A lista real (vazia) passa; com exemplos, 89 dias de aviso falham, 90 e o `dueDate` (97) passam |
 | Descrição do Swagger | Ganhou o parágrafo da compatibilidade (leitor tolerante, 90 dias, 6 meses); oasdiff: só a descrição mudou |
 | Suítes | 386 unitários (2 novos) · 95 integração · 79 E2E · 13 streaming |
+
+**Correção do log de acesso (problema 17)**
+
+| Experimento | Resultado |
+|---|---|
+| Ao vivo (`node dist/main`, `X-Platform: android`) | 201, 426 e 404: `"client"` **1×** em cada linha de acesso (antes: 2×) |
+| Teste da linha crua | 201, 426 e 500 com 1 ocorrência; sem cliente validado, nenhuma, e o header forjado fora do log. Mutação (o `customProps` antigo): 3 vermelhos, "Received length: 2" |
+| Suítes | 389 unitários (4 novos, 1 substituído) |
 
 ---
 
