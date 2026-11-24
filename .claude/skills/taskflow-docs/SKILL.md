@@ -32,9 +32,9 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
 
 ## Swagger — como está montado
 
-- `src/app.setup.ts` (`setupSwagger`): `addBearerAuth` + 5 tags descritas (`auth`, `projects`, `tasks`, `notifications`, `app`) + legenda
+- `src/app.setup.ts` (`setupSwagger`): `addBearerAuth` + 6 tags descritas (`auth`, `projects`, `tasks`, `notifications`, `features`, `app`) + legenda
   de status. **Sem** `addSecurityRequirements` global — register/login são públicos.
-- Toda rota nova: `@ApiTags` com um dos 5 nomes, `@ApiOperation` (summary + description para o consumidor),
+- Toda rota nova: `@ApiTags` com um dos 6 nomes, `@ApiOperation` (summary + description para o consumidor),
   `@ApiResponse` só com status reais, `@ApiBearerAuth()` se protegida (os controllers protegidos já têm na classe).
 - Respostas tipadas por **classes de documentação**: `auth/dto/auth.responses.ts`, `projects/dto/project.response.ts`,
   `tasks/dto/task.responses.ts`. Handler novo que devolve interface → adicione a classe correspondente lá.
@@ -62,7 +62,7 @@ assim (banco real via Testcontainers, `eventually()` para consistência eventual
 ```bash
 npx tsc --noEmit && npm run lint && npm run test:unit
 npm run build                                     # aplica o plugin do Swagger (nest-cli.json)
-node .claude/skills/taskflow-docs/scripts/probe-openapi.js            # 17 rotas (inclui /health/live e /health/ready), 5 tags, sem tag fantasma
+node .claude/skills/taskflow-docs/scripts/probe-openapi.js            # 18 rotas (inclui /health/live, /health/ready e /me/features), 6 tags, sem tag fantasma
 node .claude/skills/taskflow-docs/scripts/find-undocumented.js src test terraform scripts load labs   # esperado: 0
 npm run test:e2e        # se tocou em controller/pipe/guard (Docker ligado; roda com --runInBand)
 npm run test:streaming  # se tocou em outbox, relay ou contrato de integração (sobe Kafka + Postgres)

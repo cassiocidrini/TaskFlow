@@ -15,6 +15,7 @@ funciona; os ADRs registram **por que** ela é assim e **quando** a decisão dei
 | [0007](0007-kafka-para-fatos-sqs-para-trabalho.md) | Kafka para fatos, SQS para trabalho (envio dentro da transação) | Aceito | 13.7 |
 | [0008](0008-depreciacao-e-remocao-de-campos-da-api.md) | Depreciação e remoção de campos da API (expand → contract em dois deploys) | Aceito | 14.4 |
 | [0009](0009-idempotencia-de-requisicoes-na-transacao-do-efeito.md) | Idempotência de requisições (`Idempotency-Key`) na mesma transação do efeito | Aceito | 14.5 |
+| [0010](0010-feature-flags-proprias.md) | Feature flags em módulo próprio (porta + Postgres), e não um serviço gerenciado | Aceito | 14.6 |
 
 ## Formato
 
@@ -32,5 +33,6 @@ O de Michael Nygard, com duas seções a mais:
 - **ADR aceito não se edita** (só correção de link ou digitação). Decisão que muda ganha um ADR **novo**, que diz
   "Substitui o ADR-000X"; o antigo passa a "Substituído por ADR-000Y" e continua aqui: o histórico do porquê é o valor.
 - **Decisão nova de arquitetura = ADR novo, no mesmo PR do código.** Numeração sequencial, nome em kebab-case.
-- **Os ADRs 0001 a 0006 foram registrados em 24/11/2026**, depois das decisões (tomadas entre 09 e 10/11/2026, nas
-  etapas do Módulo 13). A data da decisão e a do registro aparecem separadas em cada um.
+- **Os ADRs 0001 a 0006 e o 0010 foram registrados depois das decisões** (o 0001 a 0006 tomados entre 09 e 10/11/2026,
+  nas etapas do Módulo 13; o 0010, no plano do Módulo 14, em outubro). A data da decisão e a do registro aparecem
+  separadas em cada um.

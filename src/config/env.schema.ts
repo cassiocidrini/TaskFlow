@@ -55,6 +55,10 @@ export const envSchema = z.object({
   // 24 h é o padrão de mercado (Stripe): cobre as novas tentativas de um app que ficou sem rede por horas.
   IDEMPOTENCY_KEY_TTL_HOURS: z.coerce.number().int().min(1).max(720).default(24),
 
+  // Cache das feature flags (Módulo 14.6): um kill switch vale em todas as réplicas em até este tempo.
+  // Menor que o da versão mínima (30 s) de propósito: desligar uma funcionalidade com problema não pode esperar.
+  FEATURE_FLAGS_CACHE_TTL_MS: z.coerce.number().int().min(0).max(60_000).default(5_000),
+
   DISABLE_THROTTLE: z
     .enum(['true', 'false'])
     .default('false')

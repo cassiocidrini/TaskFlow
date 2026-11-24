@@ -163,6 +163,7 @@ export function buildOpenApiDocument(app: INestApplication): OpenAPIObject {
       .addTag('projects', 'Projetos do usuário autenticado (cada projeto tem um dono)')
       .addTag('tasks', 'Tarefas event-sourced: criação, ciclo de vida, listagem e histórico de eventos')
       .addTag('notifications', 'Notificações do usuário, geradas a partir dos eventos de tarefa publicados no Kafka')
+      .addTag('features', 'Feature flags avaliadas para o usuário e o app (só o resultado; as regras ficam no servidor)')
       .addTag('app', 'Rota raiz (smoke test) e health checks para o orquestrador (liveness e readiness)')
       .build(),
   );

@@ -29,6 +29,8 @@
     "start:redrive": "node dist/redrive",
     "app-version": "ts-node src/app-version.ts",
     "start:app-version": "node dist/app-version",
+    "feature-flag": "ts-node src/feature-flag.ts",
+    "start:feature-flag": "node dist/feature-flag",
     "lambda:build": "node -e \"require('node:fs').rmSync('lambdas/push-sender/dist',{recursive:true,force:true})\" && tsc -p lambdas/push-sender/tsconfig.json",
     "dev": "npm run infra:up && npm run start:dev",
     "infra:up": "docker compose up -d --wait postgres jaeger",

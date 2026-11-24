@@ -157,6 +157,24 @@
         ],
         "type": "object"
       },
+      "FeatureFlagsResponseDto": {
+        "properties": {
+          "flags": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "description": "Cada flag existente, ligada (`true`) ou desligada (`false`) para este usuário e este app. Flag que não aparece aqui não existe: trate como desligada.",
+            "example": {
+              "task-list-with-stats": true
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "flags"
+        ],
+        "type": "object"
+      },
       "LoginDto": {
         "properties": {
           "email": {
@@ -1572,6 +1590,76 @@
         ]
       }
     },
+    "/me/features": {
+      "get": {
+        "description": "Todas as flags existentes, avaliadas para o usuário do token e o app dos headers `X-Platform`/`X-App-Version` (restrições de plataforma e versão mínima). Só o resultado: as regras ficam no servidor. Chame ao abrir o app.",
+        "operationId": "FeatureFlagsController_mine",
+        "parameters": [
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureFlagsResponseDto"
+                }
+              }
+            },
+            "description": "Mapa flag → ligada/desligada."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Minhas feature flags",
+        "tags": [
+          "features"
+        ]
+      }
+    },
     "/me/notifications": {
       "get": {
         "description": "Notificações geradas pelo consumer `notifications` a partir dos eventos de tarefa publicados no Kafka (atribuição e conclusão). Eventualmente consistente: aparecem depois que o relay publica e o consumer processa o evento.",
@@ -2654,6 +2742,10 @@
     {
       "description": "Notificações do usuário, geradas a partir dos eventos de tarefa publicados no Kafka",
       "name": "notifications"
+    },
+    {
+      "description": "Feature flags avaliadas para o usuário e o app (só o resultado; as regras ficam no servidor)",
+      "name": "features"
     },
     {
       "description": "Rota raiz (smoke test) e health checks para o orquestrador (liveness e readiness)",
