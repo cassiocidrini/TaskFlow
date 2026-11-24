@@ -5,6 +5,8 @@ import { PrismaService } from '../../../prisma/prisma.service';
 import { ProjectsService } from '../../projects/projects.service';
 import type { CursorPage } from '../../../common/dto/pagination.dto';
 import type { TaskDue } from '../events/task.events';
+import type { ProjectStatsDto } from '../../reports/dto/project-stats.response';
+import { ReportsService } from '../../reports/reports.service';
 
 /**
  * Uma tarefa como a listagem a devolve. Mapeada campo a campo a partir da linha do Read Model, e não a linha crua:
@@ -41,6 +43,9 @@ export function toTaskListItem(row: TaskRead): TaskListItem {
   };
 }
 
+/** A página da listagem; `stats` só com a flag `task-list-with-stats` ligada e só na primeira página (14.7). */
+export type TaskListPage = CursorPage<TaskListItem> & { stats?: ProjectStatsDto };
+
 /**
  * Lado de LEITURA do CQRS: lista as tarefas a partir do Read Model `tasks_read`.
  *
@@ -56,9 +61,10 @@ export class GetTasksHandler implements IQueryHandler<GetTasksQuery> {
   constructor(
     private readonly prisma: PrismaService,
     private readonly projects: ProjectsService,
+    private readonly reports: ReportsService,
   ) {}
 
-  async execute(query: GetTasksQuery): Promise<CursorPage<TaskListItem>> {
+  async execute(query: GetTasksQuery): Promise<TaskListPage> {
     // Autorização primeiro: 404 se o projeto não for do usuário
     await this.projects.assertOwner(query.projectId, query.userId);
 
@@ -78,6 +84,11 @@ export class GetTasksHandler implements IQueryHandler<GetTasksQuery> {
     return {
       items: items.map(toTaskListItem),
       nextCursor: hasNextPage ? items[items.length - 1].id : null,
+      // Flag `task-list-with-stats` (14.7): só na PRIMEIRA página. O app pede o resumo uma vez; repetir a consulta a
+      // cada página de rolagem seria pagar o custo à toa. O `assertOwner` acima já autorizou o projeto
+      ...(query.includeStats && !query.cursor
+        ? { stats: await this.reports.statsOf(query.projectId) }
+        : {}),
     };
   }
 }

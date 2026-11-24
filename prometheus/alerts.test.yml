@@ -192,3 +192,104 @@ tests:
             exp_annotations:
               summary: 'p95 da API em 972.2ms'
               runbook: docs/modules/01-observabilidade.md
+
+  # ---- Módulo 14.7: critério de avanço do rollout task-list-with-stats (ADR-0011) ----
+
+  # Regressão real: controle em até 50 ms, variante entre 50 e 250 ms (p95 0,24 s = 5x e +190 ms), 100 req/min cada.
+  # Condição verdadeira desde o início; com `for: 15m`, ainda pendente aos 10 min e disparando aos 25
+  - interval: 1m
+    input_series:
+      - series: 'taskflow_task_list_duration_bucket{variant="control", page="first", le="0.05"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="control", page="first", le="0.25"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="control", page="first", le="+Inf"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="with-stats", page="first", le="0.05"}'
+        values: '0x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="with-stats", page="first", le="0.25"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="with-stats", page="first", le="+Inf"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_requests_total{variant="with-stats", page="first", outcome="ok"}'
+        values: '0+100x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TaskListStatsSlower
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: TaskListStatsSlower
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Listagem com stats (rollout task-list-with-stats) com p95 de 0.240 s, acima do critério: reverter com --kill'
+              runbook: docs/adr/0011-criterio-de-avanco-do-rollout.md
+
+  # Ruído em latência baixa: a variante é 2x mais lenta (p95 ~9,7 ms contra ~4,7 ms), mas só 5 ms acima. O limite
+  # absoluto de 50 ms segura: NÃO dispara (só o relativo dispararia por milissegundos)
+  - interval: 1m
+    input_series:
+      - series: 'taskflow_task_list_duration_bucket{variant="control", page="first", le="0.005"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="control", page="first", le="0.01"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="control", page="first", le="+Inf"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="with-stats", page="first", le="0.005"}'
+        values: '0x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="with-stats", page="first", le="0.01"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="with-stats", page="first", le="+Inf"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_requests_total{variant="with-stats", page="first", outcome="ok"}'
+        values: '0+100x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: TaskListStatsSlower
+        exp_alerts: []
+
+  # Tráfego baixo demais na variante (3 req/min = 0,05/s, abaixo de 0,1/s): mesmo 5x mais lenta, NÃO decide com isso
+  - interval: 1m
+    input_series:
+      - series: 'taskflow_task_list_duration_bucket{variant="control", page="first", le="0.05"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="control", page="first", le="0.25"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="control", page="first", le="+Inf"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="with-stats", page="first", le="0.05"}'
+        values: '0x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="with-stats", page="first", le="0.25"}'
+        values: '0+3x30'
+      - series: 'taskflow_task_list_duration_bucket{variant="with-stats", page="first", le="+Inf"}'
+        values: '0+3x30'
+      - series: 'taskflow_task_list_requests_total{variant="with-stats", page="first", outcome="ok"}'
+        values: '0+3x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: TaskListStatsSlower
+        exp_alerts: []
+
+  # Erro só na variante (1% de 5xx) e NENHUM erro no controle: a série de erro do controle nem existe. Sem o
+  # `or vector(0)`, a subtração sairia vazia e o alerta não dispararia; com ele, dispara aos 25 min
+  - interval: 1m
+    input_series:
+      - series: 'taskflow_task_list_requests_total{variant="control", page="first", outcome="ok"}'
+        values: '0+100x30'
+      - series: 'taskflow_task_list_requests_total{variant="with-stats", page="first", outcome="ok"}'
+        values: '0+99x30'
+      - series: 'taskflow_task_list_requests_total{variant="with-stats", page="first", outcome="error"}'
+        values: '0+1x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: TaskListStatsErrors
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: TaskListStatsErrors
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: 'Listagem com stats (rollout task-list-with-stats) com taxa de erro 1% acima do controle: reverter com --kill'
+              runbook: docs/adr/0011-criterio-de-avanco-do-rollout.md

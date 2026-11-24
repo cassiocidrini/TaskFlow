@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
-> **Status:** 🚧 em construção, etapa **14.6 de 14.8** (feature flags). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **14.7 de 14.8** (a primeira funcionalidade atrás de uma flag, com critério de avanço). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está em "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`src/common/client/`](../../src/common/client/client-info.ts) (headers, parser de versão,
@@ -18,7 +18,8 @@
 > [`deprecation.ts`](../../src/common/deprecation/deprecation.ts) · idempotência em
 > [`src/common/idempotency/`](../../src/common/idempotency/idempotency.store.ts) · flags em
 > [`src/modules/feature-flags/`](../../src/modules/feature-flags/feature-flag.rules.ts) e o comando
-> [`src/feature-flag.ts`](../../src/feature-flag.ts)
+> [`src/feature-flag.ts`](../../src/feature-flag.ts) · rollout medido em
+> [`task-list.rollout.ts`](../../src/modules/tasks/task-list.rollout.ts)
 
 ---
 
@@ -51,7 +52,7 @@ e todos os apps que ainda estão por aí. As perguntas que o módulo responde:
 | **14.4c** | **Contract**, passo 2 (outro deploy): `DROP COLUMN due_date` com `lock_timeout` e checagem anti-perda; campos sempre presentes das respostas documentados como obrigatórios | ✅ |
 | **14.5** | `Idempotency-Key` no `POST /tasks`: a nova tentativa devolve a mesma resposta; a chave gravada na mesma transação da tarefa (ADR-0009) | ✅ |
 | **14.6** | Feature flags em módulo próprio (ADR-0010): kill switch, restrições de plataforma e versão, lista de usuários, porcentagem por bucket; `GET /me/features`; `npm run feature-flag` com auditoria | ✅ |
-| 14.7 | Flag `task-list-with-stats` e o critério de avanço em ADR | 🔜 |
+| **14.7** | `stats` do projeto na listagem atrás da flag `task-list-with-stats`; métricas por variante, painel e 2 alertas testados; critério de avanço no ADR-0011 | ✅ |
 | 14.8 | Estratégia de versionamento com janela de suporte | 🔜 |
 
 ---
@@ -377,6 +378,19 @@ opcionais. A prova, com o oasdiff, simulando a remoção do `assigneeId` da list
 `due`. Tirar o `dueDate` do tópico é mudança incompatível de um contrato que outros serviços leem (`eventVersion` 2),
 e fica fora do escopo.
 
+### Rollout da `task-list-with-stats` (14.7)
+
+```bash
+npm run feature-flag -- --key task-list-with-stats --description "Números do projeto na listagem"
+npm run feature-flag -- --key task-list-with-stats --enable --rollout 50
+# gere tráfego de vários usuários (DISABLE_THROTTLE=true para cadastrar rápido) e compare as variantes:
+curl -s localhost:9464/metrics | grep taskflow_task_list_requests_total
+# Prometheus: histogram_quantile(0.95, sum by (le, variant) (rate(taskflow_task_list_duration_bucket{page="first"}[5m])))
+npm run feature-flag -- --key task-list-with-stats --kill      # with-stats para de crescer; o tráfego vai para o control
+```
+
+Grafana → dashboard da API → linha **Rollout**; alertas em `http://localhost:9090/alerts` (`TaskListStats*`).
+
 ### Feature flags (14.6)
 
 ```bash
@@ -484,6 +498,43 @@ exatamente ao estado de antes do incidente.
 **Métrica:** `taskflow_feature_flag_evaluations_total{flag, enabled, reason}`. O nome da flag é seguro como label (são
 poucas e criadas por nós; uma chave inventada pelo código não vira série), e a `reason` responde "por que o usuário X
 não vê a tela?". O `userId` nunca entra.
+
+### A primeira funcionalidade atrás de uma flag (14.7): medir antes de avançar
+
+**A funcionalidade.** Com a flag `task-list-with-stats` ligada, a primeira página de `GET /projects/:id/tasks` traz
+também `stats`, os números do projeto (do consumer `reports`, 13.6a): o app deixa de fazer duas chamadas. A flag não é
+cerimônia: a mudança tem dois riscos reais, uma consulta a mais na rota mais chamada da API (latência) e números que
+dependem de um processo assíncrono (por isso o `asOf` visível).
+
+**Quem decide e quem executa.** O controller pergunta à porta `FeatureFlags` (com o usuário e o app) e passa
+`includeStats` para a consulta; o handler da listagem não sabe que existe flag. E a leitura dos números
+(`ReportsService.statsOf`) não repete a checagem de dono que a listagem já fez: seria uma consulta a mais justamente
+na rota medida. `stats` só na primeira página: o app pede o resumo uma vez, e repeti-lo na rolagem seria custo à toa.
+No contrato, `stats` é **opcional de verdade** (só com a flag e só na primeira página): a lição da 14.4.
+
+**Medir por variante: o "experimento feito à mão" do ADR-0010.** `taskflow_task_list_duration{variant, page}`
+(histograma com buckets em segundos, a lição da 13.6d) e `taskflow_task_list_requests_total{variant, page, outcome}`.
+Duas escolhas que tornam a comparação honesta:
+- **a mesma janela, grupos sorteados pelo bucket:** a variante e o controle convivem no mesmo período, e o bucket não
+  tem relação com o perfil do usuário. Comparar "antes × depois" misturaria a mudança com tudo o mais que mudou;
+- **só a primeira página, e só erro do servidor:** as páginas seguintes são iguais nos dois grupos e diluiriam a
+  diferença; um 404 de projeto alheio é erro do CLIENTE e só faria ruído (`outcome="client_error"`).
+
+**O critério escrito antes de ligar** ([ADR-0011](../adr/0011-criterio-de-avanco-do-rollout.md)). Avançar (10% → 50% →
+100%) numa janela de 24 h com pelo menos 1.000 requisições na variante, sem regressão de latência, sem erro acima do
+controle, com o consumer `reports` em dia e sem alerta crítico. Reverter com o kill switch se latência ou erro
+violarem por 15 min. Remover a flag depois de 2 semanas em 100%: **flag é dívida técnica**.
+
+**Regressão = p95 maior que 1,2× o do controle E mais de 50 ms acima.** Refinado durante a implementação: o desenho
+dizia "≤ 1,2× e ≤ +50 ms", condições que precisariam valer as duas, e isso alertaria por ruído em latência baixa (5 ms
+contra 7 ms é 1,4×, e 2 ms não importam). O relativo pega a piora proporcional; o absoluto é o piso contra o ruído.
+
+**O critério virou alerta** (`TaskListStatsSlower`, `TaskListStatsErrors`), com piso de tráfego (0,1 req/s na
+variante: não decidir com 3 requisições) e testado com `promtool` em quatro casos: regressão real dispara; ruído em
+latência baixa, tráfego baixo e o período do `for` não. E um detalhe de PromQL que o teste pegou: sem nenhum erro no
+controle, a série de erro DELE não existe, a subtração sai vazia e o alerta morreria calado no caso mais comum; o
+`or vector(0)` resolve (mutação: sem ele, o teste falha). No Grafana, a linha "Rollout" do dashboard da API mostra p95
+e taxa de erro lado a lado.
 
 ### Em qual span gravar: o do request, não o ativo
 
@@ -621,6 +672,8 @@ npm run app-version -- --platform android --min none --recommended none         
 | 12 | **(14.4b)** O E2E de tarefas quebrou com 400 | Ele ainda criava tarefas com `dueDate`: era, na prática, um cliente que não migrou | Atualizado para `due`. É o efeito exato do contract em quem ficou para trás, e por isso a versão mínima vem antes |
 | 13 | **(14.4c)** O teste da migração do `DROP` não conseguia rodar o arquivo SQL pelo Prisma | O arquivo tem vários comandos e um bloco `DO`; o Prisma executa um comando por vez (protocolo estendido) | O teste usa o driver `pg` (protocolo simples, aceita vários comandos), agora declarado como `devDependency` em vez de usado como dependência indireta do adapter do Prisma |
 | 14 | **(14.5)** O `tsc` não acusou que o controller continuava tratando o retorno do handler como texto | O `CommandBus.execute` devolve `any`: a mudança de `string` para `{ taskId, replayed }` compilaria e a resposta viraria `{ "taskId": { ... } }` | Tipo explícito no controller (`const result: CreateTaskResult`) e o E2E conferindo o corpo. Lição: onde a API do framework devolve `any`, o tipo não protege |
+| 15 | **(14.7)** A primeira demonstração do rollout deu 3 usuários com `stats` e 17 sem, em 50% | 9 cadastros foram recusados (nome com menos de 3 caracteres) e o script contava a listagem que falhou com 401 como "controle": os números não fechavam (165 listagens contadas para 20 × 15) | Dados válidos e o script contando falhas à parte. Lição: conferir se o experimento criou a condição que pretendia (a mesma do problema 18 do Módulo 13) |
+| 16 | **(14.7)** O alerta de erro por variante morreria calado no caso mais comum | Sem nenhum erro no controle, a série de erro dele não existe, e a subtração `variante - controle` sai vazia | `or vector(0)` no numerador; teste do `promtool` com o controle sem erro, e a mutação sem ele falhando |
 
 ---
 
@@ -742,6 +795,20 @@ npm run app-version -- --platform android --min none --recommended none         
 | Testes novos | 15 unitários, 5 de integração, 4 E2E |
 | Suítes | 378 unitários · 95 integração · 76 E2E · 13 streaming |
 
+**14.7 — rollout da `task-list-with-stats`** (API em `node dist/main`, flag em 50%)
+
+| Experimento | Resultado |
+|---|---|
+| 40 usuários, 15 listagens cada | 19 caíram em `with-stats` e 21 em `control`; 285 + 315 = 600 requisições contadas, sem sobra |
+| p95 da primeira página, no Prometheus | `control` 4,77 ms × `with-stats` 4,80 ms: a consulta a mais quase não custa, e o critério estaria cumprido |
+| Kill switch com tráfego novo (10 usuários × 5) | `with-stats` parou em 285; as 50 listagens novas foram para `control` (315 → 365) |
+| 1ª tentativa da demo | 9 de 20 usuários "sem stats" eram cadastros recusados (nome com menos de 3 caracteres) e listagens com 401: o script contava falha como controle (problema 15) |
+| Alertas com `promtool` | Regressão real dispara aos 25 min (pendente aos 10); ruído de 5 ms, tráfego de 3 req/min e o `for` não disparam; erro só na variante, sem erro no controle, dispara |
+| **Mutação:** sem o `or vector(0)` no controle | O teste do `TaskListStatsErrors` falha (o alerta não dispara) |
+| oasdiff contra a `main` | 0 incompatíveis (`stats` opcional novo na resposta) |
+| Testes novos | 6 unitários (o handler com e sem `stats`, a métrica por variante), 3 E2E, 4 casos de alerta |
+| Suítes | 384 unitários · 95 integração (o teste dos alertas no `promtool` incluso) · 79 E2E · 13 streaming |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -757,6 +824,7 @@ npm run app-version -- --platform android --min none --recommended none         
 | Coluna `due_date` sem uso; respostas prometendo menos do que entregam | **(14.4c)** Coluna removida (com `lock_timeout` e checagem anti-perda); campos sempre presentes como `required` | Fecha o expand/contract e o achado do oasdiff: uma remoção futura desses campos é pega pelo CI |
 | Repetir o `POST /tasks` criava outra tarefa | **(14.5)** `Idempotency-Key`: a mesma chave devolve a mesma resposta; a chave gravada na transação da tarefa | A rede do celular falha no meio; o cliente precisa poder repetir sem medo |
 | Toda funcionalidade nova ia para todos de uma vez, e desligar exigia deploy (e loja) | **(14.6)** Feature flags com kill switch, restrições, lista de usuários e porcentagem; `GET /me/features` | Liberar aos poucos e desligar em segundos, sem depender da aprovação da loja |
+| Flags existiam, sem nenhuma funcionalidade atrás | **(14.7)** `stats` na listagem atrás da `task-list-with-stats`, medido por variante, com critério de avanço e alertas | Liberar é decidir com números; e a flag nasce com data para sair |
 | CORS só com `Content-Type`, `Authorization` e `X-Correlation-Id` | **(14.1)** Também `X-Platform` e `X-App-Version` | Sem isso, o preflight barraria o front web que os envia |
 
 ---
@@ -789,6 +857,10 @@ npm run app-version -- --platform android --min none --recommended none         
 - **Idempotência só para efeito no mesmo banco** (ver o ADR-0009).
 - **Flags sem interface e sem experimentos** (ADR-0010): só um engenheiro muda uma flag, e comparar as variantes é
   feito pelas métricas (14.7). Segmentação só por usuário, plataforma e versão.
+- **A `task-list-with-stats` ainda é uma flag**: pelo ADR-0011, ela sai depois de 2 semanas em 100%, levando a métrica
+  por variante e os dois alertas. Cada rollout arriscado exige a sua métrica e os seus alertas (um mecanismo genérico
+  por flag seria o próximo passo).
+- **Os limites do critério são escolhidos, não derivados de um SLO** (1,2× e 50 ms).
 - **Até 5 s de propagação** de qualquer mudança de flag, inclusive do kill switch (o cache por réplica).
 - **Política por comando, sem interface:** em produção, uma configuração gerenciada (AWS AppConfig) daria versões,
   rollback e deploy gradual da própria configuração.
@@ -810,7 +882,7 @@ npm run app-version -- --platform android --min none --recommended none         
 - [x] Contract, passo 2: `DROP COLUMN` num deploy separado, com `lock_timeout` e checagem anti-perda; respostas com `required` corretos (14.4c)
 - [x] `Idempotency-Key` no `POST /tasks`, com a chave na mesma transação da tarefa (14.5)
 - [x] Feature flags em módulo próprio, com kill switch, restrições, lista de usuários, bucket determinístico e monotônico, `GET /me/features` (14.6)
-- [ ] Uma funcionalidade real atrás de uma flag, com o critério de avanço do rollout (14.7)
+- [x] Uma funcionalidade real atrás de uma flag, medida por variante, com critério de avanço (ADR-0011) e alertas testados (14.7)
 - [ ] Estratégia de versionamento (14.8)
 
 ---

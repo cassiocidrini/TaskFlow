@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
 import { CqrsModule } from '@nestjs/cqrs';
 import { IdempotencyModule } from '../../common/idempotency/idempotency.module';
+import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
+import { ReportsModule } from '../reports/reports.module';
+import { TaskListRolloutMetrics } from './task-list.rollout';
 import { TasksController } from './tasks.controller';
 import { CreateTaskHandler } from './commands/create-task.handler';
 import { GetTasksHandler } from './queries/get-tasks.handler';
@@ -50,12 +53,13 @@ const EventHandlers = [
  * aparece no BOOT da aplicação. Por isso os smoke tests de boot e os testes E2E.
  */
 @Module({
-  imports: [CqrsModule, ProjectsModule, IdempotencyModule],
+  imports: [CqrsModule, ProjectsModule, IdempotencyModule, FeatureFlagsModule, ReportsModule],
   controllers: [TasksController],
   providers: [
     EventStoreService,
     { provide: TaskRepository, useClass: EventSourcedTaskRepository },
     TaskCommandRunner,
+    TaskListRolloutMetrics,
     ...CommandHandlers,
     ...QueryHandlers,
     ...EventHandlers,

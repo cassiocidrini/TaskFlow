@@ -36,6 +36,59 @@ groups:
           summary: 'p95 da API em {{ $value | humanizeDuration }}'
           runbook: docs/modules/01-observabilidade.md
 
+  # Módulo 14.7: o critério de avanço do rollout da flag `task-list-with-stats` (ADR-0011) virou alerta. Compara a
+  # variante com o grupo de controle NA MESMA JANELA (o bucket da flag sorteia os grupos sem relação com o perfil), só a
+  # primeira página (a única que paga a consulta a mais) e só com tráfego mínimo na variante (não decidir com 3 requests)
+  - name: taskflow-rollout
+    rules:
+      # Regressão = p95 MAIOR que 1,2x o do controle E mais de 50 ms acima. Os dois juntos de propósito: só o relativo
+      # alertaria por ruído em latência baixa (5 ms contra 7 ms = 1,4x, e 2 ms não importam); só o absoluto não veria
+      # a piora proporcional. Cada limite cobre a fraqueza do outro
+      - alert: TaskListStatsSlower
+        expr: |
+          (
+            histogram_quantile(0.95, sum by (le) (rate(taskflow_task_list_duration_bucket{variant="with-stats", page="first"}[10m])))
+              > 1.2 * histogram_quantile(0.95, sum by (le) (rate(taskflow_task_list_duration_bucket{variant="control", page="first"}[10m])))
+          )
+          and
+          (
+            histogram_quantile(0.95, sum by (le) (rate(taskflow_task_list_duration_bucket{variant="with-stats", page="first"}[10m])))
+              - histogram_quantile(0.95, sum by (le) (rate(taskflow_task_list_duration_bucket{variant="control", page="first"}[10m])))
+              > 0.05
+          )
+          and
+          sum(rate(taskflow_task_list_requests_total{variant="with-stats", page="first"}[10m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Listagem com stats (rollout task-list-with-stats) com p95 de {{ $value | printf "%.3f" }} s, acima do critério: reverter com --kill'
+          runbook: docs/adr/0011-criterio-de-avanco-do-rollout.md
+
+      # Taxa de erro (5xx) da variante mais de 0,1 ponto percentual acima da do controle. O `or vector(0)` não é
+      # enfeite: sem nenhum erro no controle, a série de erro dele NÃO EXISTE, a subtração sai vazia e o alerta morreria
+      # calado justamente no caso mais comum (achado pelo teste do promtool)
+      - alert: TaskListStatsErrors
+        expr: |
+          (
+            (sum(rate(taskflow_task_list_requests_total{variant="with-stats", page="first", outcome="error"}[10m])) or vector(0))
+              / sum(rate(taskflow_task_list_requests_total{variant="with-stats", page="first"}[10m]))
+          )
+          -
+          (
+            (sum(rate(taskflow_task_list_requests_total{variant="control", page="first", outcome="error"}[10m])) or vector(0))
+              / sum(rate(taskflow_task_list_requests_total{variant="control", page="first"}[10m]))
+          )
+          > 0.001
+          and
+          sum(rate(taskflow_task_list_requests_total{variant="with-stats", page="first"}[10m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Listagem com stats (rollout task-list-with-stats) com taxa de erro {{ $value | humanizePercentage }} acima do controle: reverter com --kill'
+          runbook: docs/adr/0011-criterio-de-avanco-do-rollout.md
+
   - name: taskflow-messaging
     rules:
       # O alerta do relay: pega relay parado, Kafka fora e mensagem travada. Lido do banco a cada coleta, então

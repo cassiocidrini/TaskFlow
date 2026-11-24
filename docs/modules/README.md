@@ -23,4 +23,4 @@ problemas reais encontrados (e como foram resolvidos) e onde o resultado vive no
 | 11 | [Node.js internals](11-nodejs-internals.md) | ✅ revisado |
 | 12 | [Design patterns](12-design-patterns.md) | ✅ revisado |
 | 13 | [Mensageria e streaming de eventos com Kafka](13-mensageria-kafka.md) | ✅ revisado |
-| 14 | [Uma API para web e apps](14-api-para-web-e-apps.md) | 🚧 em construção (14.6 de 14.8) |
+| 14 | [Uma API para web e apps](14-api-para-web-e-apps.md) | 🚧 em construção (14.7 de 14.8) |

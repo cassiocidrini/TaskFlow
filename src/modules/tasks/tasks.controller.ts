@@ -17,6 +17,8 @@ import {
 import type { Response } from 'express';
 import { CommandBus, QueryBus } from '@nestjs/cqrs';
 import { ApiBearerAuth, ApiHeader, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { AppClient } from '../../common/client/app-client.decorator';
+import type { ClientInfo } from '../../common/client/client-info';
 import { CursorPaginationDto } from '../../common/dto/pagination.dto';
 import {
   IDEMPOTENCY_KEY_HEADER,
@@ -26,6 +28,8 @@ import {
 } from '../../common/idempotency/idempotency-key';
 import { CurrentUser, type AuthenticatedUser } from '../auth/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { FeatureFlags } from '../feature-flags/feature-flags';
+import { TASK_LIST_WITH_STATS, TaskListRolloutMetrics } from './task-list.rollout';
 import { CreateTaskCommand, type CreateTaskResult, type DueInput } from './commands/create-task.command';
 import type { TaskSnapshot } from './commands/task-command.runner';
 import {
@@ -86,6 +90,8 @@ export class TasksController {
   constructor(
     private readonly commandBus: CommandBus,
     private readonly queryBus: QueryBus,
+    private readonly flags: FeatureFlags,
+    private readonly rollout: TaskListRolloutMetrics,
   ) {}
 
   @Post()
@@ -148,7 +154,9 @@ export class TasksController {
   @ApiOperation({
     summary: 'Listar tarefas do projeto',
     description:
-      'Lê o Read Model (`tasks_read`): rápido e paginado por cursor. Para a próxima página, envie o `nextCursor` recebido como `?cursor=`.',
+      'Lê o Read Model (`tasks_read`): rápido e paginado por cursor. Para a próxima página, envie o `nextCursor` recebido como `?cursor=`. ' +
+      'Com a feature `task-list-with-stats` ligada para o usuário (ver `GET /me/features`), a PRIMEIRA página traz também `stats`, ' +
+      'os números do projeto (eventualmente consistentes: veja o `asOf`).',
   })
   @ProjectIdParam()
   @ApiResponse({ status: 200, description: 'Página de tarefas.', type: TaskPageDto })
@@ -157,8 +165,13 @@ export class TasksController {
     @Param('projectId', UUID_V4) projectId: string,
     @Query() page: CursorPaginationDto,
     @CurrentUser() user: AuthenticatedUser,
+    @AppClient() client: ClientInfo,
   ) {
-    return this.queryBus.execute(new GetTasksQuery(user.userId, projectId, page.limit, page.cursor));
+    // A flag decide AQUI, e a consulta só recebe o resultado: o handler da listagem não conhece flags (Módulo 14.7)
+    const withStats = await this.flags.isEnabled(TASK_LIST_WITH_STATS, { userId: user.userId, client });
+    return this.rollout.measure(withStats ? 'with-stats' : 'control', !page.cursor, () =>
+      this.queryBus.execute(new GetTasksQuery(user.userId, projectId, page.limit, page.cursor, withStats)),
+    );
   }
 
   /**

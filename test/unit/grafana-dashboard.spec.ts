@@ -27,6 +27,9 @@ const KNOWN_METRICS = new Set([
   'v8js_gc_duration',
   // Identificação do cliente (14.1): plataforma e versão do app
   'taskflow_app_requests_total',
+  // Rollout da flag task-list-with-stats (14.7): listagem por variante
+  'taskflow_task_list_duration',
+  'taskflow_task_list_requests_total',
   // Relay da outbox (13.3)
   'outbox_oldest_pending_age_seconds',
   'outbox_pending_messages',
