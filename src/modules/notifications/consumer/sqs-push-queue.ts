@@ -4,15 +4,20 @@ import { InfrastructureError } from '../../../common/messaging/consumer-errors';
 import { PushQueue, type PushRequest } from './push-queue';
 
 /**
- * Orçamento de tempo do envio. O `SendMessage` roda DENTRO da transação do Prisma (timeout padrão de 5 s): o pior
- * caso precisa caber nela com folga, senão a transação expira (P2028) antes de o SDK desistir, e o erro que aparece
- * no log deixa de dizer "o SQS não respondeu". Pior caso: 2 tentativas × (1 s de conexão + 1,5 s de resposta) ≈ 5 s
- * só se as DUAS travarem na conexão E na resposta; o caso real de SQS fora é recusa de conexão, em milissegundos.
+ * Orçamento de tempo do envio. O `SendMessage` roda DENTRO da transação do Prisma (timeout padrão de 5 s): ele precisa
+ * desistir antes dela, senão a transação expira (P2028) e o erro do log deixa de dizer "o SQS não respondeu".
+ *
+ * Duas camadas, porque uma só já falhou (Módulo 13, problema 37): com o LocalStack PAUSADO (aceita a conexão e não
+ * responde), o envio ficou pendurado indefinidamente. O `requestTimeout` do `@smithy/node-http-handler` só emite um
+ * AVISO, a menos que `throwOnRequestTimeout` esteja ligado. Daí:
+ * - por tentativa: conexão 1 s, resposta 1,5 s, e o timeout da resposta LANÇA (`throwOnRequestTimeout`);
+ * - no total: `AbortSignal` de 3,5 s na chamada, que vale aconteça o que acontecer dentro do SDK.
  */
 const SQS_TIMEOUTS = {
   maxAttempts: 2,
   connectionTimeout: 1_000,
   requestTimeout: 1_500,
+  totalBudget: 3_500,
 } as const;
 
 export interface SqsPushQueueOptions {
@@ -47,6 +52,7 @@ export class SqsPushQueue extends PushQueue implements OnApplicationShutdown {
         requestHandler: {
           connectionTimeout: SQS_TIMEOUTS.connectionTimeout,
           requestTimeout: SQS_TIMEOUTS.requestTimeout,
+          throwOnRequestTimeout: true,
         },
       });
   }
@@ -58,6 +64,7 @@ export class SqsPushQueue extends PushQueue implements OnApplicationShutdown {
           QueueUrl: this.queueUrl,
           MessageBody: JSON.stringify(request),
         }),
+        { abortSignal: AbortSignal.timeout(SQS_TIMEOUTS.totalBudget) },
       );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);

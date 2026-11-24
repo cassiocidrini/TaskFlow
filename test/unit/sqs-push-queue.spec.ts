@@ -6,9 +6,14 @@
  * - QUALQUER falha do envio sai como `InfrastructureError`, e por isso o runner tenta para sempre em vez de mandar
  *   o evento ao DLT.
  *
- * A falha é REAL, não um erro montado à mão: um `SQSClient` de verdade apontado para uma porta fechada, com as
- * retentativas do SDK. Um erro imaginado passaria aqui e, com outro formato em produção, cairia em `unknown`.
+ * As falhas são REAIS, não erros montados à mão: um `SQSClient` de verdade, com as retentativas do SDK, contra
+ * - uma porta fechada (conexão recusada na hora, o SQS fora do ar);
+ * - um servidor que ACEITA a conexão e nunca responde (o LocalStack pausado). Este caso pendurava o consumer para
+ *   sempre: o `requestTimeout` do SDK só avisava (Módulo 13, problema 37). O teste prova que o envio desiste dentro
+ *   do orçamento, antes dos 5 s da transação do Prisma.
  */
+import { createServer, type Server, type Socket } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { SQSClient, type SendMessageCommand } from '@aws-sdk/client-sqs';
 import { InfrastructureError } from '../../src/common/messaging/consumer-errors';
 import {
@@ -67,5 +72,39 @@ describe('SqsPushQueue', () => {
     await expect(enqueue).rejects.toBeInstanceOf(InfrastructureError);
     await expect(enqueue).rejects.toThrow(request.pushId);
     queue.onApplicationShutdown();
+  });
+
+  describe('servidor que aceita a conexão e não responde (LocalStack pausado)', () => {
+    let server: Server;
+    const sockets: Socket[] = [];
+
+    beforeAll(async () => {
+      server = createServer((socket) => sockets.push(socket)); // aceita e fica em silêncio
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+    });
+
+    afterAll(async () => {
+      sockets.forEach((socket) => socket.destroy());
+      await new Promise((resolve) => server.close(resolve));
+    });
+
+    it('desiste dentro do orçamento (antes dos 5 s da transação) com InfrastructureError', async () => {
+      const { port } = server.address() as AddressInfo;
+      process.env.AWS_ACCESS_KEY_ID ??= 'test';
+      process.env.AWS_SECRET_ACCESS_KEY ??= 'test';
+      // O cliente PADRÃO do adapter (com os timeouts dele), só com o endpoint apontado para o servidor mudo
+      const queue = new SqsPushQueue({
+        queueUrl: QUEUE_URL,
+        region: 'us-east-1',
+        endpoint: `http://127.0.0.1:${port}`,
+      });
+
+      const started = Date.now();
+      await expect(queue.enqueue(request)).rejects.toBeInstanceOf(
+        InfrastructureError,
+      );
+      expect(Date.now() - started).toBeLessThan(4_000);
+      queue.onApplicationShutdown();
+    });
   });
 });
