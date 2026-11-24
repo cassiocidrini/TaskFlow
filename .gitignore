@@ -93,3 +93,6 @@ terraform/crash.log
 labs/node-internals/*.txt
 # Caminho antigo, mantido para quem ainda tiver os arquivos gerados num clone anterior à mudança
 test/load/*.txt
+# Build da Lambda (npm run lambda:build) e o zip gerado pelo Terraform (archive_file)
+/lambdas/*/dist
+/terraform/.build
