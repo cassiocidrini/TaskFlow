@@ -110,9 +110,6 @@ model TaskRead {
   status     TaskStatus   @default(PENDING)
   // Default só para preencher linhas antigas na migração; o handler sempre grava explicitamente
   priority   TaskPriority @default(MEDIUM)
-  // NÃO USADA desde o contract (Módulo 14.4b): o código não grava nem lê. Fica até a 14.4c, num deploy SEPARADO:
-  // remover junto com o código quebraria a versão anterior da API (a 14.4a, que ainda a grava) no meio do deploy
-  dueDate    DateTime?    @map("due_date")
   // Prazo: o instante (UTC) e o fuso IANA do usuário; `due_timezone` NULL = desconhecido (formato antigo)
   dueAt       DateTime?   @map("due_at")
   dueTimezone String?     @map("due_timezone")

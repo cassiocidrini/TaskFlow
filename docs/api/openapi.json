@@ -281,7 +281,7 @@
             "type": "string"
           },
           "description": {
-            "description": "Descrição livre",
+            "description": "Descrição livre (`null` quando não informada)",
             "example": "Tudo o que falta para a versão 1.0",
             "nullable": true,
             "type": "string"
@@ -300,6 +300,7 @@
         "required": [
           "id",
           "name",
+          "description",
           "createdAt"
         ],
         "type": "object"
@@ -572,11 +573,13 @@
       "TaskReadDto": {
         "properties": {
           "assigneeId": {
+            "description": "`null` sem responsável",
             "example": "c5afce1e-dbd3-4606-a69f-cc930471cef8",
             "nullable": true,
             "type": "string"
           },
           "completedAt": {
+            "description": "`null` enquanto não concluída",
             "example": null,
             "format": "date-time",
             "nullable": true,
@@ -640,7 +643,9 @@
           "title",
           "status",
           "priority",
+          "assigneeId",
           "due",
+          "completedAt",
           "createdAt",
           "updatedAt"
         ],

@@ -94,7 +94,6 @@ describe('Projeções do tasks_read (integração)', () => {
         priority: 'HIGH',
         dueAt: new Date('2026-12-31T23:59:59.000Z'),
         dueTimezone: 'America/Sao_Paulo',
-        dueDate: null, // contract (Módulo 14.4b): a coluna antiga não é mais gravada; sai do banco na 14.4c
       });
     });
   });

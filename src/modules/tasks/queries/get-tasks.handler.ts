@@ -8,8 +8,8 @@ import type { TaskDue } from '../events/task.events';
 
 /**
  * Uma tarefa como a listagem a devolve. Mapeada campo a campo a partir da linha do Read Model, e não a linha crua:
- * colunas internas (como a `due_date`, que não é mais usada desde a 14.4b e sai do banco na 14.4c) não podem vazar
- * para o contrato só porque existem na tabela.
+ * colunas internas não podem vazar para o contrato só porque existem na tabela (Módulo 14.4: as colunas do prazo têm
+ * nome e forma diferentes do campo `due` da resposta).
  */
 export interface TaskListItem {
   id: string;
@@ -24,10 +24,7 @@ export interface TaskListItem {
   updatedAt: Date;
 }
 
-/**
- * Lê só as colunas novas do prazo (`due_at`, `due_timezone`). A reserva `due_at ?? due_date` do expand saiu no contract
- * (14.4b), depois do backfill final, que cobre as linhas criadas pela versão anterior no meio do deploy da 14.4a.
- */
+/** O prazo vem de `due_at` + `due_timezone` (Módulo 14.4); `due_timezone` NULL = fuso desconhecido. */
 export function toTaskListItem(row: TaskRead): TaskListItem {
   const at = row.dueAt;
   return {

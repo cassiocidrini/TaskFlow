@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty } from '@nestjs/swagger';
 
 /**
  * Schema de RESPOSTA de um projeto (documentação OpenAPI).
@@ -14,8 +14,10 @@ export class ProjectResponseDto {
   @ApiProperty({ description: 'Nome do projeto', example: 'Lançamento do app' })
   name!: string;
 
-  @ApiPropertyOptional({
-    description: 'Descrição livre',
+  // Obrigatório (e `nullable`): o `select` sempre devolve o campo. Documentado como opcional, uma remoção futura dele
+  // passaria pelo oasdiff como inofensiva (Módulo 14.4c, ADR-0008)
+  @ApiProperty({
+    description: 'Descrição livre (`null` quando não informada)',
     example: 'Tudo o que falta para a versão 1.0',
     nullable: true,
     type: String,

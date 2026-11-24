@@ -94,7 +94,6 @@ describe('GetTaskHistoryHandler', () => {
       status: 'DONE',
       priority: 'HIGH',
       assigneeId: 'u1',
-      dueDate: undefined,
       completedAt: '2026-10-18T10:04:00.000Z',
       version: 4,
     });

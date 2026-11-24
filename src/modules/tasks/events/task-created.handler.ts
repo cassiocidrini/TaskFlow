@@ -33,7 +33,7 @@ export class TaskCreatedHandler implements IEventHandler<TaskCreatedEvent> {
             assigneeId: event.assigneeId,
             status: 'PENDING',
             priority: event.priority,
-            // Só as colunas novas desde o contract (14.4b). A `due_date` não é mais gravada nem lida; sai na 14.4c
+            // O prazo do expand/contract do Módulo 14.4 (a antiga `due_date` saiu na 14.4c)
             dueAt: event.due ? new Date(event.due.at) : null,
             dueTimezone: event.due?.timezone ?? null,
           },

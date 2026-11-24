@@ -63,7 +63,9 @@ export class TaskReadDto {
   })
   priority!: (typeof TASK_PRIORITIES)[number];
 
-  @ApiPropertyOptional({ nullable: true, type: String, example: USER_EXAMPLE })
+  // Obrigatórios (e `nullable`) na listagem: o `toTaskListItem` sempre os devolve. Como opcionais, uma remoção futura
+  // passaria pelo oasdiff como inofensiva, como passou a do `dueDate` (Módulo 14.4c, ADR-0008)
+  @ApiProperty({ nullable: true, type: String, example: USER_EXAMPLE, description: '`null` sem responsável' })
   assigneeId!: string | null;
 
   @ApiProperty({
@@ -73,7 +75,7 @@ export class TaskReadDto {
   })
   due!: DueResponseDto | null;
 
-  @ApiPropertyOptional({ nullable: true, type: String, format: 'date-time', example: null })
+  @ApiProperty({ nullable: true, type: String, format: 'date-time', example: null, description: '`null` enquanto não concluída' })
   completedAt!: Date | null;
 
   @ApiProperty({ format: 'date-time', example: '2026-10-18T04:28:59.208Z' })
