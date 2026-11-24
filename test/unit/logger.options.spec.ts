@@ -3,7 +3,8 @@
  *
  * Protege: o log de acesso nunca serializa headers (o `Authorization` não vaza, OWASP A09); o id da requisição é o
  * mesmo `correlationId` do contexto (log de acesso e logs da aplicação ficam ligados); o nível do log de acesso
- * separa falha nossa (5xx → error) de erro do cliente (4xx → warn); e o pino-pretty só entra quando pedido.
+ * separa falha nossa (5xx → error) de erro do cliente (4xx → warn); o pino-pretty só entra quando pedido; e o cliente
+ * (plataforma e versão, Módulo 14.1) entra no log já VALIDADO pelo middleware, nunca o header cru.
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Options } from 'pino-http';
@@ -40,6 +41,19 @@ describe('buildLoggerOptions', () => {
     );
 
     expect(id).toBe('chamado-1234');
+  });
+
+  it('deve registrar o cliente validado pelo middleware, e nada quando ele não passou por lá', () => {
+    const customProps = pinoHttpOptions().customProps as (req: IncomingMessage, res: ServerResponse) => object;
+    const req = {
+      headers: { 'x-app-version': '2.14.0\nlinha-forjada' }, // o header cru nunca é lido aqui
+      appClient: { platform: 'android', appVersion: { major: 2, minor: 13, patch: 1 } },
+    } as unknown as IncomingMessage;
+
+    expect(customProps(req, {} as ServerResponse)).toEqual({
+      client: { platform: 'android', appVersion: '2.13.1' },
+    });
+    expect(customProps({} as IncomingMessage, {} as ServerResponse)).toEqual({});
   });
 
   it('deve gravar o id com o nome correlationId (e não reqId)', () => {

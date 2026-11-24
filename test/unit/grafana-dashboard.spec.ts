@@ -25,6 +25,8 @@ const KNOWN_METRICS = new Set([
   'nodejs_eventloop_utilization',
   'v8js_memory_heap_used',
   'v8js_gc_duration',
+  // Identificação do cliente (14.1): plataforma e versão do app
+  'taskflow_app_requests_total',
   // Relay da outbox (13.3)
   'outbox_oldest_pending_age_seconds',
   'outbox_pending_messages',
@@ -85,7 +87,7 @@ function metricsIn(expr: string): string[] {
     .replace(/"[^"]*"/g, '');
   return (
     withoutLabels.match(
-      /\b(?:(?:http|db|nodejs|v8js|outbox|kafka)_[a-z0-9_]+|up)\b/g,
+      /\b(?:(?:http|db|nodejs|v8js|outbox|kafka|taskflow)_[a-z0-9_]+|up)\b/g,
     ) ?? []
   );
 }
