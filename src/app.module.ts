@@ -7,6 +7,7 @@ import { LoggerModule } from 'nestjs-pino';
 import { AppController } from './app.controller';
 import { TelemetryShutdownHook } from './common/lifecycle/telemetry-shutdown';
 import { RouteTelemetryGuard } from './common/telemetry/route-telemetry.guard';
+import { VersionPolicyModule } from './common/client/version-policy.module';
 import { buildLoggerOptions } from './common/logging/logger.options';
 import { HealthModule } from './health/health.module';
 import { AppService } from './app.service';
@@ -56,6 +57,7 @@ import { ReportsModule } from './modules/reports/reports.module';
     NotificationsModule,
     ReportsModule,
     HealthModule,
+    VersionPolicyModule,
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService<Env, true>) => ({

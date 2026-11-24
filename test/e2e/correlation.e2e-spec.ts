@@ -63,6 +63,8 @@ describe('X-Correlation-Id (e2e)', () => {
       .set('Origin', 'http://localhost:5173')
       .expect(200);
 
-    expect(response.headers['access-control-expose-headers']).toBe('X-Correlation-Id');
+    // Presença na lista, e não igualdade: outros headers também são expostos (o aviso de atualização, Módulo 14.2)
+    const exposed = String(response.headers['access-control-expose-headers']).split(',');
+    expect(exposed).toContain('X-Correlation-Id');
   });
 });
