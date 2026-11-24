@@ -37,6 +37,8 @@ npm run consumer:reports:dev            # consumer group reports (build: npm run
 npm run replay                          # republica o Event Store pela outbox (--aggregate <taskId>; build: start:replay)
 npm run redrive -- --group notifications --dry-run   # DLT → tópico de origem, só para o grupo (auditoria em dlt_redrives)
 npm run app-version -- --platform ios --min 2.10.0 --dry-run   # versão mínima/recomendada do app (--show; auditoria)
+npm run openapi:generate                # mudou a API (rota, DTO, Swagger)? regera docs/api/openapi.json e commita junto
+npm run openapi:diff                    # mudanças incompatíveis no contrato contra a main (oasdiff via Docker)
 npm run lambda:build                    # compila a Lambda do push (lambdas/push-sender → dist; o aws:up já roda)
 
 # Qualidade — rodar SEMPRE antes de commitar
@@ -117,6 +119,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `prometheus/alerts.yml` + `alerts.test.yml` | 9 regras de alerta e os testes delas (`promtool test rules`, rodado por `test/integration/alert-rules.spec.ts`) | Alerta novo = regra + caso de teste com `exp_annotations`; contador de alerta publicado com 0 na subida; janela de `rate()` ≥ 4× a coleta; editou? `docker restart taskflow-prometheus` |
 | `lambdas/push-sender/` | Lambda do push (Módulo 13.7), deployable próprio: `batch-processor.ts` (`batchItemFailures`), `idempotency.ts` (reserva condicional no DynamoDB), `push-request.ts` (contrato próprio, sem zod), `handler.ts` (só monta dependências) | Só o `@aws-sdk/client-dynamodb` (vem no runtime): dependência nova exige bundler; lógica testável sem AWS em `test/unit/push-sender.spec.ts`; nunca importar de `src/` |
 | `terraform/push.tf` | Fila `taskflow-push` + DLQ, tabela de idempotência com TTL, Lambda (`nodejs22.x`) e event source mapping | Tempos amarrados: timeout da Lambda < `LEASE_SECONDS` < visibility timeout; `ReportBatchItemFailures` obrigatório; IAM só nos ARNs desta fila e tabela |
+| `docs/api/openapi.json` + `scripts/openapi/` | Contrato da API versionado (14.3): `snapshot.ts` gera do **`dist/`** (o plugin do Swagger só roda no `nest build`) com chaves ordenadas; `diff.mjs` roda o oasdiff; workflow `api-contract.yml` | Nunca editar o JSON à mão (é gerado); `buildOpenApiDocument` é a fonte única do `/docs` e do snapshot |
 | `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4), `kafka/smoke.ts` (Módulo 13) | Script novo de dev entra aqui, **nunca** em `src/` |
 | `load/k6/`, `load/autocannon/` | Testes de carga da API (Módulo 10) | Medem a API rodando; não são testes do Jest |
 | `labs/node-internals/` | Experimentos do runtime (Módulo 11) | Arquivos gerados (`*.txt`, ~100 MB) são ignorados pelo Git |
@@ -219,6 +222,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 **Processo**
 - ❌ Push direto na `main` ou merge com CI vermelho (4 jobs obrigatórios: quality, integration, e2e, streaming).
+- ❌ Mudar a API (rota, DTO, decorator do Swagger) sem `npm run openapi:generate` no mesmo PR (o CI falha); mudança incompatível de contrato sem expand/contract, ou só para "passar" com a label `breaking-change`.
 - ❌ Decisão de arquitetura nova sem ADR em `docs/adr/` no mesmo PR; editar um ADR aceito (decisão que muda = ADR novo que o substitui).
 
 ---

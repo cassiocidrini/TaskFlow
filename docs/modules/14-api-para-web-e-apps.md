@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
-> **Status:** 🚧 em construção, etapa **14.2 de 14.8** (versão mínima por plataforma). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **14.3 de 14.8** (o contrato da API versionado e vigiado no CI). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está em "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`src/common/client/`](../../src/common/client/client-info.ts) (headers, parser de versão,
@@ -12,7 +12,8 @@
 > [`taskflow-api.json`](../../grafana/dashboards/taskflow-api.json) · versão mínima em
 > [`version-gate.middleware.ts`](../../src/common/client/version-gate.middleware.ts),
 > [`version-policy.service.ts`](../../src/common/client/version-policy.service.ts) e o comando
-> [`src/app-version.ts`](../../src/app-version.ts)
+> [`src/app-version.ts`](../../src/app-version.ts) · contrato em [`docs/api/openapi.json`](../api/openapi.json),
+> [`scripts/openapi/`](../../scripts/openapi/snapshot.ts) e [`api-contract.yml`](../../.github/workflows/api-contract.yml)
 
 ---
 
@@ -39,7 +40,7 @@ e todos os apps que ainda estão por aí. As perguntas que o módulo responde:
 |---|---|:-:|
 | **14.1** | Identificação do cliente: `X-Platform` e `X-App-Version` no request, no span, no log e numa métrica com cardinalidade limitada | ✅ |
 | **14.2** | Versão mínima por plataforma, configurável sem deploy (tabela + cache de 30 s + `npm run app-version` com auditoria): `426` + `APP_UPDATE_REQUIRED`; aviso de atualização recomendada | ✅ |
-| 14.3 | Snapshot do OpenAPI no CI: mudança de contrato não passa despercebida | 🔜 |
+| **14.3** | Contrato versionado (`docs/api/openapi.json`) conferido no CI, e mudanças **incompatíveis** classificadas pelo oasdiff, liberadas só com a label `breaking-change` | ✅ |
 | 14.4 | Expand/contract real: `dueDate` → `due { at, timezone }`, `Deprecation`/`Sunset`, upcaster do `TaskCreated` | 🔜 |
 | 14.5 | `Idempotency-Key` no `POST /tasks` | 🔜 |
 | 14.6 | Feature flags em módulo próprio (kill switch, allowlist, porcentagem) e `GET /me/features` | 🔜 |
@@ -211,6 +212,54 @@ módulo (o `pino-http` do `nestjs-pino` é um deles) → guards. Como `app.use()
 acesso existir, e o 426 **não aparecia em log nenhum** (problema 3). Registrado pelo `VersionPolicyModule`, que vem
 depois do `LoggerModule`, ele roda depois do log e ainda antes do JWT.
 
+### O contrato da API no repositório (14.3)
+
+**O problema.** Renomear um campo da resposta, tornar obrigatório um campo de entrada, remover uma rota: os testes
+passam (eles testam o código novo), e quem quebra é o **app instalado**, que só recebe correção quando o usuário
+atualizar. Na web isso quase não existe; com apps, é o risco principal de toda mudança na API.
+
+**Camada 1: o snapshot (toda mudança de contrato é vista).** O documento OpenAPI é um arquivo versionado,
+[`docs/api/openapi.json`](../api/openapi.json). O `npm run openapi:check` (no job `quality` do CI) gera o documento do
+código e falha se ele não bate com o arquivo, apontando a linha. Mudar a API exige `npm run openapi:generate` no mesmo
+PR: a mudança de contrato aparece no diff, num arquivo que quem revisa lê. Três detalhes:
+
+- **Gerado do `dist/`**, não do TypeScript: o plugin do Swagger (`nest-cli.json`), que completa os DTOs a partir dos
+  tipos e do `class-validator`, só roda no `nest build`. Gerado pelo Jest ou pelo `ts-node`, o snapshot seria
+  diferente do contrato que a API serve. O documento sai sem banco e sem servidor (~100 ms).
+- **Uma fonte só:** `buildOpenApiDocument(app)` monta o documento para o `/docs` e para o snapshot.
+- **Chaves ordenadas, arrays não:** a ordem das chaves muda quando se move um método de lugar (diff falso); a ordem dos
+  arrays é informação (parâmetros, valores de `enum`). Dois processos geram o mesmo hash.
+
+**Camada 2: o que quebra quem não atualizou.** O snapshot não distingue acrescentar um campo opcional (seguro) de
+remover um campo da resposta (quebra). O **oasdiff** compara o contrato da base do PR com o do PR e lista as mudanças
+incompatíveis; o workflow [`api-contract.yml`](../../.github/workflows/api-contract.yml) falha se houver alguma, a menos
+que o PR tenha a label **`breaking-change`** (a decisão fica explícita e registrada no PR). Workflow separado porque
+precisa rodar de novo quando a label muda, sem disparar os 4 jobs pesados do CI. Localmente: `npm run openapi:diff`,
+com a mesma imagem fixada (`tufin/oasdiff:v1.37.0`).
+
+**A assimetria que define o que é incompatível.** A API **recebe** dados do app e **devolve** dados para ele, e as
+regras se invertem (o mesmo raciocínio do leitor tolerante do Módulo 13: seja exigente no que envia, tolerante no que
+recebe):
+
+| Mudança | Na resposta (o app lê) | Na requisição (o app envia) |
+|---|---|---|
+| Campo novo | ✅ Seguro: o app antigo ignora | ✅ Se opcional; ❌ se obrigatório (o app antigo não manda) |
+| Campo removido | ❌ O app antigo pode depender dele | ✅ Se a API passa a ignorá-lo |
+| Opcional → obrigatório | ✅ (a API garante mais) | ❌ (o app antigo não manda) |
+| Limite mais restrito (`maxLength` menor, `enum` menor) | ✅ | ❌ O app antigo aceita o valor na tela e a API recusa |
+| Valor novo num `enum` | ❌ Um app com `switch` exaustivo pode quebrar | ✅ |
+| Rota removida | ❌ | ❌ |
+
+Oito casos da tabela foram conferidos com o oasdiff (ver "Resultados"). O de `maxLength` é o menos intuitivo: diminuir
+o tamanho máximo de um campo de entrada parece inofensivo, mas o app antigo deixa o usuário digitar 100 caracteres e a
+API passa a recusar com 400. E o de `enum` na resposta, o mais esquecido: o próprio oasdiff explica que *o servidor
+pode devolver um valor que o contrato anterior excluía* (se a lista é feita para crescer, declara-se com
+`x-extensible-enum`, e o app trata o valor desconhecido).
+
+**E quando a mudança incompatível é necessária?** Não se faz de uma vez: **expand/contract** (14.4). Acrescenta-se o
+novo (compatível), mantém-se o antigo enquanto houver apps que o usam, e remove-se depois que a versão mínima (14.2)
+exclui esses apps. Só esse último passo precisa da label.
+
 ### Em qual span gravar: o do request, não o ativo
 
 Dentro de um middleware Express, o span **ativo** é o que o `instrumentation-express` abre para o próprio middleware
@@ -243,6 +292,19 @@ curl -s localhost:9464/metrics | grep taskflow_app_requests_total
 - **Grafana** (`http://localhost:3001`): dashboard da API → linha **Clientes**, requisições por plataforma e por versão.
 - **Swagger** (`/docs`): `X-Platform` e `X-App-Version` aparecem em todas as rotas, como parâmetros globais.
 
+### Contrato da API (14.3)
+
+```bash
+npm run openapi:check                 # build + confere docs/api/openapi.json (o CI roda o mesmo)
+npm run openapi:generate              # depois de mudar a API: regera o snapshot (revise o diff e commite)
+npm run openapi:diff                  # mudanças incompatíveis contra a origin/main (Docker)
+npm run openapi:diff -- --base x.json # contra outro arquivo (experimentos)
+```
+
+Para ver o `check` falhar: mude o `maxLength` de um DTO e rode `npm run openapi:check`; ele aponta a linha. Para ver
+uma mudança incompatível: gere uma base com `jq` (ex.: `jq '.components.schemas.CreateTaskDto.required -= ["title"]'
+docs/api/openapi.json > /tmp/base.json`) e rode `npm run openapi:diff -- --base /tmp/base.json`.
+
 ### Versão mínima (14.2)
 
 ```bash
@@ -271,6 +333,9 @@ npm run app-version -- --platform android --min none --recommended none         
 | 2 | **(14.1)** O teste do dashboard recusava a consulta nova, mesmo com a métrica na lista | O extrator de nomes de métrica do teste só reconhecia alguns prefixos (`http_`, `kafka_`…): a consulta parecia não usar métrica nenhuma | Prefixo `taskflow_` no extrator. O teste fez o que devia: consulta sem métrica reconhecida é tratada como "No data" em potencial |
 | 3 | **(14.2)** O 426 funcionava, mas não aparecia no log de acesso: um app sendo bloqueado sem rastro | O bloqueio era `app.use()`, e o log de acesso do `pino-http` é middleware de MÓDULO do Nest, montado depois: a resposta saía antes de o logger existir | Middleware de módulo (`VersionGateMiddleware`, registrado pelo `VersionPolicyModule` depois do `LoggerModule`). Continua antes dos guards. Conferido ao vivo: o 426 sai como `warn`, com o cliente e o `correlationId` |
 | 4 | **(14.2)** Um teste E2E do Módulo 01 quebrou com a mudança | Ele comparava `Access-Control-Expose-Headers` por **igualdade** com `X-Correlation-Id`, e a lista passou a ter três headers | Checagem de presença na lista. Uma asserção mais rígida que o contrato quebra com toda mudança legítima |
+| 5 | **(14.3)** O snapshot não podia sair de um teste do Jest | O `ts-jest` não roda o plugin do Swagger, que só existe no `nest build`: o documento sairia sem as propriedades que o plugin infere (o `LoginDto` vazio) | Script que importa o `dist/` (`scripts/openapi/snapshot.ts`), e o `openapi:check` faz o build antes. Experimento: documento completo, sem banco, em ~100 ms |
+| 6 | **(14.3)** O `actionlint` imprimia a ajuda em vez de analisar | `-color=never` não é uma flag válida dele (o certo é `-no-color`) | Os dois workflows passam no `actionlint`, que inclui o `shellcheck` dos passos `run` |
+| 7 | **(14.3)** Com uma base vazia (um `jq` que falhou num experimento), o oasdiff disse "nenhuma mudança incompatível" | Comparar contra nada não encontra nada para quebrar: um falso OK que, no CI, aprovaria qualquer mudança | Os dois (script e workflow) recusam base ou snapshot que não seja JSON com o campo `openapi`. No mesmo passo, o script deixou de usar `process.exit` dentro do `try` (pulava o `finally` e a pasta temporária ficava) |
 
 ---
 
@@ -305,6 +370,27 @@ npm run app-version -- --platform android --min none --recommended none         
 | Testes novos | 14 unitários (decisão, cache, leitura única, fail-open, middleware), 6 de integração (comando, auditoria, `CHECK`, a API lendo o que o comando gravou) e 6 E2E (426 em rota pública e protegida, aviso + CORS, quem passa, mudança sem reinício) |
 | Suítes | 327 unitários · 80 integração · 60 E2E |
 
+**14.3 — contrato da API**
+
+| Experimento | Resultado |
+|---|---|
+| `openapi:generate` | `docs/api/openapi.json`: OpenAPI 3.0, 15 caminhos, 21 schemas, 2.580 linhas; nada do ambiente (URL de banco, segredo) no arquivo |
+| Gerar duas vezes, em processos diferentes | Mesmo hash |
+| `maxLength` de 100 para 80 num DTO, sem atualizar o snapshot | `openapi:check` falha na linha 65 (`- 100` / `+ 80`), com a instrução; restaurado, passa |
+| oasdiff: base igual | Nenhuma mudança incompatível |
+| oasdiff: campo obrigatório removido da resposta | `removed the required property ... from the response`, falha |
+| oasdiff: campo acrescentado na resposta | Nenhuma mudança incompatível |
+| oasdiff: `title` de opcional para obrigatório na requisição | `request-property-became-required`, falha |
+| oasdiff: `maxLength` da requisição diminuído | `request-property-max-length-decreased`, falha |
+| oasdiff: valor novo (`DONE`) num `enum` da resposta | `response-property-enum-value-added`, falha |
+| oasdiff: rota removida | `api-path-removed-without-deprecation`, falha |
+| oasdiff: campo removido da requisição | `request-property-removed` como **aviso**, sem falha |
+| oasdiff: campo da resposta de opcional para obrigatório | Nenhuma mudança incompatível |
+| oasdiff: base vazia ou sem `openapi` | Antes: "nenhuma mudança incompatível" (falso OK). Depois: recusada nos dois (script e workflow) |
+| oasdiff: a `main` sem o arquivo (este PR) | Aviso de que não há contrato anterior, sem falha |
+| `actionlint` nos dois workflows | Sem apontamentos |
+| Testes novos | 5 unitários (ordem estável das chaves, arrays preservados, diferença apontada por linha) |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -314,6 +400,7 @@ npm run app-version -- --platform android --min none --recommended none         
 | A API não sabia quem a chamava | **(14.1)** Plataforma e versão em cada request: no span, no log e numa métrica de adoção | Pré-requisito de qualquer política de compatibilidade (14.2 em diante) |
 | `correlation.id` no span do middleware | **(14.1)** No span do request, junto com o cliente | Atributo de request tem que estar no span do request |
 | Nenhuma forma de parar uma versão quebrada do app | **(14.2)** Mínima e recomendada por plataforma, mudadas por comando com auditoria e valendo em até 30 s, sem deploy | Uma correção na loja não chega a quem não atualiza; o servidor precisa poder dizer "atualize" |
+| O contrato da API só existia em `/docs`, gerado na hora | **(14.3)** `docs/api/openapi.json` versionado, conferido no CI, e mudanças incompatíveis bloqueadas sem a label `breaking-change` | Mudar o contrato passa a ser uma decisão visível no PR, e não um efeito colateral |
 | CORS só com `Content-Type`, `Authorization` e `X-Correlation-Id` | **(14.1)** Também `X-Platform` e `X-App-Version` | Sem isso, o preflight barraria o front web que os envia |
 
 ---
@@ -331,6 +418,11 @@ npm run app-version -- --platform android --min none --recommended none         
 - **Janela de até 30 s entre réplicas:** cada réplica tem o seu cache, então logo depois de uma mudança uma pode
   bloquear e outra não. Para invalidar na hora, seria preciso um aviso entre réplicas (`LISTEN/NOTIFY` no Postgres ou
   pub/sub), que não compensa para uma mudança mensal.
+- **O check do contrato não é obrigatório na proteção da `main`** até ser adicionado ao Ruleset do GitHub (decisão de
+  quem administra o repositório).
+- **O oasdiff vê o que o OpenAPI descreve:** uma mudança de comportamento que não aparece no contrato (um campo que
+  continua `string` mas muda de formato, uma regra de negócio nova) passa. Para isso, testes de contrato do lado do
+  consumidor (*consumer-driven contracts*, como o Pact) seriam o próximo passo.
 - **Política por comando, sem interface:** em produção, uma configuração gerenciada (AWS AppConfig) daria versões,
   rollback e deploy gradual da própria configuração.
 - **Sem link da loja no 426:** o app recebe a `minVersion`, mas a API não sabe se há uma versão na loja que a
@@ -345,7 +437,7 @@ npm run app-version -- --platform android --min none --recommended none         
 - [x] Cliente no span do request, no log de acesso e numa métrica com cardinalidade limitada (14.1)
 - [x] CORS e Swagger com os headers novos (14.1)
 - [x] Versão mínima e recomendada por plataforma, sem deploy, com auditoria, *fail-open* e o 426 no log (14.2)
-- [ ] Snapshot do OpenAPI no CI (14.3)
+- [x] Contrato da API versionado e conferido no CI; mudanças incompatíveis classificadas e liberadas só com label (14.3)
 - [ ] Expand/contract do `dueDate` (14.4)
 - [ ] `Idempotency-Key` (14.5)
 - [ ] Feature flags (14.6, 14.7)
