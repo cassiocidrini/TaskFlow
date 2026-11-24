@@ -580,6 +580,14 @@
             "example": "370b268e-18ba-444c-ae17-2716b0269232",
             "nullable": true,
             "type": "string"
+          },
+          "stats": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProjectStatsDto"
+              }
+            ],
+            "description": "Números do projeto, só na PRIMEIRA página e só com a feature `task-list-with-stats` ligada para o usuário (Módulo 14.7). Eventualmente consistentes: o `asOf` diz até quando valem."
           }
         },
         "required": [
@@ -2084,7 +2092,7 @@
     },
     "/projects/{projectId}/tasks": {
       "get": {
-        "description": "Lê o Read Model (`tasks_read`): rápido e paginado por cursor. Para a próxima página, envie o `nextCursor` recebido como `?cursor=`.",
+        "description": "Lê o Read Model (`tasks_read`): rápido e paginado por cursor. Para a próxima página, envie o `nextCursor` recebido como `?cursor=`. Com a feature `task-list-with-stats` ligada para o usuário (ver `GET /me/features`), a PRIMEIRA página traz também `stats`, os números do projeto (eventualmente consistentes: veja o `asOf`).",
         "operationId": "TasksController_list",
         "parameters": [
           {

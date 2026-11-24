@@ -10,29 +10,37 @@ import { GetTasksHandler } from '../../src/modules/tasks/queries/get-tasks.handl
 import { GetTasksQuery } from '../../src/modules/tasks/queries/get-tasks.query';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { ProjectsService } from '../../src/modules/projects/projects.service';
+import { ReportsService } from '../../src/modules/reports/reports.service';
 
 describe('GetTasksHandler', () => {
   let handler: GetTasksHandler;
   let prisma: { taskRead: { findMany: jest.Mock } };
   let projects: { assertOwner: jest.Mock };
+  let reports: { statsOf: jest.Mock };
 
   const userId = 'user-dono';
   const projectId = 'p1';
 
   // Gera N linhas falsas do read model com ids previsíveis: t1, t2, ...
   const fakeRows = (n: number) =>
-    Array.from({ length: n }, (_, i) => ({ id: `t${i + 1}`, projectId, title: `Tarefa ${i + 1}` }));
+    Array.from({ length: n }, (_, i) => ({
+      id: `t${i + 1}`,
+      projectId,
+      title: `Tarefa ${i + 1}`,
+    }));
 
   beforeEach(async () => {
     // Arrange: por padrão, o usuário É dono do projeto
     prisma = { taskRead: { findMany: jest.fn().mockResolvedValue([]) } };
     projects = { assertOwner: jest.fn().mockResolvedValue(undefined) };
+    reports = { statsOf: jest.fn().mockResolvedValue({ projectId, total: 3 }) };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         GetTasksHandler,
         { provide: PrismaService, useValue: prisma },
         { provide: ProjectsService, useValue: projects },
+        { provide: ReportsService, useValue: reports },
       ],
     }).compile();
 
@@ -54,11 +62,13 @@ describe('GetTasksHandler', () => {
     });
 
     it('NÃO deve consultar o read model se o projeto não for do usuário', async () => {
-      projects.assertOwner.mockRejectedValue(new NotFoundException('Projeto não encontrado'));
-
-      await expect(handler.execute(new GetTasksQuery('intruso', projectId, 20))).rejects.toThrow(
-        NotFoundException,
+      projects.assertOwner.mockRejectedValue(
+        new NotFoundException('Projeto não encontrado'),
       );
+
+      await expect(
+        handler.execute(new GetTasksQuery('intruso', projectId, 20)),
+      ).rejects.toThrow(NotFoundException);
       expect(prisma.taskRead.findMany).not.toHaveBeenCalled();
     });
   });
@@ -80,7 +90,9 @@ describe('GetTasksHandler', () => {
     it('deve retornar nextCursor = id do último item quando há mais páginas', async () => {
       prisma.taskRead.findMany.mockResolvedValue(fakeRows(3)); // limit 2 + 1 extra
 
-      const page = await handler.execute(new GetTasksQuery(userId, projectId, 2));
+      const page = await handler.execute(
+        new GetTasksQuery(userId, projectId, 2),
+      );
 
       expect(page.items.map((t) => t.id)).toEqual(['t1', 't2']); // o extra NÃO vaza na resposta
       expect(page.nextCursor).toBe('t2');
@@ -89,7 +101,9 @@ describe('GetTasksHandler', () => {
     it('deve retornar nextCursor = null na última página', async () => {
       prisma.taskRead.findMany.mockResolvedValue(fakeRows(2));
 
-      const page = await handler.execute(new GetTasksQuery(userId, projectId, 2));
+      const page = await handler.execute(
+        new GetTasksQuery(userId, projectId, 2),
+      );
 
       expect(page.items).toHaveLength(2);
       expect(page.nextCursor).toBeNull();
@@ -104,9 +118,57 @@ describe('GetTasksHandler', () => {
     });
 
     it('deve retornar página vazia sem cursor quando o projeto não tem tarefas', async () => {
-      const page = await handler.execute(new GetTasksQuery(userId, projectId, 20));
+      const page = await handler.execute(
+        new GetTasksQuery(userId, projectId, 20),
+      );
 
       expect(page).toEqual({ items: [], nextCursor: null });
+    });
+  });
+
+  // ============================================================
+  // Flag task-list-with-stats (Módulo 14.7): o handler recebe a decisão pronta, não conhece flags
+  // ============================================================
+  describe('stats (flag task-list-with-stats)', () => {
+    it('flag desligada: nenhuma consulta aos números, e nenhum campo stats', async () => {
+      const page = await handler.execute(
+        new GetTasksQuery(userId, projectId, 20),
+      );
+
+      expect(page).not.toHaveProperty('stats');
+      expect(reports.statsOf).not.toHaveBeenCalled();
+    });
+
+    it('flag ligada, primeira página: stats do projeto, sem repetir a checagem de dono', async () => {
+      const page = await handler.execute(
+        new GetTasksQuery(userId, projectId, 20, undefined, true),
+      );
+
+      expect(page.stats).toEqual({ projectId, total: 3 });
+      expect(reports.statsOf).toHaveBeenCalledWith(projectId);
+      expect(projects.assertOwner).toHaveBeenCalledTimes(1); // só a da listagem
+    });
+
+    it('flag ligada, página seguinte (com cursor): sem stats, sem a consulta a mais', async () => {
+      prisma.taskRead.findMany.mockResolvedValue(fakeRows(1));
+
+      const page = await handler.execute(
+        new GetTasksQuery(userId, projectId, 20, 't9', true),
+      );
+
+      expect(page).not.toHaveProperty('stats');
+      expect(reports.statsOf).not.toHaveBeenCalled();
+    });
+
+    it('projeto alheio com a flag ligada: 404 antes de ler qualquer número', async () => {
+      projects.assertOwner.mockRejectedValue(new NotFoundException());
+
+      await expect(
+        handler.execute(
+          new GetTasksQuery(userId, projectId, 20, undefined, true),
+        ),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(reports.statsOf).not.toHaveBeenCalled();
     });
   });
 });

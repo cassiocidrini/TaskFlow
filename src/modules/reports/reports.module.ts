@@ -11,5 +11,7 @@ import { ReportsService } from './reports.service';
   imports: [ProjectsModule],
   controllers: [ReportsController],
   providers: [ReportsService],
+  // A listagem de tarefas lê os números do projeto atrás da flag `task-list-with-stats` (Módulo 14.7)
+  exports: [ReportsService],
 })
 export class ReportsModule {}

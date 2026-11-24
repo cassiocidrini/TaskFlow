@@ -804,6 +804,117 @@
           "legendFormat": "{{platform}} {{app_version}}"
         }
       ]
+    },
+    {
+      "type": "row",
+      "id": 19,
+      "title": "Rollout: task-list-with-stats (Módulo 14.7, critério no ADR-0011): variante × controle, só a 1ª página",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 50
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "Listagem: p95 por variante",
+      "description": "Critério: regressão = p95 de with-stats > 1,2x o do control E mais de 50 ms acima, por 15 min (alerta TaskListStatsSlower).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "taskflow-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 51
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "taskflow-prometheus"
+          },
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, variant) (rate(taskflow_task_list_duration_bucket{page=\"first\"}[$__rate_interval])))",
+          "legendFormat": "{{variant}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Listagem: taxa de erro (5xx) por variante",
+      "description": "Critério: with-stats no máximo 0,1 ponto percentual acima do control (alerta TaskListStatsErrors). 404 de projeto alheio não entra (client_error).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "taskflow-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 51
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "stacking": {
+              "mode": "none"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "taskflow-prometheus"
+          },
+          "refId": "A",
+          "expr": "(sum by (variant) (rate(taskflow_task_list_requests_total{page=\"first\", outcome=\"error\"}[$__rate_interval])) or sum by (variant) (rate(taskflow_task_list_requests_total{page=\"first\"}[$__rate_interval])) * 0) / sum by (variant) (rate(taskflow_task_list_requests_total{page=\"first\"}[$__rate_interval]))",
+          "legendFormat": "{{variant}}"
+        }
+      ]
     }
   ]
 }

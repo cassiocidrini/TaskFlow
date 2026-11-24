@@ -22,6 +22,15 @@ export class ReportsService {
    */
   async statsFor(projectId: string, userId: string): Promise<ProjectStatsDto> {
     await this.projects.assertOwner(projectId, userId);
+    return this.statsOf(projectId);
+  }
+
+  /**
+   * Os números do projeto SEM checar o dono: para quem já autorizou o acesso ao projeto na mesma requisição (a
+   * listagem de tarefas com a flag `task-list-with-stats`, Módulo 14.7). Repetir o `assertOwner` custaria uma consulta a
+   * mais na rota mais chamada da API. Quem chama é responsável pela autorização (o nome do método diz isso).
+   */
+  async statsOf(projectId: string): Promise<ProjectStatsDto> {
     const stats = await this.prisma.projectStats.findUnique({
       where: { projectId },
     });

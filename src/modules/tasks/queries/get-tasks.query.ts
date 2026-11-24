@@ -14,5 +14,7 @@ export class GetTasksQuery {
     /** Já validado (1–100) pelo `CursorPaginationDto`: o teto é imposto pelo servidor (OWASP API4). */
     public readonly limit: number,
     public readonly cursor?: string,
+    /** Flag `task-list-with-stats` (Módulo 14.7), já avaliada pelo controller: o handler não conhece flags. */
+    public readonly includeStats = false,
   ) {}
 }

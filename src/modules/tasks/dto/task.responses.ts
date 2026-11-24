@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ProjectStatsDto } from '../../reports/dto/project-stats.response';
 import { DueResponseDto } from './due.dto';
 
 /**
@@ -97,6 +98,15 @@ export class TaskPageDto {
     description: 'Envie como `?cursor=` para a próxima página. `null` = não há mais páginas.',
   })
   nextCursor!: string | null;
+
+  // Opcional DE VERDADE (a lição da 14.4: documentar o que acontece): só com a flag ligada e só na primeira página
+  @ApiPropertyOptional({
+    type: ProjectStatsDto,
+    description:
+      'Números do projeto, só na PRIMEIRA página e só com a feature `task-list-with-stats` ligada para o usuário ' +
+      '(Módulo 14.7). Eventualmente consistentes: o `asOf` diz até quando valem.',
+  })
+  stats?: ProjectStatsDto;
 }
 
 /** Estado atual da tarefa RECONSTRUÍDO a partir dos eventos (replay), não lido do Read Model. */
