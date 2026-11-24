@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 
 /** Mesma versão do `.github/workflows/api-contract.yml`. */
-const OASDIFF_IMAGE = 'tufin/oasdiff:v1.37.0';
+const OASDIFF_IMAGE = 'tufin/oasdiff:v1.37.0@sha256:ff02af37a254b5199b9d72e7bba93dae5837a9119d59459168d1398893b47aea';
 const SNAPSHOT = 'docs/api/openapi.json';
 
 /** Devolve o código de saída; quem chama garante a limpeza da pasta temporária (`process.exit` pularia o `finally`). */

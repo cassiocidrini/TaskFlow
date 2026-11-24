@@ -22,8 +22,8 @@ jobs:
     name: Tipos, lint, unitários e build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -36,6 +36,11 @@ jobs:
         run: npm run lint
       - name: Testes unitários
         run: npm run test:unit
+      # Etapa E.2 (OWASP A06): vulnerabilidade HIGH ou CRITICAL numa dependência de PRODUÇÃO bloqueia o merge. As
+      # devDependencies não vão para a imagem; bloquear por elas seria ruído, e portão barulhento acaba ignorado.
+      # Pode ficar vermelho sem o PR mudar nada (saiu uma CVE nova): é para isso que ele existe.
+      - name: Dependências de produção sem vulnerabilidade alta (npm audit)
+        run: npm audit --omit=dev --audit-level=high
       # Build + o contrato da API (Módulo 14.3): falha se o código mudou o OpenAPI e docs/api/openapi.json não foi
       # atualizado no mesmo PR. Do código COMPILADO, porque o plugin do Swagger só roda no `nest build`
       - name: Build e contrato da API (snapshot do OpenAPI)
@@ -45,8 +50,8 @@ jobs:
     name: Testes de integração (Testcontainers)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -60,8 +65,8 @@ jobs:
     name: Testes E2E (Testcontainers)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -77,8 +82,8 @@ jobs:
     name: Testes de streaming (Kafka + Postgres, Testcontainers)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
           cache: 'npm'
@@ -91,17 +96,28 @@ jobs:
   # Etapa E.1: a imagem de produção é construída e RODADA em todo PR. O Dockerfile anterior ficou no Node 20, como
   # root e copiando o .env para o build sem ninguém perceber, porque nada o executava. Sem `npm ci`: o smoke só usa
   # o Docker e módulos nativos do Node (a imagem instala as próprias dependências).
+  # O nome continua "hadolint e smoke" mesmo com o Trivy (E.2): é um check obrigatório do Ruleset, identificado pelo
+  # NOME, e renomeá-lo deixaria todo PR esperando um check que nunca mais reporta.
   image:
     name: Imagem Docker (hadolint e smoke)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
 
+      # Ferramentas por tag E digest (E.2): a tag documenta a versão, o digest garante que é a mesma imagem. Ficam fora
+      # do Dependabot (ele não lê `run:`); a lista para revisão manual está no Módulo 03.
       - name: Lint do Dockerfile (hadolint)
-        run: docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile
+        run: docker run --rm -i hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d < Dockerfile
+      # O que vai para produção DE FATO, inclusive o Alpine e o Node da imagem, que o npm audit não enxerga. Só o que
+      # tem correção (--ignore-unfixed): uma CVE sem versão corrigida não tem ação possível e travaria todo PR.
+      - name: Vulnerabilidades da imagem (Trivy)
+        run: |
+          docker build -q -t taskflow:scan .
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb \
+            image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress taskflow:scan
       # Migração num Postgres vazio, healthy, ready 200, uid 1000, sem escrita no código, sem npm, docker stop com
       # graceful shutdown (exit 0 em menos de 5 s)
       - name: Smoke da imagem (build + execução)

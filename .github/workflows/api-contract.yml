@@ -23,12 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Mesma versão do `npm run openapi:diff` (scripts/openapi/diff.mjs): o resultado local é o do CI
-      OASDIFF_IMAGE: tufin/oasdiff:v1.37.0
+      OASDIFF_IMAGE: tufin/oasdiff:v1.37.0@sha256:ff02af37a254b5199b9d72e7bba93dae5837a9119d59459168d1398893b47aea
       # Booleano calculado pelo GitHub: nenhum texto do PR entra no shell (sem risco de injeção de comando)
       BREAKING_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'breaking-change') }}
       BASE_REF: ${{ github.base_ref }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # a base do PR precisa estar disponível para o `git show`
 

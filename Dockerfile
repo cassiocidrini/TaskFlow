@@ -46,7 +46,7 @@ COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 FROM deps AS migrate
 COPY prisma.config.ts ./
 COPY prisma ./prisma
-USER node
+USER 1000:1000
 CMD ["./node_modules/.bin/prisma", "migrate", "deploy"]
 
 # ============================================================
@@ -62,10 +62,12 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
 # Arquivos do root (o COPY sem --chown) e processo do usuário `node` (uid 1000, já existe na imagem oficial): o
 # processo LÊ o próprio código, mas não o altera. Uma invasão da API não ganha root no container nem consegue
 # persistir nada em dist/ ou node_modules/.
+# Numérico (1000:1000 = node:node), e não `USER node`: com `runAsNonRoot: true`, o Kubernetes só consegue CONFERIR
+# que o usuário não é root se o uid for um número (pelo nome, recusa o pod). Regra DL3066 do hadolint.
 COPY package.json ./
 COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-USER node
+USER 1000:1000
 
 EXPOSE 3000
 

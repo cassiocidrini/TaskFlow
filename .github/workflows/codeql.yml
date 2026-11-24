@@ -1,0 +1,50 @@
+name: CodeQL
+
+# Análise estática de segurança do NOSSO código (Etapa E.2, Módulo 03): injeção, SSRF, regex vulnerável a ReDoS,
+# dado do usuário chegando a um sink perigoso. O npm audit e o Trivy olham o código dos OUTROS (dependências e
+# imagem); o CodeQL olha o que nós escrevemos.
+#
+# Workflow no repositório (advanced setup), e não o "default setup" ligado na interface: a configuração fica
+# versionada, revisada em PR e com as actions fixadas por SHA, como o resto do CI.
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  # Semanal: as consultas do CodeQL evoluem, e um padrão novo pode achar algo em código que não mudou
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL (javascript-typescript)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Publicar os achados na aba Security (code scanning); só este job tem a permissão
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # JavaScript/TypeScript não precisa de build: o CodeQL extrai direto do código-fonte (build-mode none)
+      - uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          languages: javascript-typescript
+          build-mode: none
+          # security-extended: as consultas padrão mais as de menor precisão, mas ainda de segurança
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - node_modules
+              - dist
+              - labs
+              - load
+      - uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          category: /language:javascript-typescript
