@@ -241,6 +241,9 @@ e cancela execuções obsoletas do mesmo PR.
 
 ## 🧭 Decisões de design
 
+As decisões da mensageria (Kafka, outbox, chave de partição, contrato, idempotência, DLT, Kafka × SQS) têm
+**ADRs** próprios, com as alternativas recusadas, o que cada uma piora e quando revisitar: [`docs/adr/`](docs/adr/README.md).
+
 | Decisão | Alternativa descartada | Por quê |
 |---|---|---|
 | PostgreSQL como Event Store | EventStoreDB, Kafka | Um banco só para operar; `UNIQUE` + transações atômicas bastam para a escala do projeto |
@@ -346,7 +349,7 @@ reproduzir, **problemas reais encontrados** e onde o resultado vive no código. 
 | [10](docs/modules/10-performance-load-testing.md) | Performance e load testing (k6) | `load/` |
 | [11](docs/modules/11-nodejs-internals.md) | Node.js internals (event loop, thread pool, streams, leaks) | `labs/node-internals/` |
 | [12](docs/modules/12-design-patterns.md) | Design patterns | ver [Padrões de projeto aplicados](#padrões-de-projeto-aplicados) |
-| [13](docs/modules/13-mensageria-kafka.md) | Mensageria e streaming com Kafka (🚧 13.6d de 13.8) | `docker-compose.yml` (profile `streaming`), `events/`, `outbox-relay/`, `modules/notifications/consumer/`, `common/messaging/` |
+| [13](docs/modules/13-mensageria-kafka.md) | Mensageria e streaming com Kafka (e SQS + Lambda para trabalho) | `docker-compose.yml` (profile `streaming`), `events/`, `outbox-relay/`, `replay/`, `redrive/`, `modules/*/consumer/`, `common/messaging/`, `lambdas/push-sender/`, `terraform/push.tf`, [ADRs](docs/adr/README.md) |
 
 ---
 

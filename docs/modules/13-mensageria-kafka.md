@@ -2,9 +2,8 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
-> **Status:** 🚧 em construção, etapa **13.7 de 13.8** (push por SQS + Lambda: Kafka para fatos, SQS para trabalho). Cada etapa
-> acrescenta a sua parte a
-> este documento; o mapa completo está na seção "Roteiro do módulo", logo abaixo.
+> **Status:** ✅ concluído (13.1 a 13.8). O mapa das etapas está em "Roteiro do módulo", logo abaixo; o porquê de cada
+> decisão, em sete [ADRs](../adr/README.md).
 >
 > **Onde vive no código:** [`docker-compose.yml`](../../docker-compose.yml) (serviços `kafka` e `kafka-init`, profile
 > `streaming`) · [`scripts/kafka/smoke.ts`](../../scripts/kafka/smoke.ts) ·
@@ -60,66 +59,115 @@ fato: notificação, relatório, auditoria, antifraude. Cada um precisa receber 
 | **13.6c** | *Redrive* do DLT (com auditoria, só para o grupo que falhou) e limpeza de `processed_events` | ✅ |
 | **13.6d** | `kafka-exporter` (lag visto pelo broker), painel "TaskFlow Mensageria" e **9 alertas como código**, testados com `promtool` | ✅ |
 | **13.7** | Kafka (fato) × **SQS** (trabalho): envio de push por SQS + Lambda, idempotente e com DLQ | ✅ |
-| 13.8 | ADRs e o diagrama final | 🔜 |
+| **13.8** | Sete **ADRs** (`docs/adr/`) e a arquitetura final em dois diagramas: o caminho de um evento e a operação | ✅ |
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 13.7)
+## 🏗️ Arquitetura
+
+Dois diagramas, porque um só ficaria ilegível: o **caminho de um evento** (o que acontece a cada request) e a
+**operação** (o que se usa para observar, consertar e reconstruir). As decisões por trás de cada caixa estão nos
+[ADRs](../adr/README.md).
+
+### O caminho de um evento
 
 ```mermaid
 flowchart LR
-    subgraph api["Processo da API"]
-        API["TaskFlow API<br/>:3000 · métricas :9464"]
+    subgraph api["API :3000"]
+        API["comando de tarefa"]
     end
     subgraph pg["PostgreSQL"]
         EV[("events<br/>(fonte da verdade)")]
         OB[("outbox")]
-        subgraph nctx["contexto de notificações"]
-            PE[("processed_events")]
-            NT[("notification_tasks<br/>(projeção local)")]
-            NO[("notifications")]
-        end
+        NT[("processed_events<br/>notification_tasks<br/>notifications")]
+        RS[("report_tasks<br/>project_stats")]
     end
-    subgraph relay["Processo do relay (1+ réplicas)"]
-        R["OutboxRelay<br/>métricas :9465"]
+    subgraph relay["relay (1+ réplicas, um lote por vez)"]
+        R["OutboxRelay"]
     end
-    subgraph cons["Processo do consumer (group notifications)"]
-        C["NotificationsConsumer<br/>métricas :9467"]
+    T1[("taskflow.task-events.v1<br/>3 partições · chave = taskId · 7 dias")]
+    subgraph cn["consumer group notifications"]
+        C["NotificationsHandler"]
     end
-    API -->|"appendMany: UMA transação"| EV
-    API -->|"mesmo COMMIT"| OB
-    R -->|"lock + pendentes + published_at"| OB
-    R -->|"produtor idempotente<br/>chave = taskId"| T1[("taskflow.task-events.v1<br/>3 partições · 7 dias")]
-    T1 -->|"3 partições em paralelo"| C
-    C -->|"mensagem envenenada<br/>(ack antes do commit)"| DLT[("taskflow.notifications-dlt.v1<br/>3 partições · 30 dias")]
-    C -->|"UMA transação:<br/>marca + efeito"| PE
-    C --> NT
-    C --> NO
-    API -.->|"GET /me/notifications<br/>(só leitura)"| NO
-    subgraph rep["Processo do consumer (group reports)"]
-        RC["ReportsConsumer<br/>métricas :9468"]
+    subgraph cr["consumer group reports"]
+        RC["ReportsHandler"]
     end
-    T1 -->|"mesmo tópico, outro grupo<br/>(offset próprio)"| RC
-    RC -->|"UMA transação:<br/>guarda de versão + delta"| RS[("report_tasks<br/>project_stats")]
-    RC -->|"mensagem envenenada"| RDLT[("taskflow.reports-dlt.v1")]
-    API -.->|"GET /projects/:id/stats<br/>(só leitura)"| RS
     subgraph aws["AWS (LocalStack)"]
-        PQ[("taskflow-push<br/>(SQS standard)")]
+        PQ[("SQS taskflow-push")]
         PDLQ[("taskflow-push-dlq")]
-        L["Lambda push-sender<br/>batchItemFailures"]
+        L["Lambda push-sender"]
         DD[("DynamoDB<br/>push-deliveries")]
     end
-    C -->|"SendMessage DENTRO da transação<br/>(o trabalho)"| PQ
+
+    API -->|"1 transação: evento + outbox"| EV
+    API --> OB
+    R -->|"advisory lock · pendentes em ordem"| OB
+    R -->|"produtor idempotente"| T1
+    T1 -->|"offset próprio"| C
+    T1 -->|"offset próprio"| RC
+    C -->|"1 transação: marca + notificação + SendMessage"| NT
+    C --> PQ
+    RC -->|"1 transação: guarda de versão + delta"| RS
     PQ --> L
-    L -->|"reserva condicional<br/>(idempotência)"| DD
+    L -->|"reserva condicional"| DD
     PQ -->|"3 recebimentos sem sucesso"| PDLQ
+    C -.->|"envenenada"| DLT1[("notifications-dlt.v1")]
+    RC -.->|"envenenada"| DLT2[("reports-dlt.v1")]
+    API -.->|"GET /me/notifications · GET /projects/:id/stats"| NT
+    API -.-> RS
 ```
 
-A API **não fala com o Kafka** em nenhuma direção: grava evento e outbox na mesma transação, e lê as notificações
-que o consumer gravou. Relay e consumer são processos separados, cada um com a sua porta de métricas e o seu
-`service.name` no Jaeger, mas **um trace só** liga os três: o contexto do request vai gravado na outbox e segue no
-header `traceparent` da mensagem (ver "Um trace só através da outbox"). As tabelas do contexto de notificações só são escritas pelo consumer, e o consumer não lê
-as tabelas da API (fronteira por convenção; ver "Limitações").
+Lido da esquerda para a direita, com a garantia de cada passagem:
+
+| Passagem | Garantia | Como | ADR |
+|---|---|---|---|
+| API → `events` + `outbox` | Gravado ⇔ será publicado | Mesma transação | [0002](../adr/0002-transactional-outbox-com-relay-por-polling.md) |
+| `outbox` → tópico | Ordem por tarefa, *at-least-once* | Um lote por vez (advisory lock), chave = `taskId`, ack antes de marcar | [0002](../adr/0002-transactional-outbox-com-relay-por-polling.md), [0003](../adr/0003-chave-de-particao-por-tarefa.md) |
+| Tópico → consumers | Cada grupo recebe tudo, no seu ritmo | Consumer groups com offset próprio | [0001](../adr/0001-kafka-como-transporte-de-eventos.md) |
+| Consumer → efeito | Efeito exatamente uma vez | Marca (ou guarda de versão) e efeito na mesma transação; offset depois | [0005](../adr/0005-idempotencia-no-consumer.md) |
+| Falha no consumer | Envenenada não trava a partição; banco fora não vai ao DLT | Retry classificado, DLT por grupo | [0006](../adr/0006-retry-classificado-e-dlt-por-grupo.md) |
+| Notificação → push | Enviado uma vez, com retry por mensagem | SQS dentro da transação, Lambda idempotente | [0007](../adr/0007-kafka-para-fatos-sqs-para-trabalho.md) |
+| Formato da mensagem | O agregado evolui sem quebrar consumidores | Evento de integração versionado, leitor tolerante | [0004](../adr/0004-evento-de-integracao-separado-do-dominio.md) |
+
+A API **não fala com o Kafka** em nenhuma direção. O consumer **não lê as tabelas da API**, e a API só **lê** as
+tabelas dos consumers (fronteira por convenção; ver "Limitações"). Um **trace só** atravessa API, relay e consumers:
+o contexto do request vai gravado na outbox e segue no header `traceparent`.
+
+### A operação
+
+```mermaid
+flowchart LR
+    subgraph rec["Reconstruir e recuperar"]
+        RP["npm run replay<br/>(--aggregate)"]
+        RD["npm run redrive<br/>--group · --dry-run"]
+    end
+    EV[("events")] -->|"histórico, header replay<br/>lock por agregado"| RP --> OB[("outbox")]
+    DLT[("DLT do grupo")] -->|"header redrive-group<br/>só exhausted"| RD --> T1[("tópico de eventos")]
+    RD -->|"depois do ack"| AU[("dlt_redrives<br/>auditoria")]
+
+    subgraph obs["Observar"]
+        EX["kafka-exporter :9308<br/>lag visto pelo broker"]
+        PR["Prometheus<br/>9 alertas testados"]
+        GF["Grafana<br/>TaskFlow Mensageria"]
+        JG["Jaeger<br/>um trace por request"]
+    end
+    T1 -.-> EX --> PR --> GF
+    PROC["API :9464 · relay :9465<br/>notifications :9467 · reports :9468"] -.->|"/metrics"| PR
+    PROC -.->|"OTLP"| JG
+
+    subgraph limp["Limpar"]
+        CL1["publicadas da outbox<br/>(72 h)"]
+        CL2["processed_events<br/>(14 dias > 7 do tópico)"]
+    end
+```
+
+| Situação | Ferramenta | Onde |
+|---|---|---|
+| Projeção errada ou perdida | Replay do Event Store pela outbox (o grupo aceita replay) | "Runbook: reconstruir uma projeção" |
+| Mensagens no DLT depois de corrigir o bug | Redrive só para o grupo que falhou, com `--dry-run` e auditoria | "Redrive do DLT (13.6c)" |
+| Uma linha da outbox que não sai | Runbook (diagnóstico e, se impublicável, estacionar à mão) | "Por que não há DLQ no relay" |
+| "Os eventos estão fluindo?" | Painel TaskFlow Mensageria; alertas `OutboxStalled`, `ConsumerLagHigh`, `MessageDeadLettered`… | "Lag, painel e alertas (13.6d)" |
+| Push que não chegou | Log da Lambda, tabela de idempotência, DLQ do push | Passo 15 de "Como reproduzir" |
 
 ---
 
@@ -179,8 +227,8 @@ confirmada. Com **1 nó** isso é impossível (RF 1), e este ambiente existe par
 | **SNS + SQS** | Gerenciado na AWS, zero operação; DLQ nativa; ótimo para **distribuir trabalho** | Sem replay (consumir apaga); ordem só com FIFO e com limite de vazão | Fica para o que ele faz melhor: **fila de trabalho** (etapa 13.7) |
 | **Redpanda** | Mesmo protocolo do Kafka, um binário só, menos memória | Menos comum em vaga; o objetivo é o Kafka em si | Plano B se faltar RAM: o código não mudaria |
 
-O critério que vai para o ADR (13.8): **Kafka para fatos** (algo aconteceu, e quem quiser reage, inclusive no
-futuro); **SQS para trabalho** (alguém precisa fazer isto uma vez).
+O critério, registrado no [ADR-0007](../adr/0007-kafka-para-fatos-sqs-para-trabalho.md): **Kafka para fatos** (algo
+aconteceu, e quem quiser reage, inclusive no futuro); **SQS para trabalho** (alguém precisa fazer isto uma vez).
 
 ### Dual-write: o problema que a outbox resolve (13.2)
 
@@ -530,7 +578,7 @@ O plano previa uma DLQ também no relay. Avaliada, foi **recusada**:
   lugar de barrá-la é na origem.
 
 Uma DLQ no lugar errado é pior que nenhuma. O que existe: o alerta `outbox_oldest_pending_age_seconds`, o `attempts` e
-o `last_error` da linha, e o **runbook** abaixo. A decisão vira item do ADR na 13.8.
+o `last_error` da linha, e o **runbook** abaixo. Registrado no [ADR-0006](../adr/0006-retry-classificado-e-dlt-por-grupo.md).
 
 **Runbook: uma linha da outbox que não sai.**
 
@@ -952,6 +1000,22 @@ amostrado). Ver a tabela "`correlationId` × `trace_id`" do [Módulo 01](01-obse
   aparece como um `create` novo, e as tentativas ficam visíveis.
 - **Testado com o broker real:** a suíte de streaming exige que o `process` tenha o `traceId` do request e seja filho do
   `create`. Mutação: sem o `extract` no consumer, o teste quebra (o `process` cai num trace novo).
+
+---
+
+## 🧭 Decisões (ADRs)
+
+Cada decisão estrutural do módulo tem um ADR, com as alternativas recusadas, o que piora e **quando revisitar**:
+
+| ADR | Decisão | O gatilho para revisitar, em uma linha |
+|---|---|---|
+| [0001](../adr/0001-kafka-como-transporte-de-eventos.md) | Kafka (KRaft) como transporte | Sistema todo serverless e sem necessidade de replay → Kinesis, EventBridge ou SNS+SQS |
+| [0002](../adr/0002-transactional-outbox-com-relay-por-polling.md) | Outbox + relay por polling, um lote por vez | Vazão além de um relay, ou latência < 500 ms → outbox particionada ou CDC |
+| [0003](../adr/0003-chave-de-particao-por-tarefa.md) | Chave = `taskId` | Um consumidor precisar de ordem por projeto |
+| [0004](../adr/0004-evento-de-integracao-separado-do-dominio.md) | Evento de integração versionado, leitor tolerante | Um segundo produtor, outro time ou outra linguagem → schema registry |
+| [0005](../adr/0005-idempotencia-no-consumer.md) | Marca ou versão, na mesma transação do efeito | Retenção do tópico mudar; efeito externo novo |
+| [0006](../adr/0006-retry-classificado-e-dlt-por-grupo.md) | Retry classificado, DLT por grupo, sem DLQ no relay | Consumer sem necessidade de ordem → tópicos de retry |
+| [0007](../adr/0007-kafka-para-fatos-sqs-para-trabalho.md) | Kafka para fatos, SQS para trabalho | Push crítico, ou notificações paradas com o SQS fora inaceitável → segunda outbox |
 
 ---
 
@@ -1577,6 +1641,7 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 | Projeção reconstruível só a partir do que o tópico retém (7 dias) | **(13.6b)** `npm run replay` republica o Event Store pela outbox, com lock por agregado e header `replay`; runbook de reconstrução | O Event Store vira, na prática, a fonte de qualquer read model; o tópico é transporte |
 | Mensagem no DLT só inspecionável à mão; `processed_events` crescendo para sempre | **(13.6c)** `npm run redrive` com política por grupo, filtro por motivo, `--dry-run` e auditoria; limpeza por data com retenção validada contra a do tópico | O DLT vira parte de um ciclo de recuperação, e a tabela de idempotência tem tamanho limitado |
 | Sinais espalhados em `/metrics`, sem lag e sem alerta | **(13.6d)** Lag pelo broker (`kafka-exporter`), painel "TaskFlow Mensageria" e 9 alertas como código testados com `promtool` | Dá para saber se os eventos estão fluindo sem abrir cinco endpoints, e ser avisado quando não estão |
+| Decisões espalhadas pelo texto do módulo | **(13.8)** Sete ADRs em `docs/adr/`, cada um com alternativas recusadas, consequências negativas, gatilhos para revisitar e o teste que o sustenta | O módulo explica como funciona; o ADR diz por que, e quando deixaria de valer |
 | Um processo de telemetria (`tracing.ts` fixo) | **(13.3)** `startTelemetry` por processo; relay como `taskflow-relay` na porta 9465 | Dois processos observáveis separadamente ([Módulo 01](01-observabilidade.md)) |
 
 ---
@@ -1688,7 +1753,7 @@ LISTEN/NOTIFY"). Sem o span `create`, esse tempo não apareceria em lugar nenhum
 - [x] *Redrive* do DLT com política por grupo e auditoria, e limpeza de `processed_events` com retenção validada (13.6c)
 - [x] Lag pelo broker, painel de mensageria e alertas como código testados no CI (13.6d)
 - [x] Kafka (fatos) × SQS (trabalho) no mesmo sistema: push com DLQ, Lambda idempotente e `batchItemFailures` (13.7)
-- [ ] ADRs (13.8)
+- [x] Sete ADRs com alternativas, consequências, gatilhos para revisitar e evidência; arquitetura final em dois diagramas (13.8)
 
 ---
 
