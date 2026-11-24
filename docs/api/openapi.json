@@ -1,0 +1,2580 @@
+{
+  "components": {
+    "schemas": {
+      "AssignTaskDto": {
+        "properties": {
+          "assigneeId": {
+            "description": "Novo responsável (UUID v4 de um usuário)",
+            "example": "c5afce1e-dbd3-4606-a69f-cc930471cef8",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "assigneeId"
+        ],
+        "type": "object"
+      },
+      "AuthenticatedUserDto": {
+        "properties": {
+          "email": {
+            "description": "E-mail do usuário (claim `email` do JWT)",
+            "example": "demo@taskflow.dev",
+            "type": "string"
+          },
+          "userId": {
+            "description": "ID do usuário (claim `sub` do JWT)",
+            "example": "c5afce1e-dbd3-4606-a69f-cc930471cef8",
+            "type": "string"
+          }
+        },
+        "required": [
+          "userId",
+          "email"
+        ],
+        "type": "object"
+      },
+      "ChangeTaskStatusDto": {
+        "properties": {
+          "status": {
+            "description": "Status de destino. Para concluir a tarefa, use `POST …/complete`.",
+            "enum": [
+              "PENDING",
+              "IN_PROGRESS"
+            ],
+            "example": "IN_PROGRESS",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
+      },
+      "CreateProjectDto": {
+        "properties": {
+          "description": {
+            "description": "Descrição livre",
+            "example": "Tudo o que falta para a versão 1.0",
+            "maxLength": 500,
+            "type": "string"
+          },
+          "name": {
+            "description": "Nome do projeto",
+            "example": "Lançamento do app",
+            "maxLength": 100,
+            "minLength": 3,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "CreateTaskDto": {
+        "properties": {
+          "assigneeId": {
+            "description": "Responsável inicial (UUID v4 de um usuário)",
+            "example": "c5afce1e-dbd3-4606-a69f-cc930471cef8",
+            "format": "uuid",
+            "type": "string"
+          },
+          "dueDate": {
+            "description": "Prazo (ISO 8601)",
+            "example": "2026-12-31T23:59:59Z",
+            "format": "date-time",
+            "type": "string"
+          },
+          "title": {
+            "description": "Título. Palavras como \"urgente\" e \"bug\" elevam a prioridade calculada para HIGH.",
+            "example": "Corrigir bug urgente no login",
+            "maxLength": 200,
+            "minLength": 3,
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "CreateTaskResponseDto": {
+        "properties": {
+          "taskId": {
+            "description": "ID da tarefa criada (UUID v4) — também é o ID do agregado no Event Store",
+            "example": "370b268e-18ba-444c-ae17-2716b0269232",
+            "type": "string"
+          }
+        },
+        "required": [
+          "taskId"
+        ],
+        "type": "object"
+      },
+      "LoginDto": {
+        "properties": {
+          "email": {
+            "description": "E-mail cadastrado",
+            "example": "demo@taskflow.dev",
+            "format": "email",
+            "type": "string"
+          },
+          "password": {
+            "description": "Senha do usuário",
+            "example": "senha12345",
+            "format": "password",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "password"
+        ],
+        "type": "object"
+      },
+      "LoginResponseDto": {
+        "properties": {
+          "accessToken": {
+            "description": "JWT assinado com HS256. Envie em `Authorization: Bearer <token>`. Expira conforme `JWT_EXPIRES_IN` (padrão: 1h).",
+            "example": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjNWFmY2UxZSJ9.assinatura",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accessToken"
+        ],
+        "type": "object"
+      },
+      "NotificationDto": {
+        "properties": {
+          "createdAt": {
+            "example": "2026-11-10T10:42:47.567Z",
+            "format": "date-time",
+            "type": "string"
+          },
+          "eventId": {
+            "description": "Evento de origem no Kafka (`event-id`): rastreia de onde veio a notificação",
+            "example": "24dd5249-4eda-4246-a1fc-65bad9635c83",
+            "format": "uuid",
+            "type": "string"
+          },
+          "id": {
+            "example": "6f1d4c9e-2b7a-4e0f-9c3d-1a2b3c4d5e6f",
+            "format": "uuid",
+            "type": "string"
+          },
+          "message": {
+            "example": "Você foi atribuído à tarefa \"Conciliar pagamentos\"",
+            "type": "string"
+          },
+          "projectId": {
+            "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+            "format": "uuid",
+            "type": "string"
+          },
+          "taskId": {
+            "example": "370b268e-18ba-444c-ae17-2716b0269232",
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "TASK_ASSIGNED",
+              "TASK_COMPLETED"
+            ],
+            "example": "TASK_ASSIGNED",
+            "type": "string"
+          },
+          "userId": {
+            "description": "Destinatário: sempre o usuário do token",
+            "example": "c5afce1e-dbd3-4606-a69f-cc930471cef8",
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "userId",
+          "type",
+          "message",
+          "taskId",
+          "projectId",
+          "eventId",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "NotificationPageDto": {
+        "properties": {
+          "items": {
+            "description": "Mais recentes primeiro (`createdAt` desc, `id` como desempate)",
+            "items": {
+              "$ref": "#/components/schemas/NotificationDto"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "description": "Envie como `?cursor=` para a próxima página. `null` = não há mais páginas.",
+            "example": "6f1d4c9e-2b7a-4e0f-9c3d-1a2b3c4d5e6f",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor"
+        ],
+        "type": "object"
+      },
+      "ProjectResponseDto": {
+        "properties": {
+          "createdAt": {
+            "description": "Data de criação (ISO 8601)",
+            "example": "2026-10-18T04:21:32.675Z",
+            "format": "date-time",
+            "type": "string"
+          },
+          "description": {
+            "description": "Descrição livre",
+            "example": "Tudo o que falta para a versão 1.0",
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "description": "ID do projeto (UUID v4)",
+            "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+            "type": "string"
+          },
+          "name": {
+            "description": "Nome do projeto",
+            "example": "Lançamento do app",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "createdAt"
+        ],
+        "type": "object"
+      },
+      "ProjectStatsDto": {
+        "properties": {
+          "asOf": {
+            "description": "Instante do evento mais recente refletido nestes números (\"dados até\"). `null` = nenhum evento do projeto processado ainda",
+            "example": "2026-11-10T18:30:02.377Z",
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "avgLeadTimeSeconds": {
+            "description": "Lead time médio (criação → conclusão) das tarefas concluídas, em segundos. `null` sem nenhuma concluída",
+            "example": 86400,
+            "nullable": true,
+            "type": "number"
+          },
+          "byStatus": {
+            "$ref": "#/components/schemas/TasksByStatusDto"
+          },
+          "projectId": {
+            "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+            "format": "uuid",
+            "type": "string"
+          },
+          "total": {
+            "description": "Tarefas do projeto",
+            "example": 15,
+            "type": "number"
+          },
+          "unassignedOpen": {
+            "description": "Tarefas abertas (não concluídas) sem responsável",
+            "example": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "projectId",
+          "total",
+          "byStatus",
+          "unassignedOpen",
+          "avgLeadTimeSeconds",
+          "asOf"
+        ],
+        "type": "object"
+      },
+      "RegisterDto": {
+        "properties": {
+          "email": {
+            "description": "E-mail único do usuário",
+            "example": "demo@taskflow.dev",
+            "format": "email",
+            "type": "string"
+          },
+          "name": {
+            "description": "Nome de exibição",
+            "example": "Demo",
+            "maxLength": 100,
+            "minLength": 3,
+            "type": "string"
+          },
+          "password": {
+            "description": "Senha. Entre 8 e 72 caracteres (72 é o limite efetivo do bcrypt).",
+            "example": "senha12345",
+            "format": "password",
+            "maxLength": 72,
+            "minLength": 8,
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "name",
+          "password"
+        ],
+        "type": "object"
+      },
+      "RegisterResponseDto": {
+        "properties": {
+          "email": {
+            "description": "E-mail cadastrado",
+            "example": "demo@taskflow.dev",
+            "type": "string"
+          },
+          "name": {
+            "description": "Nome de exibição",
+            "example": "Demo",
+            "type": "string"
+          },
+          "userId": {
+            "description": "ID do usuário criado (UUID v4)",
+            "example": "c5afce1e-dbd3-4606-a69f-cc930471cef8",
+            "type": "string"
+          }
+        },
+        "required": [
+          "userId",
+          "email",
+          "name"
+        ],
+        "type": "object"
+      },
+      "TaskCurrentStateDto": {
+        "properties": {
+          "assigneeId": {
+            "example": "c5afce1e-dbd3-4606-a69f-cc930471cef8",
+            "type": "string"
+          },
+          "completedAt": {
+            "example": "2026-10-18T05:43:16.305Z",
+            "format": "date-time",
+            "type": "string"
+          },
+          "dueDate": {
+            "example": "2026-12-31T23:59:59.000Z",
+            "format": "date-time",
+            "type": "string"
+          },
+          "priority": {
+            "enum": [
+              "LOW",
+              "MEDIUM",
+              "HIGH"
+            ],
+            "example": "HIGH",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "PENDING",
+              "IN_PROGRESS",
+              "DONE"
+            ],
+            "example": "DONE",
+            "type": "string"
+          },
+          "title": {
+            "example": "Corrigir bug crítico",
+            "type": "string"
+          },
+          "version": {
+            "description": "Quantos eventos a tarefa tem — base da concorrência otimista",
+            "example": 4,
+            "type": "number"
+          }
+        },
+        "required": [
+          "title",
+          "status",
+          "priority",
+          "version"
+        ],
+        "type": "object"
+      },
+      "TaskHistoryDto": {
+        "properties": {
+          "current": {
+            "$ref": "#/components/schemas/TaskCurrentStateDto"
+          },
+          "history": {
+            "description": "Do evento mais antigo ao mais recente",
+            "items": {
+              "$ref": "#/components/schemas/TaskHistoryEntryDto"
+            },
+            "type": "array"
+          },
+          "taskId": {
+            "example": "370b268e-18ba-444c-ae17-2716b0269232",
+            "type": "string"
+          }
+        },
+        "required": [
+          "taskId",
+          "current",
+          "history"
+        ],
+        "type": "object"
+      },
+      "TaskHistoryEntryDto": {
+        "properties": {
+          "actorId": {
+            "description": "Quem emitiu o comando que gerou o evento (id do usuário autenticado). `null` em eventos antigos, gravados antes de o autor ser registrado: o histórico é imutável e o autor não é inferido.",
+            "example": "370b268e-18ba-444c-ae17-2716b0269232",
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "correlationId": {
+            "description": "`X-Correlation-Id` da requisição que gerou o evento: liga o evento aos logs e ao trace. `null` em eventos antigos ou gerados fora de uma requisição HTTP.",
+            "example": "chamado-1234",
+            "nullable": true,
+            "type": "string"
+          },
+          "data": {
+            "additionalProperties": true,
+            "description": "Payload do evento; o formato depende do `type`",
+            "example": {
+              "from": "PENDING",
+              "taskId": "370b268e-18ba-444c-ae17-2716b0269232",
+              "to": "IN_PROGRESS"
+            },
+            "type": "object"
+          },
+          "eventId": {
+            "description": "Identidade estável do evento. `null` em eventos gravados antes do envelope de metadados.",
+            "example": "370b268e-18ba-444c-ae17-2716b0269232",
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "occurredAt": {
+            "example": "2026-10-18T05:43:16.294Z",
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "TaskCreated",
+              "TaskAssigned",
+              "TaskStatusChanged",
+              "TaskCompleted"
+            ],
+            "example": "TaskStatusChanged",
+            "type": "string"
+          },
+          "version": {
+            "description": "Posição do evento no histórico da tarefa (1, 2, 3…)",
+            "example": 3,
+            "type": "number"
+          }
+        },
+        "required": [
+          "eventId",
+          "version",
+          "type",
+          "data",
+          "actorId",
+          "correlationId",
+          "occurredAt"
+        ],
+        "type": "object"
+      },
+      "TaskPageDto": {
+        "properties": {
+          "items": {
+            "description": "Mais recentes primeiro (`createdAt` desc, `id` como desempate)",
+            "items": {
+              "$ref": "#/components/schemas/TaskReadDto"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "description": "Envie como `?cursor=` para a próxima página. `null` = não há mais páginas.",
+            "example": "370b268e-18ba-444c-ae17-2716b0269232",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "nextCursor"
+        ],
+        "type": "object"
+      },
+      "TaskReadDto": {
+        "properties": {
+          "assigneeId": {
+            "example": "c5afce1e-dbd3-4606-a69f-cc930471cef8",
+            "nullable": true,
+            "type": "string"
+          },
+          "completedAt": {
+            "example": null,
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "createdAt": {
+            "example": "2026-10-18T04:28:59.208Z",
+            "format": "date-time",
+            "type": "string"
+          },
+          "dueDate": {
+            "example": "2026-12-31T23:59:59.000Z",
+            "format": "date-time",
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "example": "370b268e-18ba-444c-ae17-2716b0269232",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Calculada pelo servidor na criação (Strategy Pattern): palavras como \"urgente\" e \"bug\" no título resultam em HIGH",
+            "enum": [
+              "LOW",
+              "MEDIUM",
+              "HIGH"
+            ],
+            "example": "HIGH",
+            "type": "string"
+          },
+          "projectId": {
+            "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "PENDING",
+              "IN_PROGRESS",
+              "DONE"
+            ],
+            "example": "PENDING",
+            "type": "string"
+          },
+          "title": {
+            "example": "Corrigir bug urgente no login",
+            "type": "string"
+          },
+          "updatedAt": {
+            "example": "2026-10-18T04:28:59.208Z",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "projectId",
+          "title",
+          "status",
+          "priority",
+          "createdAt",
+          "updatedAt"
+        ],
+        "type": "object"
+      },
+      "TaskSnapshotDto": {
+        "properties": {
+          "assigneeId": {
+            "description": "Responsável atual",
+            "example": "c5afce1e-dbd3-4606-a69f-cc930471cef8",
+            "type": "string"
+          },
+          "completedAt": {
+            "description": "Preenchido quando a tarefa é concluída (ISO 8601)",
+            "example": "2026-10-18T05:43:16.305Z",
+            "type": "string"
+          },
+          "status": {
+            "description": "`DONE` é terminal: depois dele, novos comandos respondem 409",
+            "enum": [
+              "PENDING",
+              "IN_PROGRESS",
+              "DONE"
+            ],
+            "example": "IN_PROGRESS",
+            "type": "string"
+          },
+          "taskId": {
+            "example": "370b268e-18ba-444c-ae17-2716b0269232",
+            "type": "string"
+          }
+        },
+        "required": [
+          "taskId",
+          "status"
+        ],
+        "type": "object"
+      },
+      "TasksByStatusDto": {
+        "properties": {
+          "done": {
+            "example": 9,
+            "type": "number"
+          },
+          "inProgress": {
+            "example": 2,
+            "type": "number"
+          },
+          "pending": {
+            "example": 4,
+            "type": "number"
+          }
+        },
+        "required": [
+          "pending",
+          "inProgress",
+          "done"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "bearerFormat": "JWT",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "contact": {},
+    "description": "API de gestão de tarefas com **CQRS + Event Sourcing**: o estado de cada tarefa é derivado de eventos imutáveis.\n\n**Como começar:** `POST /auth/register` → `POST /auth/login` → botão **Authorize** (cole o `accessToken`) → `POST /projects` → `POST /projects/{projectId}/tasks`.\n\n**Códigos de resposta:** `400` entrada inválida · `401` sem token ou token inválido · `404` recurso inexistente **ou de outro usuário** (a API não confirma a existência de recursos alheios) · `409` regra de negócio violada ou conflito de concorrência · `429` limite de requisições excedido.\n\n**Correlação:** toda resposta traz o header `X-Correlation-Id`. Envie o seu (até 64 caracteres: letras, dígitos, `.`, `_`, `-`) para rastrear a chamada de ponta a ponta; ausente ou inválido, a API gera um UUID. Cite esse id ao reportar um problema.\n\n**Cliente:** apps e front web devem enviar `X-Platform` (`ios`, `android` ou `web`) e `X-App-Version` (`MAJOR.MINOR.PATCH`, a versão de loja ou do build). São opcionais; ausentes ou inválidos, a chamada segue como cliente desconhecido.\n\n**Versão mínima:** abaixo da versão mínima da plataforma, qualquer rota responde `426` com `code: \"APP_UPDATE_REQUIRED\"` e a `minVersion`. Abaixo da recomendada, a resposta é normal e traz `X-App-Update: recommended` e `X-App-Recommended-Version`. Cheque o `code`, não só o status.",
+    "title": "TaskFlow API",
+    "version": "1.0"
+  },
+  "openapi": "3.0.0",
+  "paths": {
+    "/": {
+      "get": {
+        "description": "Responde um texto fixo. Usada como alvo de smoke tests de carga.",
+        "operationId": "AppController_getHello",
+        "parameters": [
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "example": "Hello World!",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "A API está de pé."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "summary": "Rota raiz",
+        "tags": [
+          "app"
+        ]
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "description": "Devolve um `accessToken`. Use-o no botão **Authorize** (acima) ou no header `Authorization: Bearer <token>`.",
+        "operationId": "AuthController_login",
+        "parameters": [
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponseDto"
+                }
+              }
+            },
+            "description": "Credenciais válidas; token emitido."
+          },
+          "400": {
+            "description": "Entrada inválida (ex.: e-mail malformado)."
+          },
+          "401": {
+            "description": "Credenciais inválidas. A mensagem é a mesma para e-mail inexistente e senha errada (anti-enumeração)."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          },
+          "429": {
+            "description": "Limite de 5 tentativas por minuto excedido."
+          }
+        },
+        "summary": "Autenticar e obter um JWT",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/me": {
+      "get": {
+        "description": "Dados do usuário extraídos do JWT validado.",
+        "operationId": "AuthController_me",
+        "parameters": [
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthenticatedUserDto"
+                }
+              }
+            },
+            "description": "Token válido."
+          },
+          "401": {
+            "description": "Token ausente, malformado, com assinatura inválida ou expirado."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Usuário autenticado",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/auth/register": {
+      "post": {
+        "description": "Cria um usuário com a senha armazenada como hash bcrypt. A resposta nunca contém a senha.",
+        "operationId": "AuthController_register",
+        "parameters": [
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegisterResponseDto"
+                }
+              }
+            },
+            "description": "Usuário criado."
+          },
+          "400": {
+            "description": "Entrada inválida (e-mail, tamanho de nome/senha) ou campo não permitido no body."
+          },
+          "409": {
+            "description": "E-mail já cadastrado."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          },
+          "429": {
+            "description": "Limite de 3 cadastros por minuto excedido."
+          }
+        },
+        "summary": "Cadastrar usuário",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/health/live": {
+      "get": {
+        "description": "Responde 200 enquanto o processo atende requisições. Não verifica dependências: uma falha aqui faz o orquestrador reiniciar o container, o que não resolveria um banco fora do ar.",
+        "operationId": "HealthController_live",
+        "parameters": [
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "details": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "database": {
+                          "responseTime": 12,
+                          "status": "up"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "error": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {},
+                      "nullable": true,
+                      "type": "object"
+                    },
+                    "info": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "database": {
+                          "responseTime": 12,
+                          "status": "up"
+                        }
+                      },
+                      "nullable": true,
+                      "type": "object"
+                    },
+                    "status": {
+                      "enum": [
+                        "ok",
+                        "degraded"
+                      ],
+                      "example": "ok",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The Health Check is successful"
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "details": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "database": {
+                          "responseTime": 12,
+                          "status": "up"
+                        },
+                        "redis": {
+                          "message": "Could not connect",
+                          "responseTime": 3005,
+                          "status": "down"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "error": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "redis": {
+                          "message": "Could not connect",
+                          "responseTime": 3005,
+                          "status": "down"
+                        }
+                      },
+                      "nullable": true,
+                      "type": "object"
+                    },
+                    "info": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "database": {
+                          "responseTime": 12,
+                          "status": "up"
+                        }
+                      },
+                      "nullable": true,
+                      "type": "object"
+                    },
+                    "status": {
+                      "enum": [
+                        "error",
+                        "shutting_down"
+                      ],
+                      "example": "error",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The Health Check is not successful"
+          }
+        },
+        "summary": "Liveness probe",
+        "tags": [
+          "app"
+        ]
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "description": "200 quando a réplica pode receber tráfego: PostgreSQL respondendo (`SELECT 1` em até 1 s) e app fora de encerramento. 503 caso contrário; o orquestrador tira a réplica do balanceador sem reiniciá-la. A resposta traz só `up`/`down` por dependência, sem detalhes de infraestrutura.",
+        "operationId": "HealthController_ready",
+        "parameters": [
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "details": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "database": {
+                          "responseTime": 12,
+                          "status": "up"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "error": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {},
+                      "nullable": true,
+                      "type": "object"
+                    },
+                    "info": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "database": {
+                          "responseTime": 12,
+                          "status": "up"
+                        }
+                      },
+                      "nullable": true,
+                      "type": "object"
+                    },
+                    "status": {
+                      "enum": [
+                        "ok",
+                        "degraded"
+                      ],
+                      "example": "ok",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The Health Check is successful"
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "details": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "database": {
+                          "responseTime": 12,
+                          "status": "up"
+                        },
+                        "redis": {
+                          "message": "Could not connect",
+                          "responseTime": 3005,
+                          "status": "down"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "error": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "redis": {
+                          "message": "Could not connect",
+                          "responseTime": 3005,
+                          "status": "down"
+                        }
+                      },
+                      "nullable": true,
+                      "type": "object"
+                    },
+                    "info": {
+                      "additionalProperties": {
+                        "additionalProperties": true,
+                        "properties": {
+                          "responseTime": {
+                            "description": "Time the health indicator took to respond, in ms",
+                            "type": "number"
+                          },
+                          "status": {
+                            "enum": [
+                              "up",
+                              "degraded",
+                              "down"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "status"
+                        ],
+                        "type": "object"
+                      },
+                      "example": {
+                        "database": {
+                          "responseTime": 12,
+                          "status": "up"
+                        }
+                      },
+                      "nullable": true,
+                      "type": "object"
+                    },
+                    "status": {
+                      "enum": [
+                        "error",
+                        "shutting_down"
+                      ],
+                      "example": "error",
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The Health Check is not successful"
+          }
+        },
+        "summary": "Readiness probe",
+        "tags": [
+          "app"
+        ]
+      }
+    },
+    "/me/notifications": {
+      "get": {
+        "description": "Notificações geradas pelo consumer `notifications` a partir dos eventos de tarefa publicados no Kafka (atribuição e conclusão). Eventualmente consistente: aparecem depois que o relay publica e o consumer processa o evento.",
+        "operationId": "NotificationsController_list",
+        "parameters": [
+          {
+            "description": "Itens por página (1–100)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "example": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "number"
+            }
+          },
+          {
+            "description": "Valor de `nextCursor` devolvido pela página anterior. Omita para buscar a primeira página.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "example": "370b268e-18ba-444c-ae17-2716b0269232",
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotificationPageDto"
+                }
+              }
+            },
+            "description": "Página de notificações (pode ser vazia)."
+          },
+          "400": {
+            "description": "`limit` fora de 1–100 ou `cursor` que não é UUID v4."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Listar minhas notificações",
+        "tags": [
+          "notifications"
+        ]
+      }
+    },
+    "/projects": {
+      "get": {
+        "description": "Somente os projetos do usuário autenticado, mais recentes primeiro.",
+        "operationId": "ProjectsController_list",
+        "parameters": [
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectResponseDto"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Lista de projetos (pode ser vazia)."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Listar meus projetos",
+        "tags": [
+          "projects"
+        ]
+      },
+      "post": {
+        "description": "O usuário autenticado se torna o dono do projeto.",
+        "operationId": "ProjectsController_create",
+        "parameters": [
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponseDto"
+                }
+              }
+            },
+            "description": "Projeto criado."
+          },
+          "400": {
+            "description": "Entrada inválida ou campo não permitido no body (ex.: `ownerId`)."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Criar projeto",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}": {
+      "get": {
+        "operationId": "ProjectsController_findOne",
+        "parameters": [
+          {
+            "description": "ID do projeto (UUID v4)",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponseDto"
+                }
+              }
+            },
+            "description": "Projeto encontrado."
+          },
+          "400": {
+            "description": "`projectId` não é um UUID v4."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "404": {
+            "description": "Projeto inexistente **ou de outro usuário** (anti-enumeração)."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Detalhar projeto",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}/stats": {
+      "get": {
+        "description": "Tarefas por status, abertas sem responsável e lead time médio. Calculados pelo consumer `reports` a partir dos eventos publicados no Kafka: eventualmente consistentes. `asOf` é o instante do evento mais recente refletido.",
+        "operationId": "ReportsController_get",
+        "parameters": [
+          {
+            "description": "ID do projeto (UUID v4)",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectStatsDto"
+                }
+              }
+            },
+            "description": "Números do projeto (zeros e `asOf: null` antes do primeiro evento)."
+          },
+          "400": {
+            "description": "`projectId` não é um UUID v4."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "404": {
+            "description": "Projeto inexistente **ou de outro usuário** (anti-enumeração)."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Números do projeto",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/projects/{projectId}/tasks": {
+      "get": {
+        "description": "Lê o Read Model (`tasks_read`): rápido e paginado por cursor. Para a próxima página, envie o `nextCursor` recebido como `?cursor=`.",
+        "operationId": "TasksController_list",
+        "parameters": [
+          {
+            "description": "ID do projeto (UUID v4)",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Itens por página (1–100)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "example": 20,
+              "maximum": 100,
+              "minimum": 1,
+              "type": "number"
+            }
+          },
+          {
+            "description": "Valor de `nextCursor` devolvido pela página anterior. Omita para buscar a primeira página.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "example": "370b268e-18ba-444c-ae17-2716b0269232",
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskPageDto"
+                }
+              }
+            },
+            "description": "Página de tarefas."
+          },
+          "400": {
+            "description": "Entrada inválida: ID que não é UUID v4, body fora do contrato ou campo não permitido."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "404": {
+            "description": "Projeto ou tarefa inexistente **ou de outro usuário** (anti-enumeração, anti-IDOR)."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Listar tarefas do projeto",
+        "tags": [
+          "tasks"
+        ]
+      },
+      "post": {
+        "description": "Grava o evento `TaskCreated` no Event Store. A prioridade é calculada pelo servidor a partir do título. A tarefa aparece na listagem após a projeção (consistência eventual, normalmente milissegundos).",
+        "operationId": "TasksController_create",
+        "parameters": [
+          {
+            "description": "ID do projeto (UUID v4)",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTaskDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateTaskResponseDto"
+                }
+              }
+            },
+            "description": "Tarefa criada."
+          },
+          "400": {
+            "description": "Entrada inválida: ID que não é UUID v4, body fora do contrato ou campo não permitido."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "404": {
+            "description": "Projeto ou tarefa inexistente **ou de outro usuário** (anti-enumeração, anti-IDOR)."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Criar tarefa",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/projects/{projectId}/tasks/{taskId}/assignee": {
+      "patch": {
+        "description": "Grava `TaskAssigned`. Atribuir ao mesmo responsável atual não gera evento (comando idempotente).",
+        "operationId": "TasksController_assign",
+        "parameters": [
+          {
+            "description": "ID do projeto (UUID v4)",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ID da tarefa (UUID v4)",
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "example": "370b268e-18ba-444c-ae17-2716b0269232",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignTaskDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskSnapshotDto"
+                }
+              }
+            },
+            "description": "Responsável atribuído."
+          },
+          "400": {
+            "description": "Entrada inválida: ID que não é UUID v4, body fora do contrato ou campo não permitido."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "404": {
+            "description": "Projeto ou tarefa inexistente **ou de outro usuário** (anti-enumeração, anti-IDOR)."
+          },
+          "409": {
+            "description": "Regra de negócio violada (a tarefa já está concluída) **ou** conflito de concorrência: outra requisição alterou a tarefa entre a leitura e a gravação. Recarregue e tente de novo."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Atribuir responsável",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/projects/{projectId}/tasks/{taskId}/complete": {
+      "post": {
+        "description": "Grava `TaskCompleted`. É terminal: depois de concluída, a tarefa não aceita novos comandos (409).",
+        "operationId": "TasksController_complete",
+        "parameters": [
+          {
+            "description": "ID do projeto (UUID v4)",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ID da tarefa (UUID v4)",
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "example": "370b268e-18ba-444c-ae17-2716b0269232",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskSnapshotDto"
+                }
+              }
+            },
+            "description": "Tarefa concluída."
+          },
+          "400": {
+            "description": "Entrada inválida: ID que não é UUID v4, body fora do contrato ou campo não permitido."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "404": {
+            "description": "Projeto ou tarefa inexistente **ou de outro usuário** (anti-enumeração, anti-IDOR)."
+          },
+          "409": {
+            "description": "Regra de negócio violada (a tarefa já está concluída) **ou** conflito de concorrência: outra requisição alterou a tarefa entre a leitura e a gravação. Recarregue e tente de novo."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Concluir tarefa",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/projects/{projectId}/tasks/{taskId}/history": {
+      "get": {
+        "description": "Linha do tempo completa (quem mudou o quê e quando) lida do Event Store, com o estado atual reconstruído a partir dos eventos. Cada evento traz o autor (`actorId`) e o `correlationId` da requisição que o gerou; em eventos antigos, gravados antes desse registro, os dois vêm `null`.",
+        "operationId": "TasksController_history",
+        "parameters": [
+          {
+            "description": "ID do projeto (UUID v4)",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ID da tarefa (UUID v4)",
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "example": "370b268e-18ba-444c-ae17-2716b0269232",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskHistoryDto"
+                }
+              }
+            },
+            "description": "Histórico e estado atual."
+          },
+          "400": {
+            "description": "Entrada inválida: ID que não é UUID v4, body fora do contrato ou campo não permitido."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "404": {
+            "description": "Projeto ou tarefa inexistente **ou de outro usuário** (anti-enumeração, anti-IDOR)."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Histórico de eventos da tarefa",
+        "tags": [
+          "tasks"
+        ]
+      }
+    },
+    "/projects/{projectId}/tasks/{taskId}/status": {
+      "patch": {
+        "description": "Grava `TaskStatusChanged` registrando a origem e o destino. Para concluir, use `POST …/complete`.",
+        "operationId": "TasksController_changeStatus",
+        "parameters": [
+          {
+            "description": "ID do projeto (UUID v4)",
+            "in": "path",
+            "name": "projectId",
+            "required": true,
+            "schema": {
+              "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+              "type": "string"
+            }
+          },
+          {
+            "description": "ID da tarefa (UUID v4)",
+            "in": "path",
+            "name": "taskId",
+            "required": true,
+            "schema": {
+              "example": "370b268e-18ba-444c-ae17-2716b0269232",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Id de correlação (até 64 caracteres: letras, dígitos, `.`, `_`, `-`). Devolvido na resposta; se ausente ou inválido, a API gera um UUID.",
+            "in": "header",
+            "name": "X-Correlation-Id",
+            "required": false,
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9._-]{1,64}$",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Plataforma do cliente. Ausente ou fora da lista: cliente desconhecido (nunca 400).",
+            "in": "header",
+            "name": "X-Platform",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ios",
+                "android",
+                "web"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Versão do app (de loja) ou do build do front web, `MAJOR.MINOR.PATCH`. Usada para compatibilidade, nunca para autorização: o valor é controlado pelo cliente.",
+            "in": "header",
+            "name": "X-App-Version",
+            "required": false,
+            "schema": {
+              "pattern": "^(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})\\.(0|[1-9]\\d{0,3})$",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeTaskStatusDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TaskSnapshotDto"
+                }
+              }
+            },
+            "description": "Status alterado."
+          },
+          "400": {
+            "description": "Entrada inválida: ID que não é UUID v4, body fora do contrato ou campo não permitido."
+          },
+          "401": {
+            "description": "Token ausente ou inválido."
+          },
+          "404": {
+            "description": "Projeto ou tarefa inexistente **ou de outro usuário** (anti-enumeração, anti-IDOR)."
+          },
+          "409": {
+            "description": "Regra de negócio violada (a tarefa já está concluída) **ou** conflito de concorrência: outra requisição alterou a tarefa entre a leitura e a gravação. Recarregue e tente de novo."
+          },
+          "426": {
+            "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "Mudar status (PENDING ⇄ IN_PROGRESS)",
+        "tags": [
+          "tasks"
+        ]
+      }
+    }
+  },
+  "servers": [],
+  "tags": [
+    {
+      "description": "Cadastro, login (emissão de JWT) e identificação do usuário",
+      "name": "auth"
+    },
+    {
+      "description": "Projetos do usuário autenticado (cada projeto tem um dono)",
+      "name": "projects"
+    },
+    {
+      "description": "Tarefas event-sourced: criação, ciclo de vida, listagem e histórico de eventos",
+      "name": "tasks"
+    },
+    {
+      "description": "Notificações do usuário, geradas a partir dos eventos de tarefa publicados no Kafka",
+      "name": "notifications"
+    },
+    {
+      "description": "Rota raiz (smoke test) e health checks para o orquestrador (liveness e readiness)",
+      "name": "app"
+    }
+  ]
+}

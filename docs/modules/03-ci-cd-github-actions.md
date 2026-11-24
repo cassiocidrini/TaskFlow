@@ -60,7 +60,7 @@ flowchart LR
     E --> S
     subgraph Q [job: quality]
         direction TB
-        q1[tsc --noEmit] --> q2[oxlint] --> q3[testes unitários] --> q4[nest build]
+        q1[tsc --noEmit] --> q2[oxlint] --> q3[testes unitários] --> q4["nest build +<br/>contrato da API"]
     end
     subgraph I [job: integration]
         i1["Testcontainers<br/>PostgreSQL real"]
@@ -126,7 +126,7 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run lint
       - run: npm run test:unit
-      - run: npm run build
+      - run: npm run openapi:check   # build + snapshot do OpenAPI (Módulo 14.3)
 
   integration:   # mesmo setup + npm run test:integration
   e2e:           # mesmo setup + npm run test:e2e
@@ -139,7 +139,15 @@ jobs:
 | `npx prisma generate` | Gera o client tipado; sem ele, nada que importe `@prisma/client` compila |
 | `npx tsc --noEmit` | O `ts-jest` só **transpila**: erros de tipo passam nos testes e só o `tsc` pega |
 | `npm run lint` | `oxlint --type-aware --deny-warnings`: regras que usam tipos, como `no-floating-promises` (Promise esquecida sem `await`) e `no-explicit-any`. Com `--deny-warnings`, um *warning* também falha o job: warning que não bloqueia vira ruído e se acumula |
-| `npm run build` | Garante que o `nest build` (com o plugin do Swagger) funciona |
+| `npm run openapi:check` | Faz o `nest build` (com o plugin do Swagger) e confere se o contrato gerado bate com `docs/api/openapi.json` (Módulo 14.3): mudar a API sem atualizar o snapshot falha aqui |
+
+### O workflow do contrato da API (Módulo 14.3)
+
+[`api-contract.yml`](../../.github/workflows/api-contract.yml) roda o **oasdiff** entre o `docs/api/openapi.json` da base
+do PR e o do PR, e falha numa mudança incompatível, a menos que o PR tenha a label `breaking-change`. É um workflow
+**separado** porque reage a `labeled`/`unlabeled`: no `ci.yml`, pôr uma label dispararia de novo os quatro jobs. O
+valor da label entra no shell como **booleano calculado pelo GitHub** (`contains(...)`), nunca como texto do PR: nada
+que o autor do PR escreve vira comando (*script injection* em Actions). Validado com o `actionlint`.
 
 ### O CI sem `.env`
 
@@ -274,6 +282,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - [x] `permissions` mínimas e cancelamento de runs obsoletos
 - [x] Ruleset na `main`: PR obrigatório, 4 checks, sem bypass, sem force push (verificado pela API do GitHub)
 - [x] Badge do CI no README
+- [x] Contrato da API conferido no CI e mudanças incompatíveis bloqueadas sem label (Módulo 14.3)
 - [ ] CD (deploy automatizado)
 - [ ] Dependabot / CodeQL / actions fixadas por SHA
 
