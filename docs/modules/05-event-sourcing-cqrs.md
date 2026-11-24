@@ -393,7 +393,7 @@ real para o time.
 - **Dual-write nas projeções:** se o processo cair entre gravar no Event Store e publicar no EventBus, a projeção não é atualizada. A **Transactional Outbox** já existe ([Módulo 13.2](13-mensageria-kafka.md#dual-write-o-problema-que-a-outbox-resolve-132)): cada evento ganha, na mesma transação, a sua mensagem para o Kafka. Mas as projeções internas ainda leem do `EventBus` em memória. O caminho já tem um exemplo funcionando: o read model `project_stats` ([Módulo 13.6a](13-mensageria-kafka.md#dois-grupos-um-tópico-o-consumer-reports-136a)) é alimentado **pelo tópico**, com idempotência pela versão do agregado. Próximo passo: o `tasks_read` seguir o mesmo modelo, e replay.
 - **Replay das projeções:** o `tasks_read` ainda não tem reconstrução (esvaziar e reaplicar todos os eventos, o que corrigiria as prioridades antigas). O mecanismo já existe para as projeções alimentadas pelo Kafka: `npm run replay` republica o Event Store pela outbox, e o runbook do [Módulo 13.6b](13-mensageria-kafka.md#runbook-reconstruir-uma-projeção-a-partir-do-event-store) refez o `project_stats` do zero. Levar o `tasks_read` para o tópico (como o `reports`) o tornaria reconstruível do mesmo jeito.
 - **Snapshots:** agregados com milhares de eventos ficariam lentos para carregar; um snapshot a cada N versões resolveria.
-- **Versionamento de eventos:** cada evento já grava o `schemaVersion` do seu payload, mas ainda não existe nenhum *upcaster* (converter eventos antigos para o formato novo na leitura), porque nenhum formato mudou.
+- **Versionamento de eventos (resolvido no [Módulo 14.4](14-api-para-web-e-apps.md)):** o primeiro formato mudou (`TaskCreated` v2: `dueDate` → `due { at, timezone }`), e o *upcaster* ([`task-event.upcasters.ts`](../../src/modules/tasks/infrastructure/task-event.upcasters.ts)) converte o v1 na **leitura**, pelo `schemaVersion` do envelope; nada gravado é reescrito. Ficam em aberto os snapshots (acima) e o *upcasting* de um formato que não dá para derivar do antigo (aí, um evento de correção).
 - **Metadata fora do processo:** o envelope fica no Event Store e no histórico; o `EventBus` e as projeções ainda recebem só o payload.
 - **EventBus em memória:** entrega em ordem dentro de um processo. Com um broker externo, as projeções teriam de guardar a versão do agregado e descartar eventos fora de ordem, exatamente o que o consumer `reports` faz (`report_tasks.version`, [Módulo 13.6a](13-mensageria-kafka.md)).
 
@@ -411,7 +411,8 @@ real para o time.
 - [x] Transactional Outbox para os eventos que saem do serviço ([Módulo 13.2](13-mensageria-kafka.md))
 - [ ] Projeções fora do `EventBus` em memória e replay das projeções
 - [x] Envelope de metadados (`eventId`, `actorId`, `correlationId`, `schemaVersion`) com legado honesto
-- [ ] Snapshots e *upcasters* de eventos
+- [x] *Upcaster* de evento: `TaskCreated` v1 → v2 na leitura, sem reescrever o histórico (Módulo 14.4)
+- [ ] Snapshots de agregados
 
 ---
 

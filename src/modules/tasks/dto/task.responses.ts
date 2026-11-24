@@ -1,9 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { DueResponseDto } from './due.dto';
 
 /**
  * Schemas de RESPOSTA do módulo de tarefas (documentação OpenAPI).
  *
- * Os handlers devolvem interfaces (`TaskSnapshot`, `CursorPage<TaskRead>`, `TaskHistory`), que desaparecem
+ * Os handlers devolvem interfaces (`TaskSnapshot`, `CursorPage<TaskListItem>`, `TaskHistory`), que desaparecem
  * na compilação. Estas classes existem em runtime só para o Swagger desenhar o contrato — não têm lógica e
  * não substituem os tipos internos.
  *
@@ -65,8 +66,22 @@ export class TaskReadDto {
   @ApiPropertyOptional({ nullable: true, type: String, example: USER_EXAMPLE })
   assigneeId!: string | null;
 
-  @ApiPropertyOptional({ nullable: true, type: String, format: 'date-time', example: '2026-12-31T23:59:59.000Z' })
+  @ApiPropertyOptional({
+    nullable: true,
+    type: String,
+    format: 'date-time',
+    example: '2027-01-01T02:59:59.000Z',
+    deprecated: true,
+    description: '**Depreciado:** use `due.at` (o mesmo instante). Mantido para apps que ainda não migraram.',
+  })
   dueDate!: Date | null;
+
+  @ApiProperty({
+    type: DueResponseDto,
+    nullable: true,
+    description: 'Prazo com o fuso do usuário (`timezone: null` = criado pelo formato antigo); `null` sem prazo',
+  })
+  due!: DueResponseDto | null;
 
   @ApiPropertyOptional({ nullable: true, type: String, format: 'date-time', example: null })
   completedAt!: Date | null;
@@ -106,8 +121,16 @@ export class TaskCurrentStateDto {
   @ApiPropertyOptional({ example: USER_EXAMPLE })
   assigneeId?: string;
 
-  @ApiPropertyOptional({ format: 'date-time', example: '2026-12-31T23:59:59.000Z' })
+  @ApiPropertyOptional({
+    format: 'date-time',
+    example: '2027-01-01T02:59:59.000Z',
+    deprecated: true,
+    description: '**Depreciado:** use `due.at`.',
+  })
   dueDate?: string;
+
+  @ApiPropertyOptional({ type: DueResponseDto, description: 'Prazo com o fuso do usuário' })
+  due?: DueResponseDto;
 
   @ApiPropertyOptional({ format: 'date-time', example: '2026-10-18T05:43:16.305Z' })
   completedAt?: string;

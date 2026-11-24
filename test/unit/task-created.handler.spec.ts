@@ -56,6 +56,8 @@ describe('TaskCreatedHandler (projeção para tasks_read)', () => {
           assigneeId: 'u1',
           status: 'PENDING',
           priority: 'HIGH',
+          dueAt: null,
+          dueTimezone: null,
           dueDate: null,
         },
       ],
@@ -63,13 +65,27 @@ describe('TaskCreatedHandler (projeção para tasks_read)', () => {
     });
   });
 
-  it('deve converter o dueDate ISO do evento em Date para a coluna due_date', async () => {
-    const comPrazo = new TaskCreatedEvent({ ...eventData, dueDate: '2026-12-31T23:59:59.000Z' });
+  it('expand (Módulo 14.4): grava o prazo nas colunas novas (due_at, due_timezone) E na antiga (due_date)', async () => {
+    const comPrazo = new TaskCreatedEvent({
+      ...eventData,
+      due: { at: '2026-12-31T23:59:59.000Z', timezone: 'America/Sao_Paulo' },
+    });
 
     await handler.handle(comPrazo);
 
     const [args] = prisma.taskRead.createMany.mock.calls[0];
-    expect(args.data[0].dueDate).toEqual(new Date('2026-12-31T23:59:59.000Z'));
+    expect(args.data[0]).toMatchObject({
+      dueAt: new Date('2026-12-31T23:59:59.000Z'),
+      dueTimezone: 'America/Sao_Paulo',
+      dueDate: new Date('2026-12-31T23:59:59.000Z'), // a antiga: uma versão anterior da API ainda a lê no deploy
+    });
+  });
+
+  it('sem prazo: as três colunas nulas', async () => {
+    await handler.handle(new TaskCreatedEvent(eventData));
+
+    const [args] = prisma.taskRead.createMany.mock.calls[0];
+    expect(args.data[0]).toMatchObject({ dueAt: null, dueTimezone: null, dueDate: null });
   });
 
   it('deve ser IDEMPOTENTE: usar skipDuplicates (INSERT ... ON CONFLICT DO NOTHING)', async () => {

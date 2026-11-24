@@ -33,7 +33,11 @@ export class TaskCreatedHandler implements IEventHandler<TaskCreatedEvent> {
             assigneeId: event.assigneeId,
             status: 'PENDING',
             priority: event.priority,
-            dueDate: event.dueDate ? new Date(event.dueDate) : null,
+            // Expand (Módulo 14.4): colunas novas E a antiga, até o contract. A antiga ainda é lida por uma versão
+            // anterior da API durante um deploy
+            dueAt: event.due ? new Date(event.due.at) : null,
+            dueTimezone: event.due?.timezone ?? null,
+            dueDate: event.due ? new Date(event.due.at) : null,
           },
         ],
         skipDuplicates: true,

@@ -51,14 +51,16 @@ describe('Eventos de integração da tarefa', () => {
           title: 'Pagar boleto',
           priority: 'HIGH',
           assigneeId: 'u2',
-          dueDate: '2026-11-20T00:00:00.000Z',
+          due: { at: '2026-11-20T00:00:00.000Z', timezone: 'America/Sao_Paulo' },
         },
       },
       {
         title: 'Pagar boleto',
         priority: 'HIGH',
         assigneeId: 'u2',
+        // Expand do contrato público (Módulo 14.4): o formato novo E o antigo, derivado do novo
         dueDate: '2026-11-20T00:00:00.000Z',
+        due: { at: '2026-11-20T00:00:00.000Z', timezone: 'America/Sao_Paulo' },
       },
     ],
     [

@@ -48,8 +48,16 @@ export interface TaskCreatedIntegrationData {
   title: string;
   priority: TaskPriority;
   assigneeId?: string;
-  /** ISO 8601 */
+  /**
+   * ISO 8601. **Depreciado** (Módulo 14.4): o mesmo instante do `due.at`, mantido porque o contrato é público e
+   * consumidores de outros serviços podem lê-lo. Tirá-lo é mudança incompatível do tópico (`eventVersion` 2).
+   */
   dueDate?: string;
+  /**
+   * Prazo com o fuso do usuário (Módulo 14.4). Campo OPCIONAL novo: compatível, porque o leitor tolerante de quem
+   * consome ignora o que não conhece. `timezone: null` = desconhecido (prazo criado pelo formato antigo).
+   */
+  due?: { at: string; timezone: string | null };
 }
 
 export interface TaskAssignedIntegrationData {
@@ -121,7 +129,7 @@ export function toTaskIntegrationEvent(
   // Switch exaustivo: um evento de domínio novo sem mapeamento deixa de compilar (o `never` do default)
   switch (event.type) {
     case 'TaskCreated': {
-      const { title, priority, assigneeId, dueDate } = event.data;
+      const { title, priority, assigneeId, due } = event.data;
       return {
         ...envelope,
         eventType: event.type,
@@ -129,7 +137,10 @@ export function toTaskIntegrationEvent(
           title,
           priority,
           ...(assigneeId ? { assigneeId } : {}),
-          ...(dueDate ? { dueDate } : {}),
+          // Expand do contrato público: o formato novo e o antigo (derivado), campo a campo
+          ...(due
+            ? { dueDate: due.at, due: { at: due.at, timezone: due.timezone } }
+            : {}),
         },
       };
     }

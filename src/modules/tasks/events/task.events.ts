@@ -24,6 +24,24 @@
  */
 export type TaskPriority = 'LOW' | 'MEDIUM' | 'HIGH';
 
+/**
+ * Prazo da tarefa (Módulo 14.4): o INSTANTE e o FUSO em que o usuário pensa. Só o instante não basta para "vence hoje":
+ * 23h em São Paulo já é o dia seguinte em UTC.
+ */
+export interface TaskDue {
+  /** Instante, ISO 8601 em UTC (eventos viajam serializados: nada de `Date` aqui). */
+  at: string;
+  /**
+   * Fuso IANA (`America/Sao_Paulo`), e não um offset fixo: o offset muda no horário de verão, o nome não. `null` =
+   * DESCONHECIDO: prazo criado pelo formato antigo (`dueDate`) ou por um evento v1. Nunca inventado.
+   */
+  timezone: string | null;
+}
+
+/**
+ * Formato ATUAL (schemaVersion 2) do `TaskCreated`. Eventos v1, com `dueDate?: string`, continuam gravados como estão
+ * (o Event Store é append-only) e são convertidos na LEITURA pelo upcaster (`task-event.upcasters.ts`).
+ */
 export interface TaskCreatedData {
   taskId: string;
   projectId: string;
@@ -31,8 +49,7 @@ export interface TaskCreatedData {
   /** Calculada no servidor pela Strategy de prioridade, no momento da criação. */
   priority: TaskPriority;
   assigneeId?: string;
-  /** ISO 8601 — eventos viajam serializados (JSON no Event Store), então nada de Date aqui */
-  dueDate?: string;
+  due?: TaskDue;
 }
 
 /**
@@ -47,7 +64,7 @@ export class TaskCreatedEvent implements TaskCreatedData {
   readonly title: string;
   readonly priority: TaskPriority;
   readonly assigneeId?: string;
-  readonly dueDate?: string;
+  readonly due?: TaskDue;
 
   constructor(data: TaskCreatedData) {
     this.taskId = data.taskId;
@@ -55,7 +72,7 @@ export class TaskCreatedEvent implements TaskCreatedData {
     this.title = data.title;
     this.priority = data.priority;
     this.assigneeId = data.assigneeId;
-    this.dueDate = data.dueDate;
+    this.due = data.due;
   }
 }
 
@@ -143,7 +160,7 @@ export type TaskDomainEvent =
  * evento novo sem versão declarada não compila.
  */
 export const TASK_EVENT_SCHEMA_VERSIONS: Readonly<Record<TaskDomainEvent['type'], number>> = {
-  TaskCreated: 1,
+  TaskCreated: 2, // v2 (Módulo 14.4): `dueDate` → `due { at, timezone }`; a v1 é convertida na leitura
   TaskAssigned: 1,
   TaskStatusChanged: 1,
   TaskCompleted: 1,

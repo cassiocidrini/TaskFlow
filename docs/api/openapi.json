@@ -80,8 +80,17 @@
             "format": "uuid",
             "type": "string"
           },
+          "due": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DueDto"
+              }
+            ],
+            "description": "Prazo: o instante e o fuso IANA do usuário (para lembretes no dia certo). Substitui `dueDate`."
+          },
           "dueDate": {
-            "description": "Prazo (ISO 8601)",
+            "deprecated": true,
+            "description": "**Depreciado:** use `due`. Prazo como instante ISO 8601, sem o fuso do usuário. Não pode vir junto com `due`.",
             "example": "2026-12-31T23:59:59Z",
             "format": "date-time",
             "type": "string"
@@ -109,6 +118,49 @@
         },
         "required": [
           "taskId"
+        ],
+        "type": "object"
+      },
+      "DueDto": {
+        "properties": {
+          "at": {
+            "description": "Instante do prazo, ISO 8601 com fuso explícito (`Z` ou `±hh:mm`). Devolvido em UTC.",
+            "example": "2026-12-31T23:59:59-03:00",
+            "format": "date-time",
+            "pattern": "(Z|[+-]\\d{2}:\\d{2})$",
+            "type": "string"
+          },
+          "timezone": {
+            "description": "Fuso IANA do usuário, para lembretes no dia certo (\"vence hoje\"). Nome, não offset: o offset muda no horário de verão.",
+            "example": "America/Sao_Paulo",
+            "maxLength": 64,
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "timezone"
+        ],
+        "type": "object"
+      },
+      "DueResponseDto": {
+        "properties": {
+          "at": {
+            "description": "Instante, em UTC",
+            "example": "2027-01-01T02:59:59.000Z",
+            "format": "date-time",
+            "type": "string"
+          },
+          "timezone": {
+            "description": "Fuso IANA; `null` quando o prazo foi criado pelo formato antigo (`dueDate`), que não o informava",
+            "example": "America/Sao_Paulo",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "timezone"
         ],
         "type": "object"
       },
@@ -370,8 +422,18 @@
             "format": "date-time",
             "type": "string"
           },
+          "due": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DueResponseDto"
+              }
+            ],
+            "description": "Prazo com o fuso do usuário"
+          },
           "dueDate": {
-            "example": "2026-12-31T23:59:59.000Z",
+            "deprecated": true,
+            "description": "**Depreciado:** use `due.at`.",
+            "example": "2027-01-01T02:59:59.000Z",
             "format": "date-time",
             "type": "string"
           },
@@ -539,8 +601,20 @@
             "format": "date-time",
             "type": "string"
           },
+          "due": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DueResponseDto"
+              }
+            ],
+            "description": "Prazo com o fuso do usuário (`timezone: null` = criado pelo formato antigo); `null` sem prazo",
+            "nullable": true,
+            "type": "object"
+          },
           "dueDate": {
-            "example": "2026-12-31T23:59:59.000Z",
+            "deprecated": true,
+            "description": "**Depreciado:** use `due.at` (o mesmo instante). Mantido para apps que ainda não migraram.",
+            "example": "2027-01-01T02:59:59.000Z",
             "format": "date-time",
             "nullable": true,
             "type": "string"
@@ -588,6 +662,7 @@
           "title",
           "status",
           "priority",
+          "due",
           "createdAt",
           "updatedAt"
         ],
@@ -2046,7 +2121,7 @@
         ]
       },
       "post": {
-        "description": "Grava o evento `TaskCreated` no Event Store. A prioridade é calculada pelo servidor a partir do título. A tarefa aparece na listagem após a projeção (consistência eventual, normalmente milissegundos).",
+        "description": "Grava o evento `TaskCreated` no Event Store. A prioridade é calculada pelo servidor a partir do título. A tarefa aparece na listagem após a projeção (consistência eventual, normalmente milissegundos). Prazo: envie `due { at, timezone }`; o `dueDate` antigo ainda é aceito, com os headers `Deprecation` e `Sunset` na resposta.",
         "operationId": "TasksController_create",
         "parameters": [
           {

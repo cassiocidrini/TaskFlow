@@ -4,7 +4,9 @@ import { EventStoreService, type DomainEvent } from '../../../events/event-store
 import { TaskAggregate } from '../domain/task.aggregate';
 import { TaskRepository, type SaveContext } from '../domain/task.repository';
 import { toTaskOutboxMessage } from '../events/task.integration-events';
+import { toEventMetadata } from '../../../events/event-metadata';
 import { TASK_EVENT_SCHEMA_VERSIONS, type TaskDomainEvent } from '../events/task.events';
+import { upcastPayload } from './task-event.upcasters';
 
 const AGGREGATE_TYPE = 'Task';
 
@@ -82,11 +84,19 @@ function isKnownEventType(eventType: string): eventType is TaskDomainEvent['type
  * - O PAYLOAD atravessa a fronteira de confiança com `as unknown as`: o Event Store
  *   só contém o que o próprio sistema gravou (via este repositório). É o ÚNICO cast
  *   de leitura do Event Store — concentrado e documentado aqui, nunca espalhado.
+ * - A VERSÃO do payload é convertida para a atual (*upcaster*, Módulo 14.4): o repositório, o histórico e o replay
+ *   leem por aqui, então todos recebem o formato atual sem saber que existiu outro.
  */
 export function toDomainEvent(row: StoredEvent): TaskDomainEvent {
   if (!isKnownEventType(row.eventType)) {
     throw new Error(`Evento desconhecido no stream da tarefa ${row.aggregateId}: "${row.eventType}"`);
   }
 
-  return { type: row.eventType, data: row.payload } as unknown as TaskDomainEvent;
+  // Versão gravada no envelope → formato atual (Módulo 14.4). Eventos nunca são reescritos; a leitura converte
+  const data = upcastPayload(
+    row.eventType,
+    row.payload as Record<string, unknown>,
+    toEventMetadata(row.metadata).schemaVersion,
+  );
+  return { type: row.eventType, data } as unknown as TaskDomainEvent;
 }

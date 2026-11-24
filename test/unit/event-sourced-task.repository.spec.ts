@@ -22,13 +22,20 @@ describe('EventSourcedTaskRepository', () => {
   let repository: EventSourcedTaskRepository;
   let eventStore: { loadEvents: jest.Mock; appendMany: jest.Mock };
 
-  // Linhas no formato da tabela `events`
-  const row = (version: number, eventType: string, payload: Record<string, unknown>) => ({
+  // Linhas no formato da tabela `events`. `metadata` é NOT NULL com default `{}` no banco: `{}` é um evento legado
+  // (sem envelope), que o upcaster trata como v1 (Módulo 14.4)
+  const row = (
+    version: number,
+    eventType: string,
+    payload: Record<string, unknown>,
+    metadata: Record<string, unknown> = {},
+  ) => ({
     id: `e${version}`,
     aggregateId: 't1',
     aggregateType: 'Task',
     eventType,
     payload,
+    metadata,
     version,
     createdAt: new Date(),
   });

@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsDateString, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsDateString, IsOptional, IsString, IsUUID, MaxLength, MinLength, ValidateNested } from 'class-validator';
+import { DueDto, NotTogetherWith } from './due.dto';
 
 /**
  * Entrada da criação de tarefa.
@@ -11,6 +13,10 @@ import { IsDateString, IsOptional, IsString, IsUUID, MaxLength, MinLength } from
  * - **`projectId` e o dono:** vêm da URL validada e do JWT, nunca do body (OWASP A01).
  *
  * Qualquer campo extra é rejeitado com 400 (`forbidNonWhitelisted`) — anti mass assignment.
+ *
+ * **Prazo em dois formatos durante o expand/contract (Módulo 14.4):** `due { at, timezone }` é o atual; `dueDate` é o
+ * antigo, aceito enquanto houver app instalado que o manda (sai no contract, depois que a versão mínima excluir esses
+ * apps). Os dois juntos = 400. Quem usa o antigo recebe os headers `Deprecation`/`Sunset` e entra na métrica de uso.
  */
 export class CreateTaskDto {
   @ApiProperty({
@@ -30,11 +36,27 @@ export class CreateTaskDto {
   assigneeId?: string;
 
   /**
-   * String ISO 8601 (e não `Date`) porque é assim que trafega no JSON. O controller converte para `Date`
-   * na borda, e o evento volta a guardá-la como ISO: eventos são mensagens serializadas.
+   * Formato ANTIGO do prazo (só o instante, sem o fuso). Depreciado: continua aceito, e vira `due` com
+   * `timezone: null` na borda (o fuso é desconhecido, e não é inventado).
    */
-  @ApiPropertyOptional({ description: 'Prazo (ISO 8601)', example: '2026-12-31T23:59:59Z', format: 'date-time' })
+  @ApiPropertyOptional({
+    description:
+      '**Depreciado:** use `due`. Prazo como instante ISO 8601, sem o fuso do usuário. Não pode vir junto com `due`.',
+    example: '2026-12-31T23:59:59Z',
+    format: 'date-time',
+    deprecated: true,
+  })
   @IsOptional()
   @IsDateString()
+  @NotTogetherWith('due')
   dueDate?: string;
+
+  @ApiPropertyOptional({
+    type: DueDto,
+    description: 'Prazo: o instante e o fuso IANA do usuário (para lembretes no dia certo). Substitui `dueDate`.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => DueDto)
+  due?: DueDto;
 }

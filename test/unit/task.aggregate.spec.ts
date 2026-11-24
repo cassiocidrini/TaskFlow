@@ -16,7 +16,13 @@ describe('TaskAggregate', () => {
 
   const created: TaskDomainEvent = {
     type: 'TaskCreated',
-    data: { taskId: 't1', projectId: 'p1', title: 'Corrigir bug', priority: 'HIGH', dueDate: '2026-12-31T00:00:00.000Z' },
+    data: {
+      taskId: 't1',
+      projectId: 'p1',
+      title: 'Corrigir bug',
+      priority: 'HIGH',
+      due: { at: '2026-12-31T00:00:00.000Z', timezone: 'America/Sao_Paulo' },
+    },
   };
 
   // ============================================================
@@ -32,7 +38,7 @@ describe('TaskAggregate', () => {
       expect(task.priority).toBe('HIGH');
       expect(task.status).toBe('PENDING');
       expect(task.assigneeId).toBeUndefined();
-      expect(task.dueDate).toBe('2026-12-31T00:00:00.000Z');
+      expect(task.due).toEqual({ at: '2026-12-31T00:00:00.000Z', timezone: 'America/Sao_Paulo' });
       expect(task.version).toBe(1);
     });
 
