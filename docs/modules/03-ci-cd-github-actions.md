@@ -4,7 +4,8 @@
 >
 > **Onde vive no código:** [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) ·
 > [`prisma.config.ts`](../../prisma.config.ts) · [`jest.config.ts`](../../jest.config.ts) · [`package.json`](../../package.json) (scripts) ·
-> [`Dockerfile`](../../Dockerfile) · [`.dockerignore`](../../.dockerignore) · [`scripts/docker/image-smoke.mjs`](../../scripts/docker/image-smoke.mjs)
+> [`Dockerfile`](../../Dockerfile) · [`.dockerignore`](../../.dockerignore) · [`scripts/docker/image-smoke.mjs`](../../scripts/docker/image-smoke.mjs) ·
+> [`.github/dependabot.yml`](../../.github/dependabot.yml) · [`.github/workflows/codeql.yml`](../../.github/workflows/codeql.yml)
 
 ---
 
@@ -15,6 +16,8 @@ Montar uma esteira de **Integração Contínua** que valida **todo** push e pull
 - tipos (`tsc --noEmit`), lint (`oxlint`) e build;
 - testes **unitários**, de **integração** e **E2E**, os dois últimos contra **PostgreSQL real** (Testcontainers);
 - a **imagem de produção** construída e executada em todo PR (Etapa E.1);
+- a **cadeia de suprimentos** vigiada em camadas: `npm audit`, Trivy, Dependabot, CodeQL e actions fixadas por SHA
+  (Etapa E.2);
 - **merge bloqueado** se qualquer verificação falhar (Ruleset da `main`).
 
 **Por que importa:** CI é a primeira linha de defesa contra regressões. Ele também é o que torna seguro trabalhar
@@ -200,7 +203,7 @@ deps       npm ci (todas as dependências; cache do npm montado pelo BuildKit)
 build      prisma generate + nest build (o plugin do Swagger só roda no nest build)
 prod-deps  npm ci --omit=dev --omit=optional + o client gerado do Prisma
 migrate    docker build --target migrate → prisma migrate deploy (como usuário node)
-runtime    NODE_ENV=production · sem npm/yarn/corepack · código do root · USER node
+runtime    NODE_ENV=production · sem npm/yarn/corepack · código do root · USER 1000:1000
            HEALTHCHECK em /health/live · CMD ["node", "dist/main"]
 ```
 
@@ -209,7 +212,7 @@ runtime    NODE_ENV=production · sem npm/yarn/corepack · código do root · US
 | **`.dockerignore` como allowlist** (`*` e depois `!src/`, `!prisma/`...) | Numa lista do que excluir, cada arquivo novo (um `.env.local`, uma chave) entra na imagem até alguém lembrar de listá-lo. Mais os `COPY` explícitos: duas proteções independentes (o Dockerfile antigo com o `.dockerignore` novo já não leva o `.env`) |
 | **Tag exata + digest** | Uma tag móvel (`node:24-alpine`) muda por baixo sem nenhum commit; o build de amanhã deixa de ser o que foi testado hoje. Num estágio `base`, e não num `ARG`: o hadolint e o Dependabot não leem a tag dentro de `${...}` |
 | **`--omit=optional` também** | O `@prisma/client` declara `prisma` e `typescript` como peers **opcionais**; sendo devDependencies da raiz, o lockfile os marca `devOptional`. Só com `--omit=dev`, 102 pacotes de desenvolvimento (a CLI do Prisma, o Studio, o TypeScript) iam para produção: 605 → 373 MB de `node_modules` |
-| **Código do root, processo do `node` (uid 1000)** | O processo lê o próprio código, mas não o altera: uma invasão da API não persiste nada em `dist/`. Com `COPY --chown=node`, ele poderia |
+| **Código do root, processo do `node` (uid 1000)** | O processo lê o próprio código, mas não o altera: uma invasão da API não persiste nada em `dist/`. Com `COPY --chown=node`, ele poderia. **Numérico** (`USER 1000:1000`, E.2): com `runAsNonRoot: true`, o Kubernetes só confere que o usuário não é root se o uid for um número, e recusa o pod com `USER node` (regra DL3066 do hadolint) |
 | **Sem npm, yarn e corepack no runtime** | O `CMD` é `node`. Saem 6 CVEs (undici e brace-expansion empacotados no npm) e o instalador de pacotes que um invasor usaria. **Não reduz o tamanho:** o `rm` numa camada posterior só esconde os arquivos (*whiteout*); os bytes continuam na camada da imagem base |
 | **`HEALTHCHECK` no *live*, não no *ready*** | O *ready* depende do banco. Com o banco fora, todas as réplicas ficariam *unhealthy* ao mesmo tempo, e um orquestrador que reinicia *unhealthy* derrubaria todas por um problema que não é delas. O teste usa o `fetch` do Node, sem instalar `curl` |
 | **Migração em target separado** | Com várias réplicas, cada uma migraria ao subir (corrida), e a API precisaria de permissão de DDL. Roda uma vez antes do deploy; no Kubernetes, um Job (Módulo 02) |
@@ -243,7 +246,7 @@ máquina) constrói a imagem e, numa rede Docker própria com um Postgres vazio,
 `migrate` aplica as migrações; a API fica `healthy`; o `/health/ready` responde 200; o uid é 1000; não há escrita em
 `dist/`; não há npm; e o `docker stop` termina com exit 0 em menos de 5 s, com o log da drenagem.
 
-O job `image` do CI roda o hadolint e esse smoke. **Mutação:** sem o `USER node` e com o `CMD` em forma shell
+O job `image` do CI roda o hadolint, o Trivy (E.2) e esse smoke. **Mutação:** sem o `USER` e com o `CMD` em forma shell
 (`node dist/main; echo saiu`), o smoke falha em 3 verificações: uid 0, escrita em `dist/` e `exit 137, 10.14 s`.
 
 ### Como reproduzir
@@ -254,7 +257,7 @@ docker build -t taskflow .                             # a imagem da API
 docker build --target migrate -t taskflow:migrate .    # a imagem da migração
 docker run --rm -e DATABASE_URL=... taskflow:migrate   # aplica as migrações
 docker run --rm --no-healthcheck -e DATABASE_URL=... -e KAFKA_BROKERS=... taskflow node dist/relay
-docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile
+docker run --rm -i hadolint/hadolint:v2.15.1 < Dockerfile
 ```
 
 ### Perguntas de entrevista
@@ -269,6 +272,74 @@ docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile
   juntas.
 - **"Como você reduziu a imagem?"** Multi-stage, só dependências de produção, e descobrindo o `devOptional`. E sei que
   `rm` numa camada posterior não reduz o tamanho, só esconde os arquivos.
+
+---
+
+## 🔗 Cadeia de suprimentos (Etapa E.2)
+
+O código que roda em produção é quase todo de outras pessoas: ~370 MB de `node_modules`, a imagem base, as actions do
+CI e as ferramentas que elas executam. A defesa é em camadas, cada uma olhando uma coisa diferente:
+
+| Camada | Ferramenta | Olha | Bloqueia o merge? |
+|---|---|---|---|
+| Código | `npm audit --omit=dev --audit-level=high` (job `quality`) | As dependências de **produção**, pelo lockfile | ✅ HIGH ou CRITICAL |
+| Artefato | Trivy (job `image`), `--ignore-unfixed` | A imagem **como vai para produção**: Alpine, Node e `node_modules` | ✅ HIGH ou CRITICAL com correção |
+| Atualização | Dependabot (`.github/dependabot.yml`) | npm, actions, a imagem base e o compose, toda semana | — (abre PRs; o CI decide) |
+| Nosso código | CodeQL (`security-extended`) | Injeção, SSRF, ReDoS: dado do usuário chegando a um ponto perigoso | Pelo Ruleset (*code scanning*) |
+| Imutabilidade | Actions por **SHA**; hadolint, Trivy e oasdiff por **tag + digest** | O que o CI executa | — |
+
+### As decisões
+
+| Decisão | Por quê |
+|---|---|
+| **Portão só em produção** (`--omit=dev`) | As devDependencies não vão para a imagem. Bloquear por elas (eram 46 no total contra 16 em produção) gera ruído, e um portão barulhento ensina o time a ignorá-lo |
+| **Dois portões, código e artefato** | O `npm audit` não enxerga o Alpine nem o Node da imagem; o Trivy não roda sem construir a imagem. Um pega cedo e barato, o outro pega o que realmente vai para o ar |
+| **`--ignore-unfixed` no Trivy** | Uma CVE sem versão corrigida não tem ação possível; bloquearia todo PR até o mantenedor publicar uma correção |
+| **Dependabot semanal e agrupado** | Um PR por família (Nest, OpenTelemetry, Prisma, AWS SDK e "outras") com minor e patch; major sozinho, porque precisa de changelog. Sem grupos, seriam dezenas de PRs por semana, e PR que ninguém revisa vira merge sem olhar |
+| **Actions por SHA** | Uma tag é um ponteiro que o dono (ou um invasor com acesso ao repositório dele) pode mover. Em 2025, as tags do `tj-actions/changed-files` foram movidas para um commit que vazava segredos de milhares de pipelines. Um SHA não muda. O comentário `# v7.0.1` diz a versão, e o Dependabot atualiza os dois |
+| **CodeQL no repositório** (*advanced setup*) | A configuração fica versionada e revisada em PR, com as actions fixadas como o resto. O *default setup* da interface funcionaria, mas fora do código |
+| **`overrides` do `effect`** | O `@prisma/config` 7.10.1 fixa `effect@3.20.0` exato (ReDoS, HIGH). A correção (3.22.1) é do mesmo major, mas o npm só oferecia **voltar o Prisma para a 6.12**. O `overrides` força a versão corrigida. **Remover** quando o Prisma atualizar o `effect` (o `npm ls effect` mostra quem pede qual) |
+
+### Antes × depois
+
+| | `main` antes da E.2 | Depois |
+|---|---|---|
+| `npm audit`, produção | 16 (9 HIGH, 7 moderadas) | **0** |
+| `npm audit`, tudo | 46 (11 HIGH) | 31 (2 HIGH, só em dev) |
+| Imagem (Trivy 0.76.2, a mesma régua) | 5 HIGH, 10 MEDIUM | **0 HIGH**, 7 MEDIUM |
+| Actions | `@v4` (tag) | v7, por SHA |
+
+O `npm audit fix` (sem `--force`) mudou 54 pacotes, todos dentro das faixas do `package.json`. **Mutação:** com o
+lockfile antigo, o portão do `npm audit` sai com 1; com o novo, 0.
+
+### O que fica na configuração do repositório
+
+Não é código, então fica com quem administra o repositório (*Settings*):
+- **Code security → Dependabot security updates:** ligado. Um PR de correção sai quando a CVE é publicada, sem
+  esperar a segunda-feira.
+- **Rules → Rulesets → main → Require code scanning results:** CodeQL, bloqueando alertas de segurança *High or
+  higher*. O check do CodeQL sempre "passa" (a análise roda); o que bloqueia é o achado, e isso é regra de *code
+  scanning*, não de *status check*.
+
+### Imagens fora do Dependabot (revisão manual)
+
+O Dependabot lê `uses:`, Dockerfile e compose, mas não comandos dentro de `run:`. Revise a cada poucos meses:
+
+| Imagem | Onde | Versão |
+|---|---|---|
+| `hadolint/hadolint` | `ci.yml` (job `image`) | v2.15.1 |
+| `aquasec/trivy` | `ci.yml` (job `image`) | 0.76.2 |
+| `tufin/oasdiff` | `api-contract.yml` e `scripts/openapi/diff.mjs` (a mesma nos dois) | v1.37.0 |
+| `postgres` | `scripts/docker/image-smoke.mjs` e `test/support/postgres-image.ts` | 16.15 (o mesmo do compose) |
+
+### Perguntas de entrevista
+
+- **"Como você lida com dependências vulneráveis?"** Em camadas: portão no código (`npm audit`, só produção), portão
+  no artefato (Trivy), atualização contínua agrupada (Dependabot) e análise do nosso código (CodeQL).
+- **"Por que fixar a action por SHA?"** Porque a tag é um ponteiro móvel, e o caso do `tj-actions` mostrou o estrago.
+- **"O `npm audit fix` sugeriu voltar um major. E aí?"** Olhei a cadeia (`npm ls`): a correção estava no mesmo major
+  da dependência transitiva, então usei `overrides`, com a condição de remoção escrita.
+- **"Bloquear por vulnerabilidade de devDependency?"** Não: não chega à produção, e portão barulhento é ignorado.
 
 ---
 
@@ -359,6 +430,9 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 | 12 | A CLI do Prisma e o TypeScript na imagem de produção, mesmo com `--omit=dev` | Peers opcionais de uma dependência de produção, que também são devDependencies, ficam `devOptional` no lockfile | `--omit=dev --omit=optional`; o smoke prova que nada de que a API precisa saiu |
 | 13 | O hadolint acusou DL3006 ("sempre fixe a tag") com a tag fixada | A tag estava num `ARG` (`FROM ${NODE_IMAGE}`), que o lint não resolve | Estágio `base` com a tag escrita uma vez; os outros fazem `FROM base` |
 | 14 | O desenho dizia que "o npm não repassa o SIGTERM" | Suposição antiga, não medida | Medido: o npm 11 repassa (sai com 1); o que quebra é um shell vivo como PID 1 (10,14 s, exit 137). Comentário corrigido |
+| 15 | `npm audit fix` deixou 3 HIGH e sugeriu voltar o Prisma para a 6.12 | O `@prisma/config` fixa `effect@3.20.0` exato; a correção é da 3.22.1 | `overrides` no `package.json`, com condição de remoção (E.2) |
+| 16 | O hadolint novo acusou DL3066 em `USER node` | Uid por nome não pode ser conferido como não-root (Kubernetes `runAsNonRoot`) | `USER 1000:1000` (E.2) |
+| 17 | O npm 11.19 avisou de 10 pacotes com scripts de instalação "fora do `allowScripts`", e o manual dizia "bloqueados por padrão" | O `npm help install-scripts` contradiz o `npm help config`: o padrão é **aviso**, e os scripts rodam (o binário do Kafka foi gerado no container) | Nada quebrou; a política de scripts (`allowScripts` + `strict-allow-scripts`) ficou como próximo passo |
 
 ---
 
@@ -372,6 +446,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 | Três jobs paralelos | PRs #5 e #6 | ✅ todos verdes, com 150 testes por PR |
 | Quatro jobs (+ `streaming`) | Módulo 13.3 | Localmente: suíte de streaming em ~7 s com as imagens em cache |
 | Imagem antes × depois | Etapa E.1 | **1.248 → 707 MB**; CVEs HIGH/CRITICAL (Trivy) **51 → 5** (0 CRITICAL, 0 no Alpine); uid 0 → 1000; Node 20 → 24 |
+| Cadeia de suprimentos | Etapa E.2 | `npm audit` de produção **16 → 0**; imagem **5 → 0 HIGH** (Trivy 0.76.2); actions por SHA; 389 unitários · 95 integração · 79 E2E · 13 streaming e o smoke verdes depois do `audit fix` |
 | Cinco jobs (+ `image`) | Etapa E.1 | `npm run docker:smoke`: 7 verificações em ~1 min 13 s localmente; `docker stop` em 0,15 s com exit 0 |
 
 ---
@@ -379,15 +454,17 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 ## 🚧 Limitações e próximos passos
 
 - **CD não implementado:** não há deploy automático. O próximo passo natural é um workflow disparado no merge para a `main` que publica a imagem Docker e faz o deploy (ex.: Render/Fly.io + Neon).
-- **Actions fixadas por tag** (`@v4`), e não por SHA: fixar por hash protege contra uma tag adulterada (*supply chain*).
-- **5 CVEs HIGH na imagem**, todas em dependências de produção (body-parser, multer, effect, deepmerge-ts,
-  systeminformation): atualização de dependências é a próxima etapa (Dependabot e `npm audit`).
+- **Scripts de instalação sem política:** o npm 11.19 roda os scripts de `postinstall` de qualquer dependência (só
+  avisa). Um `allowScripts` no `package.json` com `strict-allow-scripts` faria de um script novo um erro de build
+  (o vetor de worms como o Shai-Hulud, de 2025).
+- **Versões do Nest desalinhadas:** o `audit fix` levou o `@nestjs/platform-express` à 12.6.0 com o `@nestjs/core`
+  na 12.1.2. As suítes passam; o grupo `nestjs` do Dependabot alinha na primeira rodada.
+- **`overrides` do `effect`:** dívida com prazo; sai quando o Prisma atualizar a dependência.
 - **O `HEALTHCHECK` da imagem é o da API:** um worker (relay, consumers) roda com `--no-healthcheck`. No Kubernetes,
   o `HEALTHCHECK` é ignorado e as probes ficam no manifesto (Módulo 02).
 - **A imagem não é publicada:** o job `image` constrói e testa, mas nenhum registry a recebe (próximo passo do CD).
 - **`--omit=optional` é uma aposta conferida:** uma dependência opcional nova de que a API precise sairia da imagem;
   o smoke pega se ela quebrar o boot, não se quebrar só um caminho raro.
-- **Sem análise de dependências:** Dependabot, CodeQL e `npm audit` no CI cobririam o OWASP A06 (componentes vulneráveis).
 - **Setup repetido nos jobs de teste:** uma *composite action* eliminaria as linhas duplicadas.
 - **`npm ci` baixa o binário da librdkafka do GitHub** (cliente Kafka, Módulo 13): uma dependência de rede a mais em todos os jobs.
 - **Sem cobertura publicada:** o `test:cov` existe, mas o relatório não é exibido no PR.
@@ -405,7 +482,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - [x] Contrato da API conferido no CI e mudanças incompatíveis bloqueadas sem label (Módulo 14.3)
 - [x] Imagem de produção em Node 24, não-root, com `HEALTHCHECK`, migração separada, e construída e executada no CI (Etapa E.1)
 - [ ] CD (publicar a imagem e fazer o deploy)
-- [ ] Dependabot / CodeQL / actions fixadas por SHA
+- [x] Cadeia de suprimentos: `npm audit` e Trivy como portões, Dependabot, CodeQL e actions por SHA (Etapa E.2)
 
 ---
 

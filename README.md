@@ -239,9 +239,15 @@ npx tsc --noEmit && npm run lint
 
 ### CI
 
-Cada PR para a `main` dispara [4 jobs paralelos](.github/workflows/ci.yml), e todos são obrigatórios para o merge:
-**tipos + lint + unitários + build** · **integração** · **E2E** · **streaming** (Kafka real). O workflow roda com `permissions: contents: read`
-e cancela execuções obsoletas do mesmo PR.
+Cada PR para a `main` dispara [5 jobs paralelos](.github/workflows/ci.yml), e todos são obrigatórios para o merge:
+**tipos + lint + unitários + build + `npm audit`** · **integração** · **E2E** · **streaming** (Kafka real) · **imagem**
+(hadolint, Trivy e o smoke da imagem de produção). O workflow roda com `permissions: contents: read`, actions fixadas
+por SHA, e cancela execuções obsoletas do mesmo PR.
+
+Cadeia de suprimentos (Etapa E.2, [Módulo 03](docs/modules/03-ci-cd-github-actions.md#-cadeia-de-suprimentos-etapa-e2)):
+vulnerabilidade HIGH/CRITICAL em dependência de produção ou na imagem bloqueia o merge; o
+[Dependabot](.github/dependabot.yml) abre PRs agrupados toda semana; o [CodeQL](.github/workflows/codeql.yml) analisa o
+nosso código.
 
 O contrato da API tem duas guardas (Módulo 14.3): o job de qualidade confere se `docs/api/openapi.json` bate com o
 código, e o workflow [Contrato da API](.github/workflows/api-contract.yml) bloqueia mudanças **incompatíveis** (oasdiff)
@@ -280,7 +286,7 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 - **Alertas sem roteamento:** 11 regras de alerta testadas no CI disparam no Prometheus, mas sem Alertmanager ninguém é avisado fora dele; os limiares são pontos de partida, não derivados de SLO.
 - **Prazo (expand/contract, Módulo 14.4):** o `dueDate` saiu da API e do banco; continua só no contrato público do tópico (outro ciclo de vida) e nos eventos v1, lidos pelo *upcaster*.
 - **Eventos antigos sem autor:** eventos gravados antes do envelope de metadados aparecem no histórico com `actorId: null`; o autor não é inferido. O metadata ainda não chega ao `EventBus` nem às projeções.
-- **Imagem Docker:** construída e testada em todo PR (Node 24, não-root, `HEALTHCHECK`), mas ainda não publicada em registry nem consumida por um orquestrador (Kubernetes no Módulo 02); 5 CVEs HIGH em dependências de produção.
+- **Imagem Docker:** construída e testada em todo PR (Node 24, não-root, `HEALTHCHECK`), mas ainda não publicada em registry nem consumida por um orquestrador (Kubernetes no Módulo 02).
 - **Rate limit em memória:** não é compartilhado entre réplicas (em produção, usaria Redis).
 - **Terraform sem lock do state:** o backend S3 não tem `use_lockfile`; dois `apply` simultâneos poderiam corromper o state.
 - **Strategy de prioridade incompleto:** a estratégia é instanciada no handler (não injetada) e a `DeadlinePriorityStrategy` não é usada.

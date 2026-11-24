@@ -1,0 +1,69 @@
+# Atualização contínua de dependências (Etapa E.2, Módulo 03; OWASP A06 e A08).
+#
+# Semanal e AGRUPADO: sem grupos, seriam dezenas de PRs por semana, e ninguém revisa dezenas de PRs (vira "merge sem
+# olhar" ou "ignorar todos"). Minor e patch de uma família entram num PR só; um major vem sozinho, porque pode
+# quebrar e precisa de leitura do changelog. A rede de segurança é o CI de cada PR (5 jobs + contrato + CodeQL).
+#
+# Os alertas de SEGURANÇA não esperam a semana: os "Dependabot security updates" (configuração do repositório)
+# abrem um PR assim que uma CVE é publicada.
+#
+# Fora do Dependabot (ele não lê `run:` de workflow): hadolint, Trivy e oasdiff, fixados por tag + digest no CI.
+# Revisão manual; lista no Módulo 03.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: 'chore(deps)'
+    groups:
+      nestjs:
+        patterns: ['@nestjs/*']
+        update-types: [minor, patch]
+      opentelemetry:
+        patterns: ['@opentelemetry/*']
+        update-types: [minor, patch]
+      prisma:
+        patterns: ['prisma', '@prisma/*']
+        update-types: [minor, patch]
+      aws-sdk:
+        patterns: ['@aws-sdk/*']
+        update-types: [minor, patch]
+      # O resto (minor e patch) num PR só
+      outras:
+        patterns: ['*']
+        update-types: [minor, patch]
+
+  # Actions fixadas por SHA: o Dependabot atualiza o SHA E o comentário da versão (`# v7.0.1`)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: 'ci(deps)'
+    groups:
+      actions:
+        patterns: ['*']
+
+  # A imagem base do Dockerfile (tag exata + digest no estágio `base`)
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: 'build(deps)'
+
+  # Postgres, Kafka, Jaeger, Prometheus, Grafana e LocalStack do ambiente local. O Testcontainers usa as mesmas
+  # versões (test/support/postgres-image.ts e o Kafka do compose): ao aceitar uma atualização daqui, alinhe lá
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: 'chore(deps)'
