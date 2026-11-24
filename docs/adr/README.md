@@ -16,6 +16,7 @@ funciona; os ADRs registram **por que** ela é assim e **quando** a decisão dei
 | [0008](0008-depreciacao-e-remocao-de-campos-da-api.md) | Depreciação e remoção de campos da API (expand → contract em dois deploys) | Aceito | 14.4 |
 | [0009](0009-idempotencia-de-requisicoes-na-transacao-do-efeito.md) | Idempotência de requisições (`Idempotency-Key`) na mesma transação do efeito | Aceito | 14.5 |
 | [0010](0010-feature-flags-proprias.md) | Feature flags em módulo próprio (porta + Postgres), e não um serviço gerenciado | Aceito | 14.6 |
+| [0011](0011-criterio-de-avanco-do-rollout.md) | Critério de avanço do rollout da `task-list-with-stats` (variante × controle, relativo E absoluto) | Aceito | 14.7 |
 
 ## Formato
 
