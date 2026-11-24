@@ -8,6 +8,7 @@ import { AppController } from './app.controller';
 import { TelemetryShutdownHook } from './common/lifecycle/telemetry-shutdown';
 import { RouteTelemetryGuard } from './common/telemetry/route-telemetry.guard';
 import { VersionPolicyModule } from './common/client/version-policy.module';
+import { FeatureFlagsModule } from './modules/feature-flags/feature-flags.module';
 import { buildLoggerOptions } from './common/logging/logger.options';
 import { HealthModule } from './health/health.module';
 import { AppService } from './app.service';
@@ -58,6 +59,7 @@ import { ReportsModule } from './modules/reports/reports.module';
     ReportsModule,
     HealthModule,
     VersionPolicyModule,
+    FeatureFlagsModule,
     ThrottlerModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService<Env, true>) => ({

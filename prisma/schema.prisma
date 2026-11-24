@@ -317,3 +317,39 @@ model IdempotencyKey {
   @@index([createdAt])
   @@map("idempotency_keys")
 }
+
+// Módulo 14.6: feature flags. Uma linha por flag; a avaliação é uma função pura (`evaluate`) sobre esta regra.
+// Mudada pelo comando `npm run feature-flag` (com auditoria em `feature_flag_changes`), lida pela API com cache de 5 s.
+model FeatureFlag {
+  // kebab-case (`task-list-with-stats`): é o nome que o app recebe em `GET /me/features`
+  key               String        @id
+  description       String
+  // Kill switch: `false` desliga para TODOS, inclusive a lista de usuários. Nasce desligada
+  enabled           Boolean       @default(false)
+  // 0 a 100 (CHECK na migração): % dos usuários pelo bucket sha256(key:userId) mod 100
+  rolloutPercentage Int           @default(0) @map("rollout_percentage")
+  // Ligada para estes usuários (time interno, beta), independente da porcentagem
+  allowUserIds      String[]      @default([]) @map("allow_user_ids")
+  // Restrição de plataforma; vazia = todas
+  platforms         AppPlatform[] @default([])
+  // Restrição de versão do app (MAJOR.MINOR.PATCH); NULL = qualquer versão
+  minAppVersion     String?       @map("min_app_version")
+  updatedBy         String        @map("updated_by")
+  updatedAt         DateTime      @default(now()) @map("updated_at")
+
+  @@map("feature_flags")
+}
+
+// Auditoria das mudanças de flag (append-only): "quem ligou para 50%, e quando?"
+model FeatureFlagChange {
+  id        BigInt   @id @default(autoincrement())
+  key       String
+  // A regra inteira antes e depois (NULL = não existia)
+  before    Json?
+  after     Json?
+  changedBy String   @map("changed_by")
+  changedAt DateTime @default(now()) @map("changed_at")
+
+  @@index([key, changedAt(sort: Desc)])
+  @@map("feature_flag_changes")
+}
