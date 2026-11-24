@@ -11,13 +11,12 @@
  * comandos de ciclo de vida e nos eventos depois que argumentos trocados corromperam um evento). Com vários
  * `string` seguidos, trocar a ordem compila sem erro — o formato `(target, valor)` dos outros comandos evita isso.
  *
- * O prazo chega já no formato novo (Módulo 14.4): o controller converte o `dueDate` antigo em `{ at, timezone: null }`
- * na borda, e daqui para dentro só existe um formato.
+ * O prazo chega no formato `due` (Módulo 14.4): o instante já convertido para `Date` na borda, e o fuso IANA.
  */
 export interface DueInput {
   at: Date;
-  /** Fuso IANA; `null` quando o cliente usou o formato antigo, que não o informava. */
-  timezone: string | null;
+  /** Fuso IANA. (O `null` de `TaskDue` só existe nos prazos vindos do formato antigo: eventos v1 e a 14.4a.) */
+  timezone: string;
 }
 
 /** Ver o TSDoc acima: comando posicional, anterior à regra dos objetos nomeados. */

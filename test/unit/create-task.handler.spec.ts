@@ -182,15 +182,6 @@ describe('CreateTaskHandler', () => {
       expect(stored.schemaVersion).toBe(2);
     });
 
-    it('prazo do formato antigo (fuso desconhecido): timezone null, nunca inventado', async () => {
-      await handler.execute(
-        new CreateTaskCommand(userId, 'p1', 'Tarefa', undefined, { at: new Date('2026-12-31T23:59:59Z'), timezone: null }),
-      );
-
-      const [stored] = eventStore.append.mock.calls[0];
-      expect(stored.payload.due).toEqual({ at: '2026-12-31T23:59:59.000Z', timezone: null });
-    });
-
     it('deve publicar priority e due no TaskCreatedEvent (chegam ao Read Model)', async () => {
       await handler.execute(new CreateTaskCommand(userId, 'p1', 'Corrigir bug urgente', undefined, due));
 

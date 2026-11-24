@@ -4,7 +4,6 @@ import {
   IsString,
   Matches,
   registerDecorator,
-  ValidationArguments,
   ValidationOptions,
 } from 'class-validator';
 
@@ -38,29 +37,6 @@ export function IsIanaTimeZone(options?: ValidationOptions) {
         ...options,
       },
       validator: { validate: isIanaTimeZone },
-    });
-  };
-}
-
-/**
- * Recusa o campo decorado quando `other` também veio (Módulo 14.4: `dueDate` OU `due`, nunca os dois). Aceitar os dois
- * exigiria escolher qual vence quando divergem, e "aceitar se forem iguais" esconderia um bug no app.
- */
-export function NotTogetherWith(other: string, options?: ValidationOptions) {
-  return function (target: object, propertyName: string): void {
-    registerDecorator({
-      name: 'notTogetherWith',
-      target: target.constructor,
-      propertyName,
-      constraints: [other],
-      options: {
-        message: `envie ${propertyName} OU ${other}, não os dois (${propertyName} está depreciado: use ${other})`,
-        ...options,
-      },
-      validator: {
-        validate: (_value: unknown, args: ValidationArguments) =>
-          (args.object as Record<string, unknown>)[other] === undefined,
-      },
     });
   };
 }
@@ -104,7 +80,8 @@ export class DueResponseDto {
     type: String,
     nullable: true,
     example: 'America/Sao_Paulo',
-    description: 'Fuso IANA; `null` quando o prazo foi criado pelo formato antigo (`dueDate`), que não o informava',
+    description:
+      'Fuso IANA; `null` quando o prazo veio do formato antigo (`dueDate`, removido na 14.4b), que não o informava',
   })
   timezone!: string | null;
 }

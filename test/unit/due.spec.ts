@@ -1,25 +1,22 @@
 /**
- * Expand do prazo (Módulo 14.4a): `dueDate` → `due { at, timezone }`, sem quebrar quem ainda usa o formato antigo.
+ * Prazo `due { at, timezone }` depois do contract (Módulo 14.4b): o `dueDate` não existe mais na API, mas os eventos
+ * antigos continuam gravados com ele.
  *
- * Protege cada peça do expand:
- * - o **upcaster**: evento `TaskCreated` v1 (ou legado, sem envelope) vira v2 na LEITURA, com fuso `null` (nunca
- *   inventado); v2 passa intacto; outros tipos não são tocados; versão MAIS NOVA que o código falha alto; campo
- *   inesperado do payload antigo não atravessa;
- * - a **entrada**: `due.at` com fuso explícito, `timezone` como nome IANA (offset recusado), e `dueDate` + `due`
- *   juntos = erro;
- * - a **saída da listagem**: as colunas novas, com a antiga como reserva durante a transição, e nenhuma coluna interna
- *   vazando;
- * - a **depreciação**: headers das RFCs 9745 (`Deprecation`) e 8594 (`Sunset`) e a métrica de uso por versão do app.
+ * Protege:
+ * - o **upcaster**, que fica para sempre: `TaskCreated` v1 (ou legado, sem envelope) vira v2 na LEITURA, com fuso
+ *   `null` (nunca inventado); v2 passa intacto; outros tipos não são tocados; versão MAIS NOVA que o código falha
+ *   alto; campo inesperado do payload antigo não atravessa;
+ * - a **entrada**: `due.at` com fuso explícito, `timezone` como nome IANA (offset recusado), e o `dueDate` removido
+ *   (campo desconhecido, recusado pelo `forbidNonWhitelisted`);
+ * - a **saída da listagem**: só as colunas novas; a `due_date` (sem uso, sai do banco na 14.4c) não é lida nem vaza;
+ * - o **mecanismo de depreciação** (ADR-0008), pronto para o próximo campo: headers das RFCs 9745 e 8594.
  */
 import { plainToInstance } from 'class-transformer';
 import { validateSync } from 'class-validator';
 import type { Response } from 'express';
 import type { TaskRead } from '@prisma/client';
 import { resolveClientInfo } from '../../src/common/client/client-info';
-import {
-  DeprecationNotifier,
-  DUE_DATE_DEPRECATION,
-} from '../../src/common/deprecation/deprecation';
+import { DeprecationNotifier } from '../../src/common/deprecation/deprecation';
 import { CreateTaskDto } from '../../src/modules/tasks/dto/create-task.dto';
 import { isIanaTimeZone } from '../../src/modules/tasks/dto/due.dto';
 import { upcastPayload } from '../../src/modules/tasks/infrastructure/task-event.upcasters';
@@ -73,7 +70,7 @@ describe('upcaster do TaskCreated (v1 → v2)', () => {
   });
 });
 
-describe('entrada: CreateTaskDto com due e o dueDate depreciado', () => {
+describe('entrada: CreateTaskDto depois do contract', () => {
   const errorsOf = (body: object) =>
     validateSync(plainToInstance(CreateTaskDto, { title: 'Tarefa', ...body }), {
       whitelist: true,
@@ -83,7 +80,7 @@ describe('entrada: CreateTaskDto com due e o dueDate depreciado', () => {
       ...(e.children ?? []).flatMap((c) => Object.values(c.constraints ?? {})),
     ]);
 
-  it('formato novo válido e formato antigo sozinho: aceitos', () => {
+  it('due válido: aceito (com offset ou em UTC)', () => {
     expect(
       errorsOf({
         due: { at: '2026-12-31T23:59:59-03:00', timezone: 'America/Sao_Paulo' },
@@ -92,16 +89,12 @@ describe('entrada: CreateTaskDto com due e o dueDate depreciado', () => {
     expect(
       errorsOf({ due: { at: '2026-12-31T23:59:59Z', timezone: 'UTC' } }),
     ).toEqual([]);
-    expect(errorsOf({ dueDate: '2026-12-31T23:59:59Z' })).toEqual([]);
   });
 
-  it('os dois juntos: recusado, com a explicação', () => {
-    expect(
-      errorsOf({
-        dueDate: '2026-12-31T23:59:59Z',
-        due: { at: '2026-12-31T23:59:59Z', timezone: 'UTC' },
-      }).join(' '),
-    ).toContain('não os dois');
+  it('dueDate (removido no contract): campo desconhecido, recusado', () => {
+    expect(errorsOf({ dueDate: '2026-12-31T23:59:59Z' }).join(' ')).toContain(
+      'property dueDate should not exist',
+    );
   });
 
   it('due.at sem fuso explícito (ambíguo): recusado', () => {
@@ -144,7 +137,7 @@ describe('saída: toTaskListItem', () => {
     ...overrides,
   });
 
-  it('prazo das colunas novas: due completo e dueDate (depreciado) com o mesmo instante', () => {
+  it('prazo das colunas novas: due completo, sem o dueDate', () => {
     const at = new Date('2027-01-01T02:59:59Z');
     const item = toTaskListItem(
       row({ dueAt: at, dueTimezone: 'America/Sao_Paulo', dueDate: at }),
@@ -153,26 +146,31 @@ describe('saída: toTaskListItem', () => {
       at: '2027-01-01T02:59:59.000Z',
       timezone: 'America/Sao_Paulo',
     });
-    expect(item.dueDate).toEqual(at);
+    expect(item).not.toHaveProperty('dueDate');
   });
 
-  it('linha só com a coluna antiga (criada no meio do deploy, depois do backfill): ainda aparece certa', () => {
-    const at = new Date('2026-12-31T23:59:59Z');
-    expect(toTaskListItem(row({ dueDate: at })).due).toEqual({
-      at: '2026-12-31T23:59:59.000Z',
-      timezone: null,
-    });
+  it('a due_date (sem uso desde o contract) não é mais lida: a reserva do expand saiu', () => {
+    // Só depois do backfill final isto é seguro: nenhuma linha fica só com a coluna antiga
+    expect(toTaskListItem(row({ dueDate: new Date() })).due).toBeNull();
   });
 
   it('sem prazo: due null; e nenhuma coluna interna vaza para a resposta', () => {
     const item = toTaskListItem(row({}));
     expect(item.due).toBeNull();
-    expect(item).not.toHaveProperty('dueAt');
-    expect(item).not.toHaveProperty('dueTimezone');
+    for (const column of ['dueAt', 'dueTimezone', 'dueDate']) {
+      expect(item).not.toHaveProperty(column);
+    }
   });
 });
 
-describe('DeprecationNotifier', () => {
+describe('DeprecationNotifier (o mecanismo do ADR-0008, pronto para o próximo campo)', () => {
+  const field = {
+    name: 'campoAntigo',
+    deprecatedAt: new Date('2026-11-24T00:00:00Z'),
+    sunsetAt: new Date('2027-03-01T00:00:00Z'),
+    link: 'https://example.com/migracao',
+  };
+
   it('headers Deprecation (RFC 9745), Sunset (RFC 8594) e Link rel="deprecation"', () => {
     const headers: Record<string, string> = {};
     const res = {
@@ -181,7 +179,7 @@ describe('DeprecationNotifier', () => {
 
     new DeprecationNotifier().fieldUsed(
       res,
-      DUE_DATE_DEPRECATION,
+      field,
       resolveClientInfo('android', '2.13.0'),
     );
 

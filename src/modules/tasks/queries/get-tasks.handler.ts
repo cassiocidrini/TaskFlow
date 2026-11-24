@@ -8,8 +8,8 @@ import type { TaskDue } from '../events/task.events';
 
 /**
  * Uma tarefa como a listagem a devolve. Mapeada campo a campo a partir da linha do Read Model, e não a linha crua:
- * colunas internas (as do expand/contract do Módulo 14.4: `due_at`, `due_timezone`, `due_date`) não podem vazar para
- * o contrato só porque existem na tabela.
+ * colunas internas (como a `due_date`, que não é mais usada desde a 14.4b e sai do banco na 14.4c) não podem vazar
+ * para o contrato só porque existem na tabela.
  */
 export interface TaskListItem {
   id: string;
@@ -18,8 +18,6 @@ export interface TaskListItem {
   status: TaskRead['status'];
   priority: TaskRead['priority'];
   assigneeId: string | null;
-  /** Depreciado (Módulo 14.4): o mesmo instante de `due.at`, para o app que ainda não migrou. */
-  dueDate: Date | null;
   due: TaskDue | null;
   completedAt: Date | null;
   createdAt: Date;
@@ -27,11 +25,11 @@ export interface TaskListItem {
 }
 
 /**
- * Durante o expand, `due_at ?? due_date`: uma linha criada pela versão anterior da API no meio do deploy (depois do
- * backfill) só tem a coluna antiga, e continua aparecendo certa. Sai no contract (14.4b), junto com a coluna.
+ * Lê só as colunas novas do prazo (`due_at`, `due_timezone`). A reserva `due_at ?? due_date` do expand saiu no contract
+ * (14.4b), depois do backfill final, que cobre as linhas criadas pela versão anterior no meio do deploy da 14.4a.
  */
 export function toTaskListItem(row: TaskRead): TaskListItem {
-  const at = row.dueAt ?? row.dueDate;
+  const at = row.dueAt;
   return {
     id: row.id,
     projectId: row.projectId,
@@ -39,7 +37,6 @@ export function toTaskListItem(row: TaskRead): TaskListItem {
     status: row.status,
     priority: row.priority,
     assigneeId: row.assigneeId,
-    dueDate: at,
     due: at ? { at: at.toISOString(), timezone: row.dueTimezone } : null,
     completedAt: row.completedAt,
     createdAt: row.createdAt,

@@ -66,16 +66,6 @@ export class TaskReadDto {
   @ApiPropertyOptional({ nullable: true, type: String, example: USER_EXAMPLE })
   assigneeId!: string | null;
 
-  @ApiPropertyOptional({
-    nullable: true,
-    type: String,
-    format: 'date-time',
-    example: '2027-01-01T02:59:59.000Z',
-    deprecated: true,
-    description: '**Depreciado:** use `due.at` (o mesmo instante). Mantido para apps que ainda não migraram.',
-  })
-  dueDate!: Date | null;
-
   @ApiProperty({
     type: DueResponseDto,
     nullable: true,
@@ -120,14 +110,6 @@ export class TaskCurrentStateDto {
 
   @ApiPropertyOptional({ example: USER_EXAMPLE })
   assigneeId?: string;
-
-  @ApiPropertyOptional({
-    format: 'date-time',
-    example: '2027-01-01T02:59:59.000Z',
-    deprecated: true,
-    description: '**Depreciado:** use `due.at`.',
-  })
-  dueDate?: string;
 
   @ApiPropertyOptional({ type: DueResponseDto, description: 'Prazo com o fuso do usuário' })
   due?: DueResponseDto;

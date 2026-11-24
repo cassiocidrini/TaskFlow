@@ -86,14 +86,7 @@
                 "$ref": "#/components/schemas/DueDto"
               }
             ],
-            "description": "Prazo: o instante e o fuso IANA do usuário (para lembretes no dia certo). Substitui `dueDate`."
-          },
-          "dueDate": {
-            "deprecated": true,
-            "description": "**Depreciado:** use `due`. Prazo como instante ISO 8601, sem o fuso do usuário. Não pode vir junto com `due`.",
-            "example": "2026-12-31T23:59:59Z",
-            "format": "date-time",
-            "type": "string"
+            "description": "Prazo: o instante e o fuso IANA do usuário (para lembretes no dia certo)."
           },
           "title": {
             "description": "Título. Palavras como \"urgente\" e \"bug\" elevam a prioridade calculada para HIGH.",
@@ -152,7 +145,7 @@
             "type": "string"
           },
           "timezone": {
-            "description": "Fuso IANA; `null` quando o prazo foi criado pelo formato antigo (`dueDate`), que não o informava",
+            "description": "Fuso IANA; `null` quando o prazo veio do formato antigo (`dueDate`, removido na 14.4b), que não o informava",
             "example": "America/Sao_Paulo",
             "nullable": true,
             "type": "string"
@@ -430,13 +423,6 @@
             ],
             "description": "Prazo com o fuso do usuário"
           },
-          "dueDate": {
-            "deprecated": true,
-            "description": "**Depreciado:** use `due.at`.",
-            "example": "2027-01-01T02:59:59.000Z",
-            "format": "date-time",
-            "type": "string"
-          },
           "priority": {
             "enum": [
               "LOW",
@@ -610,14 +596,6 @@
             "description": "Prazo com o fuso do usuário (`timezone: null` = criado pelo formato antigo); `null` sem prazo",
             "nullable": true,
             "type": "object"
-          },
-          "dueDate": {
-            "deprecated": true,
-            "description": "**Depreciado:** use `due.at` (o mesmo instante). Mantido para apps que ainda não migraram.",
-            "example": "2027-01-01T02:59:59.000Z",
-            "format": "date-time",
-            "nullable": true,
-            "type": "string"
           },
           "id": {
             "example": "370b268e-18ba-444c-ae17-2716b0269232",
@@ -2121,7 +2099,7 @@
         ]
       },
       "post": {
-        "description": "Grava o evento `TaskCreated` no Event Store. A prioridade é calculada pelo servidor a partir do título. A tarefa aparece na listagem após a projeção (consistência eventual, normalmente milissegundos). Prazo: envie `due { at, timezone }`; o `dueDate` antigo ainda é aceito, com os headers `Deprecation` e `Sunset` na resposta.",
+        "description": "Grava o evento `TaskCreated` no Event Store. A prioridade é calculada pelo servidor a partir do título. A tarefa aparece na listagem após a projeção (consistência eventual, normalmente milissegundos). Prazo: `due { at, timezone }` (o `dueDate` antigo foi removido e responde 400).",
         "operationId": "TasksController_create",
         "parameters": [
           {
