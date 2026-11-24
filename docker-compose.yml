@@ -119,7 +119,7 @@ services:
   # partição. Um consumer parado não exporta métrica nenhuma; o exporter continua mostrando o lag dele crescendo.
   # Também expõe o tamanho dos DLTs. Testado com o Kafka 4 antes de entrar (a 1.9.0 fala o protocolo novo).
   kafka-exporter:
-    image: danielqsj/kafka-exporter:v1.9.0
+    image: danielqsj/kafka-exporter:v1.11.0
     container_name: taskflow-kafka-exporter
     profiles: ["streaming"]
     command: ["--kafka.server=kafka:29092"]
