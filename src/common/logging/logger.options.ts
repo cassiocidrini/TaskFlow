@@ -22,6 +22,12 @@ export function accessLogLevel(res: ServerResponse, err?: Error): 'error' | 'war
   return 'info';
 }
 
+/** O cliente validado pelo middleware, pronto para a linha de acesso; nada se a requisição não passou por ele. */
+function clientFields(req: IncomingMessage): { client?: ReturnType<typeof describeClient> } {
+  const client = (req as IncomingMessage & RequestWithClient).appClient;
+  return client ? { client: describeClient(client) } : {};
+}
+
 /**
  * Configuração do `nestjs-pino` (logs JSON, uma linha por evento).
  *
@@ -36,9 +42,13 @@ export function accessLogLevel(res: ServerResponse, err?: Error): 'error' | 'war
  * - **Serializers por allowlist** (método, url, status): o log de acesso nunca contém headers, então
  *   `Authorization` e cookies não vazam (OWASP A09). Allowlist é mais seguro que uma lista de `redact`: um header
  *   sensível novo não precisa ser lembrado.
- * - **`client` (plataforma e versão do app, Módulo 14.1) em cada linha da requisição**, lido do que o
- *   `clientInfoMiddleware` já validou, e não do header cru: o suporte filtra "erros do Android 2.13" sem que um
- *   header inventado entre no log.
+ * - **`client` (plataforma e versão do app, Módulo 14.1) na linha de acesso**, lido do que o `clientInfoMiddleware`
+ *   já validou, e não do header cru: o suporte filtra "erros do Android 2.13" sem que um header inventado entre no
+ *   log. As outras linhas da requisição não o repetem: o `correlationId` as liga à linha de acesso.
+ *   Entra pelos ganchos que MONTAM a linha (`customSuccessObject` e `customErrorObject`), e não pelo `customProps`:
+ *   o pino-http chama o `customProps` no início e no fim da requisição e evita a duplicata comparando texto, depois
+ *   de apagar TODAS as chaves `{}` do JSON. Com um objeto aninhado a comparação nunca casa, e a linha saía com
+ *   `"client"` duas vezes (o `JSON.parse` esconde, porque fica com a última).
  */
 export function buildLoggerOptions(env: LoggerEnv): Params {
   return {
@@ -47,10 +57,14 @@ export function buildLoggerOptions(env: LoggerEnv): Params {
       // Fora de uma requisição (ex.: boot) não há contexto; gerar um id evita linhas de acesso sem correlação
       genReqId: () => currentCorrelationId() ?? randomUUID(),
       customAttributeKeys: { reqId: 'correlationId' },
-      customProps: (req: IncomingMessage) => {
-        const client = (req as IncomingMessage & RequestWithClient).appClient;
-        return client ? { client: describeClient(client) } : {};
-      },
+      customSuccessObject: (req: IncomingMessage, _res: ServerResponse, line: object) => ({
+        ...line,
+        ...clientFields(req),
+      }),
+      customErrorObject: (req: IncomingMessage, _res: ServerResponse, _err: Error, line: object) => ({
+        ...line,
+        ...clientFields(req),
+      }),
       quietReqLogger: true,
       // Probes rodam a cada poucos segundos: seriam ~17 mil linhas/dia por réplica sem informação nenhuma.
       // Uma falha de readiness continua no log, pelo warn do indicador e pelo log de erro do terminus.
