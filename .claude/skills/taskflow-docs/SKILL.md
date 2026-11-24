@@ -28,7 +28,7 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
    (`EventBus` em memória; a outbox do Módulo 13.2 cobre só o Kafka); relay sem DLQ por decisão (mensagem
    ruim trava a fila; runbook no Módulo 13); redrive manual e por grupo inteiro;
    throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; probes `/health` sem consumidor
-   (sem manifesto Kubernetes nem `HEALTHCHECK`); Dockerfile em `node:20` e como root. Ao corrigir uma, tire-a daqui no MESMO PR.
+   (sem manifesto Kubernetes; o `HEALTHCHECK` da imagem só chama o *live*); imagem não publicada em registry. Ao corrigir uma, tire-a daqui no MESMO PR.
 
 ## Swagger — como está montado
 

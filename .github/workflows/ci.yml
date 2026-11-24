@@ -15,7 +15,7 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# Quatro jobs PARALELOS. Cada teste roda UMA vez. Todos obrigatórios na Branch Protection:
+# Cinco jobs PARALELOS. Cada teste roda UMA vez. Todos obrigatórios na Branch Protection:
 # nenhum merge sem tudo verde.
 jobs:
   quality:
@@ -87,3 +87,22 @@ jobs:
 
       - name: Testes de streaming (relay publicando no Kafka)
         run: npm run test:streaming
+
+  # Etapa E.1: a imagem de produção é construída e RODADA em todo PR. O Dockerfile anterior ficou no Node 20, como
+  # root e copiando o .env para o build sem ninguém perceber, porque nada o executava. Sem `npm ci`: o smoke só usa
+  # o Docker e módulos nativos do Node (a imagem instala as próprias dependências).
+  image:
+    name: Imagem Docker (hadolint e smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Lint do Dockerfile (hadolint)
+        run: docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile
+      # Migração num Postgres vazio, healthy, ready 200, uid 1000, sem escrita no código, sem npm, docker stop com
+      # graceful shutdown (exit 0 em menos de 5 s)
+      - name: Smoke da imagem (build + execução)
+        run: npm run docker:smoke

@@ -1,9 +1,10 @@
 # Módulo 03 — CI/CD com GitHub Actions
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
 > **Onde vive no código:** [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) ·
-> [`prisma.config.ts`](../../prisma.config.ts) · [`jest.config.ts`](../../jest.config.ts) · [`package.json`](../../package.json) (scripts)
+> [`prisma.config.ts`](../../prisma.config.ts) · [`jest.config.ts`](../../jest.config.ts) · [`package.json`](../../package.json) (scripts) ·
+> [`Dockerfile`](../../Dockerfile) · [`.dockerignore`](../../.dockerignore) · [`scripts/docker/image-smoke.mjs`](../../scripts/docker/image-smoke.mjs)
 
 ---
 
@@ -13,6 +14,7 @@ Montar uma esteira de **Integração Contínua** que valida **todo** push e pull
 
 - tipos (`tsc --noEmit`), lint (`oxlint`) e build;
 - testes **unitários**, de **integração** e **E2E**, os dois últimos contra **PostgreSQL real** (Testcontainers);
+- a **imagem de produção** construída e executada em todo PR (Etapa E.1);
 - **merge bloqueado** se qualquer verificação falhar (Ruleset da `main`).
 
 **Por que importa:** CI é a primeira linha de defesa contra regressões. Ele também é o que torna seguro trabalhar
@@ -27,7 +29,7 @@ em equipe: ninguém precisa "confiar" que o colega rodou os testes, porque o pip
 | Sigla | Nome | O que faz | No TaskFlow |
 |---|---|---|---|
 | **CI** | Integração Contínua | Valida automaticamente cada mudança | ✅ |
-| **CD** | Entrega Contínua | Deixa cada versão aprovada **pronta** para deploy | ❌ ainda não |
+| **CD** | Entrega Contínua | Deixa cada versão aprovada **pronta** para deploy | ⏳ a imagem é construída e testada em todo PR; falta publicá-la |
 | **CD** | Deploy Contínuo | Publica em produção automaticamente | ❌ ainda não |
 
 ### Vocabulário do GitHub Actions
@@ -58,6 +60,7 @@ flowchart LR
     E --> I
     E --> X
     E --> S
+    E --> D
     subgraph Q [job: quality]
         direction TB
         q1[tsc --noEmit] --> q2[oxlint] --> q3[testes unitários] --> q4["nest build +<br/>contrato da API"]
@@ -71,10 +74,14 @@ flowchart LR
     subgraph S [job: streaming]
         s1["Kafka + PostgreSQL reais<br/>(Módulo 13)"]
     end
-    Q --> M{4 verdes?}
+    subgraph D [job: image]
+        d1[hadolint] --> d2["build + smoke<br/>(Etapa E.1)"]
+    end
+    Q --> M{5 verdes?}
     I --> M
     X --> M
     S --> M
+    D --> M
     M -->|sim| OK[merge liberado]
     M -->|não| NO[merge bloqueado]
 ```
@@ -167,6 +174,104 @@ O `.env` está no `.gitignore`, então **o runner não o tem**. Duas consequênc
 
 ---
 
+## 🐳 A imagem de produção (Etapa E.1)
+
+### O que havia
+
+O `Dockerfile` tinha dois estágios e parecia razoável. Construído e inspecionado em 24/11/2026:
+
+| Achado | Consequência |
+|---|---|
+| `node:20-alpine` | O projeto exige Node 24 (`engines`, `.nvmrc`, CI): a imagem rodava uma versão que nenhum teste usa |
+| **Sem `.dockerignore`** + `COPY . .` | O estágio de build tinha o **`.env` com o `JWT_SECRET`** e o `.git` inteiro. E o `node_modules` do host (782 MB) **sobrescrevia** o do `npm ci`, com binários nativos compilados para outra libc (glibc no host, musl no Alpine) |
+| Runtime com o `node_modules` do build | jest, testcontainers, ts-node e a CLI do Prisma em produção: **1.248 MB** e **51 CVEs HIGH/CRITICAL** (Trivy) |
+| Sem `USER` | O processo rodava como **root** (uid 0) |
+| Sem `HEALTHCHECK` | Os probes do Módulo 01 existiam, mas nada os chamava |
+
+**A causa comum:** nada construía nem rodava essa imagem. O Dockerfile ficou para trás quando o projeto foi para o
+Node 24, e ninguém percebeu. **Arquivo que nada executa apodrece em silêncio**, e por isso a correção inclui um job
+no CI.
+
+### O Dockerfile novo
+
+```text
+base       node:24.22.2-alpine3.24@sha256:…  (tag exata E digest, escritos uma vez só)
+deps       npm ci (todas as dependências; cache do npm montado pelo BuildKit)
+build      prisma generate + nest build (o plugin do Swagger só roda no nest build)
+prod-deps  npm ci --omit=dev --omit=optional + o client gerado do Prisma
+migrate    docker build --target migrate → prisma migrate deploy (como usuário node)
+runtime    NODE_ENV=production · sem npm/yarn/corepack · código do root · USER node
+           HEALTHCHECK em /health/live · CMD ["node", "dist/main"]
+```
+
+| Decisão | Por quê |
+|---|---|
+| **`.dockerignore` como allowlist** (`*` e depois `!src/`, `!prisma/`...) | Numa lista do que excluir, cada arquivo novo (um `.env.local`, uma chave) entra na imagem até alguém lembrar de listá-lo. Mais os `COPY` explícitos: duas proteções independentes (o Dockerfile antigo com o `.dockerignore` novo já não leva o `.env`) |
+| **Tag exata + digest** | Uma tag móvel (`node:24-alpine`) muda por baixo sem nenhum commit; o build de amanhã deixa de ser o que foi testado hoje. Num estágio `base`, e não num `ARG`: o hadolint e o Dependabot não leem a tag dentro de `${...}` |
+| **`--omit=optional` também** | O `@prisma/client` declara `prisma` e `typescript` como peers **opcionais**; sendo devDependencies da raiz, o lockfile os marca `devOptional`. Só com `--omit=dev`, 102 pacotes de desenvolvimento (a CLI do Prisma, o Studio, o TypeScript) iam para produção: 605 → 373 MB de `node_modules` |
+| **Código do root, processo do `node` (uid 1000)** | O processo lê o próprio código, mas não o altera: uma invasão da API não persiste nada em `dist/`. Com `COPY --chown=node`, ele poderia |
+| **Sem npm, yarn e corepack no runtime** | O `CMD` é `node`. Saem 6 CVEs (undici e brace-expansion empacotados no npm) e o instalador de pacotes que um invasor usaria. **Não reduz o tamanho:** o `rm` numa camada posterior só esconde os arquivos (*whiteout*); os bytes continuam na camada da imagem base |
+| **`HEALTHCHECK` no *live*, não no *ready*** | O *ready* depende do banco. Com o banco fora, todas as réplicas ficariam *unhealthy* ao mesmo tempo, e um orquestrador que reinicia *unhealthy* derrubaria todas por um problema que não é delas. O teste usa o `fetch` do Node, sem instalar `curl` |
+| **Migração em target separado** | Com várias réplicas, cada uma migraria ao subir (corrida), e a API precisaria de permissão de DDL. Roda uma vez antes do deploy; no Kubernetes, um Job (Módulo 02) |
+| **Uma imagem para todos os processos** | API, relay, consumers e CLIs são o mesmo artefato testado; muda só o comando (`docker run <imagem> node dist/relay`). Um worker roda com `--no-healthcheck` (não escuta a porta 3000) |
+| **`CMD` em forma exec, com `node` direto** | O node é o PID 1 e recebe o SIGTERM, que dispara o graceful shutdown do Módulo 01 (medições abaixo) |
+
+### O PID 1 e o `docker stop`, medido
+
+O `docker stop` manda SIGTERM ao **PID 1** do container e, se ele não sair em 10 s, SIGKILL. Quem é o PID 1 decide
+se o graceful shutdown roda:
+
+| `CMD` | PID 1 | `docker stop` | Exit | Graceful shutdown |
+|---|---|---|---:|:---:|
+| `["node", "dist/main"]` (o adotado) | node | **0,15 s** | 0 | ✅ |
+| `node dist/main` (forma shell, um comando só) | node (o `sh` do Alpine faz `exec`) | 0,16 s | 0 | ✅ |
+| `node dist/main; echo saiu` (o shell continua vivo) | `/bin/sh` | **10,14 s** | **137** (SIGKILL) | ❌ |
+| `["npm", "run", "start:prod"]` | npm | 0,67 s | **1** | ✅ |
+
+O caso que quebra é um **shell que continua vivo** como PID 1: ele não repassa o sinal, e as requisições em andamento
+são cortadas pelo SIGKILL. Com o npm 11, o sinal chega, mas o container sai com **1**: para o orquestrador, todo
+deploy vira um encerramento com falha.
+
+> **Lição de método:** o desenho desta etapa afirmava que "com o npm no meio, o sinal não chega". A medição
+> desmentiu: o npm 11 repassa o SIGTERM. O comentário do Dockerfile foi corrigido para o que foi medido, e a tabela
+> mostra o caso que realmente quebra.
+
+### O smoke test e o job `image`
+
+[`scripts/docker/image-smoke.mjs`](../../scripts/docker/image-smoke.mjs) (`npm run docker:smoke`, o mesmo no CI e na
+máquina) constrói a imagem e, numa rede Docker própria com um Postgres vazio, verifica 7 propriedades: o target
+`migrate` aplica as migrações; a API fica `healthy`; o `/health/ready` responde 200; o uid é 1000; não há escrita em
+`dist/`; não há npm; e o `docker stop` termina com exit 0 em menos de 5 s, com o log da drenagem.
+
+O job `image` do CI roda o hadolint e esse smoke. **Mutação:** sem o `USER node` e com o `CMD` em forma shell
+(`node dist/main; echo saiu`), o smoke falha em 3 verificações: uid 0, escrita em `dist/` e `exit 137, 10.14 s`.
+
+### Como reproduzir
+
+```bash
+npm run docker:smoke                                   # o teste completo (~1 min com cache)
+docker build -t taskflow .                             # a imagem da API
+docker build --target migrate -t taskflow:migrate .    # a imagem da migração
+docker run --rm -e DATABASE_URL=... taskflow:migrate   # aplica as migrações
+docker run --rm --no-healthcheck -e DATABASE_URL=... -e KAFKA_BROKERS=... taskflow node dist/relay
+docker run --rm -i hadolint/hadolint:v2.12.0 < Dockerfile
+```
+
+### Perguntas de entrevista
+
+- **"Por que o seu container não roda como root?"** Porque uma falha na aplicação daria root no container, e um
+  escape do container ficaria mais perto do host. Roda como uid 1000, e o código pertence ao root: o processo nem
+  consegue alterar o próprio código.
+- **"O que acontece no `docker stop`?"** SIGTERM no PID 1 e SIGKILL depois de 10 s. Se o PID 1 for um shell que não
+  repassa o sinal, a aplicação nunca fica sabendo, e as requisições em andamento morrem. Medi: 10,14 s e exit 137.
+- **"Onde rodam as migrações?"** Num passo separado, uma vez antes do deploy, e nunca no boot de cada réplica.
+- **"Liveness ou readiness no healthcheck?"** Liveness: com o banco fora, readiness derrubaria todas as réplicas
+  juntas.
+- **"Como você reduziu a imagem?"** Multi-stage, só dependências de produção, e descobrindo o `devOptional`. E sei que
+  `rm` numa camada posterior não reduz o tamanho, só esconde os arquivos.
+
+---
+
 ## 🔒 Proteção da `main` (Ruleset)
 
 A proteção é um **Ruleset** (*Settings → Rules → Rulesets*), o formato que o GitHub recomenda no lugar da "regra
@@ -183,6 +288,7 @@ Ruleset "main" · enforcement: active · bypass: ninguém · alvo: ~DEFAULT_BRAN
    • Testes de integração (Testcontainers)
    • Testes E2E (Testcontainers)
    • Testes de streaming (Kafka + Postgres, Testcontainers)
+   • Imagem Docker (hadolint e smoke)            (Etapa E.1)
 ```
 
 > ⚠️ **Achado em 10/11/2026:** ao incluir o 4º check, a tela de Branch Protection estava **vazia** e a API respondia
@@ -197,7 +303,7 @@ Ruleset "main" · enforcement: active · bypass: ninguém · alvo: ~DEFAULT_BRAN
 |---|---|
 | Push direto na `main` | ❌ Bloqueado (só via PR) |
 | PR com qualquer job vermelho | ❌ Merge bloqueado |
-| PR com os 4 jobs verdes | ✅ Merge liberado |
+| PR com os 5 jobs verdes | ✅ Merge liberado |
 
 > ⚠️ **Armadilha ao renomear jobs:** o check obrigatório é identificado pelo **nome** do job. Quando o job único
 > `Build & Test` virou três jobs, o check antigo **nunca mais reportaria**, e o PR ficaria travado em
@@ -248,6 +354,11 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 | 7 | `--passWithNoTests` mascarava suíte vazia | A flag aprova até sem nenhum teste | Removida: suíte vazia falha |
 | 8 | Hook de teste estourou 5 s sob carga | `testTimeout` dentro de `projects` é **ignorado** pelo Jest | `jest.setTimeout(60_000)` em [`setup-slow-suites.ts`](../../test/setup-slow-suites.ts), só para integração/E2E |
 | 9 | Docker Desktop caiu rodando todas as suítes localmente | 4+ PostgreSQL de teste + stack de dev esgotaram a memória | `--runInBand` nas suítes com Testcontainers; o CI isola cada suíte numa VM |
+| 10 | O estágio de build da imagem tinha o `.env` (com o `JWT_SECRET`) e o `.git` | Sem `.dockerignore`, o `COPY . .` levava o diretório inteiro | `.dockerignore` como allowlist + `COPY` explícitos (Etapa E.1) |
+| 11 | O `node_modules` do `npm ci` era sobrescrito dentro da imagem | O mesmo `COPY . .` trazia o `node_modules` do host (glibc) para o Alpine (musl) | Idem: o `node_modules` do host não entra no contexto |
+| 12 | A CLI do Prisma e o TypeScript na imagem de produção, mesmo com `--omit=dev` | Peers opcionais de uma dependência de produção, que também são devDependencies, ficam `devOptional` no lockfile | `--omit=dev --omit=optional`; o smoke prova que nada de que a API precisa saiu |
+| 13 | O hadolint acusou DL3006 ("sempre fixe a tag") com a tag fixada | A tag estava num `ARG` (`FROM ${NODE_IMAGE}`), que o lint não resolve | Estágio `base` com a tag escrita uma vez; os outros fazem `FROM base` |
+| 14 | O desenho dizia que "o npm não repassa o SIGTERM" | Suposição antiga, não medida | Medido: o npm 11 repassa (sai com 1); o que quebra é um shell vivo como PID 1 (10,14 s, exit 137). Comentário corrigido |
 
 ---
 
@@ -260,6 +371,8 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 | Um job com unit + integração + E2E | Run #17 | ✅ 1 min 20 s |
 | Três jobs paralelos | PRs #5 e #6 | ✅ todos verdes, com 150 testes por PR |
 | Quatro jobs (+ `streaming`) | Módulo 13.3 | Localmente: suíte de streaming em ~7 s com as imagens em cache |
+| Imagem antes × depois | Etapa E.1 | **1.248 → 707 MB**; CVEs HIGH/CRITICAL (Trivy) **51 → 5** (0 CRITICAL, 0 no Alpine); uid 0 → 1000; Node 20 → 24 |
+| Cinco jobs (+ `image`) | Etapa E.1 | `npm run docker:smoke`: 7 verificações em ~1 min 13 s localmente; `docker stop` em 0,15 s com exit 0 |
 
 ---
 
@@ -267,8 +380,15 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 
 - **CD não implementado:** não há deploy automático. O próximo passo natural é um workflow disparado no merge para a `main` que publica a imagem Docker e faz o deploy (ex.: Render/Fly.io + Neon).
 - **Actions fixadas por tag** (`@v4`), e não por SHA: fixar por hash protege contra uma tag adulterada (*supply chain*).
+- **5 CVEs HIGH na imagem**, todas em dependências de produção (body-parser, multer, effect, deepmerge-ts,
+  systeminformation): atualização de dependências é a próxima etapa (Dependabot e `npm audit`).
+- **O `HEALTHCHECK` da imagem é o da API:** um worker (relay, consumers) roda com `--no-healthcheck`. No Kubernetes,
+  o `HEALTHCHECK` é ignorado e as probes ficam no manifesto (Módulo 02).
+- **A imagem não é publicada:** o job `image` constrói e testa, mas nenhum registry a recebe (próximo passo do CD).
+- **`--omit=optional` é uma aposta conferida:** uma dependência opcional nova de que a API precise sairia da imagem;
+  o smoke pega se ela quebrar o boot, não se quebrar só um caminho raro.
 - **Sem análise de dependências:** Dependabot, CodeQL e `npm audit` no CI cobririam o OWASP A06 (componentes vulneráveis).
-- **Setup repetido nos 4 jobs:** uma *composite action* eliminaria as linhas duplicadas.
+- **Setup repetido nos jobs de teste:** uma *composite action* eliminaria as linhas duplicadas.
 - **`npm ci` baixa o binário da librdkafka do GitHub** (cliente Kafka, Módulo 13): uma dependência de rede a mais em todos os jobs.
 - **Sem cobertura publicada:** o `test:cov` existe, mas o relatório não é exibido no PR.
 
@@ -277,13 +397,14 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 ## ✅ Checklist
 
 - [x] Workflow em push e PR para a `main`
-- [x] Jobs paralelos: qualidade, integração, E2E e streaming (Kafka real, Módulo 13.3)
+- [x] Jobs paralelos: qualidade, integração, E2E, streaming (Kafka real, Módulo 13.3) e imagem (Etapa E.1)
 - [x] Testes com PostgreSQL real no CI (Testcontainers)
 - [x] `permissions` mínimas e cancelamento de runs obsoletos
-- [x] Ruleset na `main`: PR obrigatório, 4 checks, sem bypass, sem force push (verificado pela API do GitHub)
+- [x] Ruleset na `main`: PR obrigatório, 5 checks, sem bypass, sem force push (verificado pela API do GitHub)
 - [x] Badge do CI no README
 - [x] Contrato da API conferido no CI e mudanças incompatíveis bloqueadas sem label (Módulo 14.3)
-- [ ] CD (deploy automatizado)
+- [x] Imagem de produção em Node 24, não-root, com `HEALTHCHECK`, migração separada, e construída e executada no CI (Etapa E.1)
+- [ ] CD (publicar a imagem e fazer o deploy)
 - [ ] Dependabot / CodeQL / actions fixadas por SHA
 
 ---

@@ -58,6 +58,7 @@
     "dynamo:query-gsi": "ts-node scripts/dynamo/queryGsi.ts",
     "events:list": "ts-node scripts/list-events.ts",
     "kafka:smoke": "ts-node scripts/kafka/smoke.ts",
+    "docker:smoke": "node scripts/docker/image-smoke.mjs",
     "openapi:generate": "npm run build && ts-node scripts/openapi/snapshot.ts --write",
     "openapi:check": "npm run build && ts-node scripts/openapi/snapshot.ts --check",
     "openapi:diff": "node scripts/openapi/diff.mjs"

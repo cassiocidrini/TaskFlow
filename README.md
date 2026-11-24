@@ -280,7 +280,7 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 - **Alertas sem roteamento:** 11 regras de alerta testadas no CI disparam no Prometheus, mas sem Alertmanager ninguém é avisado fora dele; os limiares são pontos de partida, não derivados de SLO.
 - **Prazo (expand/contract, Módulo 14.4):** o `dueDate` saiu da API e do banco; continua só no contrato público do tópico (outro ciclo de vida) e nos eventos v1, lidos pelo *upcaster*.
 - **Eventos antigos sem autor:** eventos gravados antes do envelope de metadados aparecem no histórico com `actorId: null`; o autor não é inferido. O metadata ainda não chega ao `EventBus` nem às projeções.
-- **Dockerfile:** usa `node:20` (o projeto exige 24), não roda como usuário não-root e não declara `HEALTHCHECK` (os probes `/health` existem, mas nenhum orquestrador os consome ainda).
+- **Imagem Docker:** construída e testada em todo PR (Node 24, não-root, `HEALTHCHECK`), mas ainda não publicada em registry nem consumida por um orquestrador (Kubernetes no Módulo 02); 5 CVEs HIGH em dependências de produção.
 - **Rate limit em memória:** não é compartilhado entre réplicas (em produção, usaria Redis).
 - **Terraform sem lock do state:** o backend S3 não tem `use_lockfile`; dois `apply` simultâneos poderiam corromper o state.
 - **Strategy de prioridade incompleto:** a estratégia é instanciada no handler (não injetada) e a `DeadlinePriorityStrategy` não é usada.
