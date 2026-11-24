@@ -86,7 +86,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `events/outbox.ts` | `OutboxMapper`, `OutboxMessage`, `RecordedEvent` | Store genérico: quem traduz evento de domínio em contrato público é o módulo dono do agregado |
 | `events/event-metadata.ts` | Tipo do envelope + `toEventMetadata` (zod, leitura) | Evento legado tem `metadata = {}`: campos opcionais na leitura, nunca inventados |
 | `modules/tasks/domain/` | `TaskAggregate`, contrato `TaskRepository` | **Zero imports** de Nest, Prisma ou infra |
-| `modules/tasks/infrastructure/` | `EventSourcedTaskRepository`, `toDomainEvent` | Único cast de leitura do Event Store vive aqui |
+| `modules/tasks/infrastructure/` | `EventSourcedTaskRepository`, `toDomainEvent`, `task-event.upcasters.ts` (Módulo 14.4) | Único cast de leitura do Event Store vive aqui |
 | `modules/tasks/commands/` | Commands, handlers, `TaskCommandRunner` | Handler de ciclo de vida = 1 linha via runner |
 | `modules/tasks/events/` | Eventos de domínio + projeções (`@EventsHandler`) + `task.integration-events.ts` (contrato público do tópico) | Projeções **idempotentes**; contrato de integração mapeado **campo a campo** (nunca `...spread` do payload de domínio) |
 | `modules/projects/` | CRUD de projetos + `assertOwner` | Ponto único de autorização por projeto |
@@ -155,7 +155,7 @@ O `tracing.ts`/`relay-tracing.ts` e o `start-telemetry.ts` só podem importar ar
 
 Os `switch` são exaustivos (`never`) e os `Record` de versão são exaustivos: esquecer as versões dos passos 1 e 6 ou os passos 2, 3 e 6 **não compila**. Os passos 4 e 5 só falham em runtime → cubra com teste.
 
-Mudou o formato de um `XData` já gravado? Incremente a versão em `TASK_EVENT_SCHEMA_VERSIONS` e trate a versão antiga na leitura (*upcaster*): eventos gravados não são reescritos.
+Mudou o formato de um `XData` já gravado? Incremente a versão em `TASK_EVENT_SCHEMA_VERSIONS` e trate a versão antiga na leitura, em `infrastructure/task-event.upcasters.ts` (*upcaster* N → N+1, campo a campo): eventos gravados não são reescritos, e o `toDomainEvent` é o único caminho de leitura (repositório, histórico e replay). Exemplo real: `TaskCreated` v1 `{ dueDate }` → v2 `{ due: { at, timezone: null } }` (Módulo 14.4). Campo que o formato antigo não tinha vira `null`, nunca um palpite.
 
 ### Adicionar um comando de ciclo de vida
 
@@ -186,7 +186,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Publicar no `EventBus` antes de gravar no Event Store (ordem: `assertOwner → save → publish`).
 - ❌ `append` sem o `expectedVersion` lido do agregado.
 - ❌ `actorId` vindo de outro lugar que não o `userId` do JWT do comando; preencher `actorId` de evento legado (`metadata = {}`) por inferência.
-- ❌ Editar ou apagar linhas da tabela `events` (append-only; corrigir = novo evento).
+- ❌ Editar ou apagar linhas da tabela `events` (append-only; corrigir = novo evento). Formato mudou? *Upcaster* na leitura, nunca `UPDATE` no payload.
 - ❌ Publicar no Kafka a partir da API (dual-write): evento de integração vai para a `outbox`, na transação do `appendMany`; quem publica é o relay.
 - ❌ Paralelizar o relay com `FOR UPDATE SKIP LOCKED` ou pular a linha que falha: quebra a ordem por tarefa.
 - ❌ Consumer com efeito fora da transação da marca em `processed_events`, ou commitando o offset antes do efeito (at-most-once).
@@ -198,6 +198,8 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Decidir permissão pela versão ou plataforma do app (`@AppClient()`): o header é do cliente, qualquer um manda `99.0.0`. Serve para compatibilidade e experiência.
 - ❌ Middleware que responde por conta própria registrado com `app.use()`: roda antes do `pino-http` e a resposta não aparece no log de acesso (problema 3 do Módulo 14). Use middleware de módulo.
 - ❌ Ler a política de versão sem cache (uma query por requisição) ou *fail-closed* (bloquear todos os apps se a leitura falhar): o `VersionPolicyService` usa TTL, leitura única e o último valor conhecido.
+- ❌ Mudar um campo da API de uma vez (renomear, trocar o formato): expand/contract (Módulo 14.4). Coluna do read model: nunca `RENAME COLUMN` (a versão anterior da API ainda roda no deploy); adicionar → backfill idempotente → parar de usar → remover.
+- ❌ Devolver a linha do Prisma crua numa resposta: mapeie campo a campo (`toTaskListItem`), senão toda coluna nova vaza para o contrato.
 - ❌ Versão completa (PATCH) ou `userId` como label de métrica; atributo de request com `trace.getActiveSpan()` dentro de middleware (cai no span do middleware): use `currentRequestSpan()`.
 - ❌ Histograma customizado sem buckets explícitos (`advice.explicitBucketBoundaries`): os padrões do OTel são para ms, e o percentil de uma métrica em segundos sai inventado.
 - ❌ DLQ no relay da outbox: decidido contra no Módulo 13.5 (falhas ali são de infraestrutura e atingem todas as mensagens); use o runbook.
@@ -244,7 +246,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · trace pelo SQS/Lambda (o `traceparent` para no consumer) · provedor de push real e registro de dispositivos · *upcasters* de eventos · agregador de logs (Loki) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · roteamento de alertas (Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · trace pelo SQS/Lambda (o `traceparent` para no consumer) · provedor de push real e registro de dispositivos · agregador de logs (Loki) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · roteamento de alertas (Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
 
 ---
 

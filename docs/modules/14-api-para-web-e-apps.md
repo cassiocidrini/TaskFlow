@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
-> **Status:** 🚧 em construção, etapa **14.3 de 14.8** (o contrato da API versionado e vigiado no CI). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **14.4a de 14.8** (expand do `dueDate` → `due { at, timezone }`). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está em "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`src/common/client/`](../../src/common/client/client-info.ts) (headers, parser de versão,
@@ -13,7 +13,9 @@
 > [`version-gate.middleware.ts`](../../src/common/client/version-gate.middleware.ts),
 > [`version-policy.service.ts`](../../src/common/client/version-policy.service.ts) e o comando
 > [`src/app-version.ts`](../../src/app-version.ts) · contrato em [`docs/api/openapi.json`](../api/openapi.json),
-> [`scripts/openapi/`](../../scripts/openapi/snapshot.ts) e [`api-contract.yml`](../../.github/workflows/api-contract.yml)
+> [`scripts/openapi/`](../../scripts/openapi/snapshot.ts) e [`api-contract.yml`](../../.github/workflows/api-contract.yml) ·
+> prazo em [`due.dto.ts`](../../src/modules/tasks/dto/due.dto.ts), [`task-event.upcasters.ts`](../../src/modules/tasks/infrastructure/task-event.upcasters.ts) e
+> [`deprecation.ts`](../../src/common/deprecation/deprecation.ts)
 
 ---
 
@@ -41,7 +43,8 @@ e todos os apps que ainda estão por aí. As perguntas que o módulo responde:
 | **14.1** | Identificação do cliente: `X-Platform` e `X-App-Version` no request, no span, no log e numa métrica com cardinalidade limitada | ✅ |
 | **14.2** | Versão mínima por plataforma, configurável sem deploy (tabela + cache de 30 s + `npm run app-version` com auditoria): `426` + `APP_UPDATE_REQUIRED`; aviso de atualização recomendada | ✅ |
 | **14.3** | Contrato versionado (`docs/api/openapi.json`) conferido no CI, e mudanças **incompatíveis** classificadas pelo oasdiff, liberadas só com a label `breaking-change` | ✅ |
-| 14.4 | Expand/contract real: `dueDate` → `due { at, timezone }`, `Deprecation`/`Sunset`, upcaster do `TaskCreated` | 🔜 |
+| **14.4a** | **Expand** do `dueDate` → `due { at, timezone }`: os dois formatos aceitos e devolvidos, `Deprecation`/`Sunset`, métrica de uso por versão, `TaskCreated` v2 com *upcaster*, read model com expand + backfill | ✅ |
+| 14.4b | **Contract**: versão mínima acima da última que usa `dueDate`, remover o campo e a coluna (label `breaking-change`) | 🔜 |
 | 14.5 | `Idempotency-Key` no `POST /tasks` | 🔜 |
 | 14.6 | Feature flags em módulo próprio (kill switch, allowlist, porcentagem) e `GET /me/features` | 🔜 |
 | 14.7 | Flag `task-list-with-stats` e o critério de avanço em ADR | 🔜 |
@@ -260,6 +263,71 @@ pode devolver um valor que o contrato anterior excluía* (se a lista é feita pa
 novo (compatível), mantém-se o antigo enquanto houver apps que o usam, e remove-se depois que a versão mínima (14.2)
 exclui esses apps. Só esse último passo precisa da label.
 
+### Expand/contract (14.4): mudar um campo sem quebrar quem não atualizou
+
+**Por que mudar.** O `dueDate` é um instante (`2026-12-31T23:59:59Z`) e não diz em que fuso o usuário pensa. Para um
+lembrete de "vence **hoje**", isso importa: 23h em São Paulo já é o dia seguinte em UTC. O formato novo guarda os dois:
+
+```json
+"due": { "at": "2026-12-31T23:59:59-03:00", "timezone": "America/Sao_Paulo" }
+```
+
+A API devolve o `at` em UTC (`2027-01-01T02:59:59.000Z`): o instante mais o fuso reconstroem a hora local. O
+`timezone` é um nome **IANA**, validado pelo `Intl` do Node; um offset (`-03:00`) é recusado, porque muda no horário
+de verão e o nome não. E o `at` precisa ter fuso explícito: `2026-12-31T23:59:59` sem `Z` nem offset é ambíguo.
+
+**Por que não trocar de uma vez.** Os apps instalados mandam e leem `dueDate`. Trocar direto quebraria todos (e o
+check da 14.3 bloquearia o PR). O caminho tem três fases, em PRs e momentos diferentes:
+
+| Fase | O que acontece | Compatível? |
+|---|---|---|
+| **Expand** (14.4a) | A API aceita e devolve OS DOIS formatos; o antigo é marcado como depreciado; mede-se quem ainda o usa | ✅ O oasdiff confirmou: 0 erros, 6 mudanças informativas (`dueDate` depreciado em 3 lugares, `due` novo em 3) |
+| Transição | Os apps novos usam `due`; a métrica de uso do `dueDate` cai, versão por versão | — |
+| **Contract** (14.4b) | Versão mínima acima da última que manda `dueDate`; o campo sai da API e a coluna sai do banco | ❌ Precisa da label `breaking-change` |
+
+**A entrada aceita um OU outro.** O `dueDate` vira `due { at, timezone: null }` na borda (no controller, numa função
+só), e daqui para dentro só existe `due`. Os dois juntos = 400: aceitar os dois exigiria escolher qual vence quando
+divergem, e "aceitar se forem iguais" esconderia um bug no app.
+
+**O fuso do formato antigo é `null`, nunca um palpite.** Inventar `UTC` ou `America/Sao_Paulo` seria gravar como fato
+o que ninguém disse, a mesma regra do `actorId` dos eventos legados (Módulo 05). Quem usar o prazo (o lembrete) trata
+o `null` com o fuso do usuário.
+
+**A saída devolve os dois.** `dueDate` (com `deprecated: true` no OpenAPI) e `due`: o app antigo continua lendo o que
+lia, o novo lê o `due`, inclusive da MESMA tarefa (o E2E cria pelo formato novo e confere o `dueDate` na listagem).
+
+**Sinalizar e medir a depreciação.** Quando a requisição usa o `dueDate`, a resposta traz `Deprecation: @<epoch>`
+(RFC 9745), `Sunset: <data>` (RFC 8594) e `Link` com `rel="deprecation"`, expostos pelo CORS. E conta
+`taskflow_deprecated_field_usage_total{field, platform, app_version}`, com a versão `MAJOR.MINOR` da 14.1 (é o primeiro
+handler a usar o `@AppClient()`). É essa métrica que diz quando o contract é seguro: *"a última versão que manda
+`dueDate` é a 2.13; mínima em 2.14; então remove"*. O limite: dá para medir quem **envia** o campo, não quem **lê**.
+Por isso o critério final é a versão mínima (14.2), e não só a métrica.
+
+**O evento de domínio muda de versão, e os gravados não são reescritos.** O `TaskCreated` passou para o v2 (`due`). O
+Event Store é append-only e o histórico é a fonte da verdade, então os v1 continuam gravados como estão. Quem muda é a
+**leitura**: o [*upcaster*](../../src/modules/tasks/infrastructure/task-event.upcasters.ts), chamado pelo
+`toDomainEvent` (o único caminho de leitura: repositório, histórico e replay), converte o v1 `{ dueDate }` no v2
+`{ due: { at, timezone: null } }` pelo `schemaVersion` do envelope (Módulo 0.2). Evento sem envelope conta como v1.
+Versão MAIS NOVA que o código (um deploy revertido) falha alto, em vez de ser lida adivinhando. O agregado, as
+projeções e o replay só conhecem o v2.
+
+**O banco: nunca `RENAME COLUMN`.** Durante um deploy, a versão anterior da API ainda está no ar e lê a coluna velha.
+O read model segue as mesmas três fases:
+
+1. **expand** (migração): `ADD COLUMN due_at, due_timezone`, aceitando NULL e sem default, o que no Postgres só muda
+   metadados (sem reescrever a tabela nem segurar lock longo). A projeção grava nas colunas novas E na antiga;
+2. **backfill** (migração separada): `UPDATE ... SET due_at = due_date WHERE due_at IS NULL`, sem inventar fuso;
+3. **contract** (14.4b): parar de gravar e remover a `due_date`.
+
+A armadilha do backfill: as migrações rodam **antes** do código novo subir, então durante o deploy a versão anterior
+ainda cria linhas só com `due_date`, depois do backfill. Duas defesas: o backfill é **idempotente** (o contract o
+repete antes de remover a coluna) e, durante a transição, a leitura usa **`due_at ?? due_date`**.
+
+**O contrato público do tópico também faz expand.** O `TaskCreated` de integração ganhou `due` como campo **opcional**
+(compatível: os consumers são leitores tolerantes e ignoram o que não conhecem) e mantém o `dueDate`, derivado do
+`due`. Tirar o `dueDate` do tópico é mudança incompatível de um contrato que outros serviços leem (`eventVersion` 2),
+e fica fora do escopo.
+
 ### Em qual span gravar: o do request, não o ativo
 
 Dentro de um middleware Express, o span **ativo** é o que o `instrumentation-express` abre para o próprio middleware
@@ -305,6 +373,26 @@ Para ver o `check` falhar: mude o `maxLength` de um DTO e rode `npm run openapi:
 uma mudança incompatível: gere uma base com `jq` (ex.: `jq '.components.schemas.CreateTaskDto.required -= ["title"]'
 docs/api/openapi.json > /tmp/base.json`) e rode `npm run openapi:diff -- --base /tmp/base.json`.
 
+### Prazo: expand (14.4a)
+
+```bash
+TOKEN=...; P=<projectId>
+# App antigo: dueDate → 201 com Deprecation, Sunset e Link
+curl -s -D - -o /dev/null -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H 'X-Platform: android' -H 'X-App-Version: 2.13.0' \
+  -d '{"title":"Formato antigo","dueDate":"2026-12-31T23:59:59Z"}' | grep -iE 'deprecation|sunset|link'
+# App novo: due → sem headers de depreciação
+curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"title":"Formato novo","due":{"at":"2026-12-31T23:59:59-03:00","timezone":"America/Sao_Paulo"}}'
+# A listagem devolve os dois; quem ainda usa o antigo, por versão do app:
+curl -s localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" | jq '.items[] | {title, dueDate, due}'
+curl -s localhost:9464/metrics | grep taskflow_deprecated_field_usage_total
+```
+
+- O `TaskCreated` antigo continua v1 no banco (`SELECT payload, metadata FROM events WHERE event_type='TaskCreated'`),
+  e o histórico (`GET .../history`) o devolve já como v2.
+- `npm run openapi:diff`: nenhuma mudança incompatível (a fase expand inteira é compatível).
+
 ### Versão mínima (14.2)
 
 ```bash
@@ -336,6 +424,9 @@ npm run app-version -- --platform android --min none --recommended none         
 | 5 | **(14.3)** O snapshot não podia sair de um teste do Jest | O `ts-jest` não roda o plugin do Swagger, que só existe no `nest build`: o documento sairia sem as propriedades que o plugin infere (o `LoginDto` vazio) | Script que importa o `dist/` (`scripts/openapi/snapshot.ts`), e o `openapi:check` faz o build antes. Experimento: documento completo, sem banco, em ~100 ms |
 | 6 | **(14.3)** O `actionlint` imprimia a ajuda em vez de analisar | `-color=never` não é uma flag válida dele (o certo é `-no-color`) | Os dois workflows passam no `actionlint`, que inclui o `shellcheck` dos passos `run` |
 | 7 | **(14.3)** Com uma base vazia (um `jq` que falhou num experimento), o oasdiff disse "nenhuma mudança incompatível" | Comparar contra nada não encontra nada para quebrar: um falso OK que, no CI, aprovaria qualquer mudança | Os dois (script e workflow) recusam base ou snapshot que não seja JSON com o campo `openapi`. No mesmo passo, o script deixou de usar `process.exit` dentro do `try` (pulava o `finally` e a pasta temporária ficava) |
+| 8 | **(14.4a)** A listagem devolvia a linha do Prisma crua: as colunas novas do expand (`due_at`, `due_timezone`) vazariam como campos soltos no contrato | O handler retornava `findMany()` direto, sem mapeamento. Achado lendo o código antes de mudar o schema | `toTaskListItem()`, campo a campo (como o contrato de integração já fazia); teste de que nenhuma coluna interna aparece na resposta |
+| 9 | **(14.4a)** O backfill rodaria antes do código novo: linhas criadas pela versão anterior da API no meio do deploy ficariam sem `due_at` | Migrações rodam antes do deploy, e a versão anterior ainda escreve só na coluna velha | Backfill idempotente (o contract o repete) e leitura `due_at ?? due_date` durante a transição; testes da idempotência com o SQL da própria migração |
+| 10 | **(14.4a)** Os testes unitários do repositório quebraram com o upcaster | As linhas simuladas não tinham a coluna `metadata`, que o upcaster passou a ler (no banco ela é `NOT NULL DEFAULT '{}'`) | Linhas simuladas realistas (`metadata: {}`, um evento legado) |
 
 ---
 
@@ -391,6 +482,20 @@ npm run app-version -- --platform android --min none --recommended none         
 | `actionlint` nos dois workflows | Sem apontamentos |
 | Testes novos | 5 unitários (ordem estável das chaves, arrays preservados, diferença apontada por linha) |
 
+**14.4a — expand do prazo**
+
+| Experimento | Resultado |
+|---|---|
+| oasdiff contra a `main` | **0 incompatíveis**; `changelog`: `dueDate` depreciado na entrada, na listagem e no histórico; `due` opcional na entrada e novo nas duas respostas |
+| App antigo (`dueDate`) e app novo (`due`), E2E | Antigo: 201 com `Deprecation: @<epoch>`, `Sunset: Mon, 01 Mar 2027 00:00:00 GMT` e `Link`, expostos no CORS; lê `dueDate` e `due` com `timezone: null`. Novo: sem headers; `at` em UTC + o fuso, na listagem e no histórico; o `dueDate` derivado continua lá |
+| 400 | Os dois formatos juntos; `at` sem fuso; offset no lugar do fuso; fuso inexistente |
+| `TaskCreated` v1 gravado no Postgres (com e sem envelope) | Lido pelo repositório como v2 (`timezone: null`); a linha no banco continua v1 |
+| Backfill com o SQL da migração | Copia só as linhas antigas, sem fuso, sem tocar nas novas; a 2ª execução altera **0** linhas |
+| Migração expand | Só `ADD COLUMN` aceitando NULL; aplicada sem drift |
+| **Mutação:** `toDomainEvent` sem o upcaster | 2 testes de integração falham (o evento v1 perde o prazo) |
+| Testes novos | 13 unitários (upcaster, validação, mapeamento da listagem, headers) e 4 de integração (upcaster no banco real, com e sem envelope; backfill e idempotência), 6 E2E; e 9 existentes adaptados ao formato novo |
+| Suítes | 347 unitários · 84 integração · 66 E2E · 13 streaming |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -401,6 +506,7 @@ npm run app-version -- --platform android --min none --recommended none         
 | `correlation.id` no span do middleware | **(14.1)** No span do request, junto com o cliente | Atributo de request tem que estar no span do request |
 | Nenhuma forma de parar uma versão quebrada do app | **(14.2)** Mínima e recomendada por plataforma, mudadas por comando com auditoria e valendo em até 30 s, sem deploy | Uma correção na loja não chega a quem não atualiza; o servidor precisa poder dizer "atualize" |
 | O contrato da API só existia em `/docs`, gerado na hora | **(14.3)** `docs/api/openapi.json` versionado, conferido no CI, e mudanças incompatíveis bloqueadas sem a label `breaking-change` | Mudar o contrato passa a ser uma decisão visível no PR, e não um efeito colateral |
+| Prazo só como instante (`dueDate`), sem o fuso do usuário | **(14.4a)** `due { at, timezone }` ao lado do `dueDate` depreciado, nos dois sentidos; `TaskCreated` v2 com o primeiro *upcaster* do projeto | Lembrete "vence hoje" precisa do fuso; e a mudança mostra o expand/contract inteiro (API, evento, banco, contrato público) |
 | CORS só com `Content-Type`, `Authorization` e `X-Correlation-Id` | **(14.1)** Também `X-Platform` e `X-App-Version` | Sem isso, o preflight barraria o front web que os envia |
 
 ---
@@ -423,6 +529,11 @@ npm run app-version -- --platform android --min none --recommended none         
 - **O oasdiff vê o que o OpenAPI descreve:** uma mudança de comportamento que não aparece no contrato (um campo que
   continua `string` mas muda de formato, uma regra de negócio nova) passa. Para isso, testes de contrato do lado do
   consumidor (*consumer-driven contracts*, como o Pact) seriam o próximo passo.
+- **O `dueDate` continua no contrato público do tópico** (derivado do `due`): tirá-lo é mudança incompatível de um
+  contrato que outros serviços leem (`eventVersion` 2 ou tópico `.v2`), fora do escopo do 14.4b.
+- **O histórico devolve o `data` dos eventos já convertido** (v2): quem lê a linha do tempo vê o `due`, não o `dueDate`
+  que foi gravado. É coerente com o contrato atual; o payload original continua no banco.
+- **Não dá para medir quem LÊ o campo antigo**, só quem o envia. Daí o contract depender da versão mínima.
 - **Política por comando, sem interface:** em produção, uma configuração gerenciada (AWS AppConfig) daria versões,
   rollback e deploy gradual da própria configuração.
 - **Sem link da loja no 426:** o app recebe a `minVersion`, mas a API não sabe se há uma versão na loja que a
@@ -438,7 +549,8 @@ npm run app-version -- --platform android --min none --recommended none         
 - [x] CORS e Swagger com os headers novos (14.1)
 - [x] Versão mínima e recomendada por plataforma, sem deploy, com auditoria, *fail-open* e o 426 no log (14.2)
 - [x] Contrato da API versionado e conferido no CI; mudanças incompatíveis classificadas e liberadas só com label (14.3)
-- [ ] Expand/contract do `dueDate` (14.4)
+- [x] Expand do `dueDate` → `due { at, timezone }`: dois formatos, depreciação sinalizada e medida, *upcaster*, backfill (14.4a)
+- [ ] Contract do `dueDate` (14.4b)
 - [ ] `Idempotency-Key` (14.5)
 - [ ] Feature flags (14.6, 14.7)
 - [ ] Estratégia de versionamento (14.8)
