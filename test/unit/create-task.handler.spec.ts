@@ -12,7 +12,12 @@ import { NotFoundException } from '@nestjs/common';
 import { EventBus } from '@nestjs/cqrs';
 import { CreateTaskHandler } from '../../src/modules/tasks/commands/create-task.handler';
 import { CreateTaskCommand } from '../../src/modules/tasks/commands/create-task.command';
-import { EventStoreService } from '../../src/events/event-store.service';
+import {
+  ConcurrencyConflictError,
+  EventStoreService,
+} from '../../src/events/event-store.service';
+import { IdempotencyKeyReusedError } from '../../src/common/idempotency/idempotency-key';
+import { IdempotencyStore } from '../../src/common/idempotency/idempotency.store';
 import { TaskCreatedEvent } from '../../src/modules/tasks/events/task.events';
 import { ProjectsService } from '../../src/modules/projects/projects.service';
 
@@ -21,6 +26,12 @@ describe('CreateTaskHandler', () => {
   let eventStore: { append: jest.Mock };
   let eventBus: { publish: jest.Mock };
   let projects: { assertOwner: jest.Mock };
+  let idempotency: {
+    find: jest.Mock;
+    replay: jest.Mock;
+    writes: jest.Mock;
+    count: jest.Mock;
+  };
 
   const userId = 'user-dono';
 
@@ -29,6 +40,16 @@ describe('CreateTaskHandler', () => {
     eventStore = { append: jest.fn().mockResolvedValue(undefined) };
     eventBus = { publish: jest.fn() };
     projects = { assertOwner: jest.fn().mockResolvedValue(undefined) };
+    // Por padrão, nenhuma chave registrada; replay devolve a resposta guardada (a regra do 422 é testada no store)
+    idempotency = {
+      find: jest.fn().mockResolvedValue(null),
+      replay: jest.fn((stored: { status: number; body: unknown }) => ({
+        status: stored.status,
+        body: stored.body,
+      })),
+      writes: jest.fn().mockReturnValue(['<insert da chave>']),
+      count: jest.fn(),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -36,6 +57,7 @@ describe('CreateTaskHandler', () => {
         { provide: EventStoreService, useValue: eventStore },
         { provide: EventBus, useValue: eventBus },
         { provide: ProjectsService, useValue: projects },
+        { provide: IdempotencyStore, useValue: idempotency },
       ],
     }).compile();
 
@@ -51,27 +73,34 @@ describe('CreateTaskHandler', () => {
     const command = new CreateTaskCommand(userId, 'p1', 'Minha tarefa', 'u1');
 
     // Act
-    const taskId = await handler.execute(command);
+    const { taskId } = await handler.execute(command);
 
     // Assert
     expect(eventStore.append).toHaveBeenCalledTimes(1);
-    expect(eventStore.append).toHaveBeenCalledWith({
-      aggregateId: taskId,
-      aggregateType: 'Task',
-      eventType: 'TaskCreated',
-      payload: {
-        taskId,
-        projectId: 'p1',
-        title: 'Minha tarefa',
-        assigneeId: 'u1',
-        priority: 'MEDIUM',
+    expect(eventStore.append).toHaveBeenCalledWith(
+      {
+        aggregateId: taskId,
+        aggregateType: 'Task',
+        eventType: 'TaskCreated',
+        payload: {
+          taskId,
+          projectId: 'p1',
+          title: 'Minha tarefa',
+          assigneeId: 'u1',
+          priority: 'MEDIUM',
+        },
+        schemaVersion: 2, // TaskCreated v2 (Módulo 14.4)
       },
-      schemaVersion: 2, // TaskCreated v2 (Módulo 14.4)
-    }, 0, { actorId: userId }, { toOutbox: expect.any(Function) }); // versão 0 (agregado novo); autor = userId do JWT
+      0,
+      { actorId: userId },
+      { toOutbox: expect.any(Function) },
+    ); // versão 0 (agregado novo); autor = userId do JWT
   });
 
   it('deve ligar a outbox: o TaskCreated vira evento de integração no tópico, com chave = taskId', async () => {
-    const taskId = await handler.execute(new CreateTaskCommand(userId, 'p1', 'Minha tarefa'));
+    const { taskId } = await handler.execute(
+      new CreateTaskCommand(userId, 'p1', 'Minha tarefa'),
+    );
 
     // Simula o Event Store chamando o mapper depois de montar o envelope
     const [stored, , , options] = eventStore.append.mock.calls[0];
@@ -86,7 +115,12 @@ describe('CreateTaskHandler', () => {
       topic: 'taskflow.task-events.v1',
       key: taskId,
       eventType: 'TaskCreated',
-      payload: expect.objectContaining({ eventId: 'ev-1', aggregateId: taskId, projectId: 'p1', aggregateVersion: 1 }),
+      payload: expect.objectContaining({
+        eventId: 'ev-1',
+        aggregateId: taskId,
+        projectId: 'p1',
+        aggregateVersion: 1,
+      }),
     });
   });
 
@@ -95,15 +129,14 @@ describe('CreateTaskHandler', () => {
     const command = new CreateTaskCommand(userId, 'p1', 'Minha tarefa');
 
     // Act
-    const taskId = await handler.execute(command);
+    const { taskId } = await handler.execute(command);
 
     // Assert
     expect(eventBus.publish).toHaveBeenCalledTimes(1);
-    expect(eventBus.publish).toHaveBeenCalledWith(
-      expect.any(TaskCreatedEvent),
-    );
+    expect(eventBus.publish).toHaveBeenCalledWith(expect.any(TaskCreatedEvent));
 
-    const publishedEvent = eventBus.publish.mock.calls[0][0] as TaskCreatedEvent;
+    const publishedEvent = eventBus.publish.mock
+      .calls[0][0] as TaskCreatedEvent;
     expect(publishedEvent.taskId).toBe(taskId);
     expect(publishedEvent.projectId).toBe('p1');
     expect(publishedEvent.title).toBe('Minha tarefa');
@@ -114,8 +147,8 @@ describe('CreateTaskHandler', () => {
     const command = new CreateTaskCommand(userId, 'p1', 'Tarefa');
 
     // Act
-    const taskId1 = await handler.execute(command);
-    const taskId2 = await handler.execute(command);
+    const { taskId: taskId1 } = await handler.execute(command);
+    const { taskId: taskId2 } = await handler.execute(command);
 
     // Assert
     expect(taskId1).not.toBe(taskId2);
@@ -158,7 +191,7 @@ describe('CreateTaskHandler', () => {
     const command = new CreateTaskCommand(userId, 'p1', 'Tarefa sem assignee');
 
     // Act
-    const taskId = await handler.execute(command);
+    const { taskId } = await handler.execute(command);
 
     // Assert
     const appendCall = eventStore.append.mock.calls[0][0];
@@ -171,27 +204,48 @@ describe('CreateTaskHandler', () => {
   // ============================================================
   describe('priority e prazo (due)', () => {
     // Entrada com offset -03:00: o evento guarda o instante em UTC + o fuso (Módulo 14.4)
-    const due = { at: new Date('2026-12-31T23:59:59-03:00'), timezone: 'America/Sao_Paulo' };
+    const due = {
+      at: new Date('2026-12-31T23:59:59-03:00'),
+      timezone: 'America/Sao_Paulo',
+    };
 
     it('deve gravar o prazo como { at em UTC, timezone } no payload v2 do Event Store', async () => {
-      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa', undefined, due));
+      await handler.execute(
+        new CreateTaskCommand(userId, 'p1', 'Tarefa', undefined, due),
+      );
 
       const [stored] = eventStore.append.mock.calls[0];
-      expect(stored.payload.due).toEqual({ at: '2027-01-01T02:59:59.000Z', timezone: 'America/Sao_Paulo' });
+      expect(stored.payload.due).toEqual({
+        at: '2027-01-01T02:59:59.000Z',
+        timezone: 'America/Sao_Paulo',
+      });
       expect(stored.payload).not.toHaveProperty('dueDate'); // o formato antigo não é mais gravado
       expect(stored.schemaVersion).toBe(2);
     });
 
     it('deve publicar priority e due no TaskCreatedEvent (chegam ao Read Model)', async () => {
-      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Corrigir bug urgente', undefined, due));
+      await handler.execute(
+        new CreateTaskCommand(
+          userId,
+          'p1',
+          'Corrigir bug urgente',
+          undefined,
+          due,
+        ),
+      );
 
       const published = eventBus.publish.mock.calls[0][0] as TaskCreatedEvent;
       expect(published.priority).toBe('HIGH'); // "bug" e "urgente" → KeywordPriorityStrategy
-      expect(published.due).toEqual({ at: '2027-01-01T02:59:59.000Z', timezone: 'America/Sao_Paulo' });
+      expect(published.due).toEqual({
+        at: '2027-01-01T02:59:59.000Z',
+        timezone: 'America/Sao_Paulo',
+      });
     });
 
     it('evento GRAVADO e evento PUBLICADO devem carregar exatamente os mesmos dados', async () => {
-      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Tarefa', 'u1', due));
+      await handler.execute(
+        new CreateTaskCommand(userId, 'p1', 'Tarefa', 'u1', due),
+      );
 
       const [stored] = eventStore.append.mock.calls[0];
       const published = eventBus.publish.mock.calls[0][0] as TaskCreatedEvent;
@@ -225,7 +279,9 @@ describe('CreateTaskHandler', () => {
     });
 
     it('NÃO deve gravar nem publicar nada se o projeto não for do usuário', async () => {
-      projects.assertOwner.mockRejectedValue(new NotFoundException('Projeto não encontrado'));
+      projects.assertOwner.mockRejectedValue(
+        new NotFoundException('Projeto não encontrado'),
+      );
 
       await expect(
         handler.execute(new CreateTaskCommand('intruso', 'p1', 'Tarefa')),
@@ -233,6 +289,99 @@ describe('CreateTaskHandler', () => {
 
       expect(eventStore.append).not.toHaveBeenCalled();
       expect(eventBus.publish).not.toHaveBeenCalled();
+    });
+  });
+
+  // ============================================================
+  // Idempotency-Key (Módulo 14.5)
+  // ============================================================
+  describe('Idempotency-Key', () => {
+    const withKey = () =>
+      new CreateTaskCommand(
+        userId,
+        'p1',
+        'Pagar boleto',
+        undefined,
+        undefined,
+        { key: 'k-1', requestHash: 'h-1' },
+      );
+    const stored = {
+      status: 201,
+      body: { taskId: 'tarefa-original' },
+      requestHash: 'h-1',
+    };
+
+    it('chave nova: a chave vai NA MESMA transação do evento (alsoWrite), e a resposta é a da criação', async () => {
+      const result = await handler.execute(withKey());
+
+      expect(idempotency.writes).toHaveBeenCalledWith(
+        { userId, key: 'k-1', requestHash: 'h-1' },
+        { status: 201, body: { taskId: result.taskId } },
+      );
+      const [, , , options] = eventStore.append.mock.calls[0];
+      expect(options.alsoWrite).toEqual(['<insert da chave>']);
+      expect(result.replayed).toBe(false);
+      expect(idempotency.count).toHaveBeenCalledWith('created');
+    });
+
+    it('chave já usada: devolve a resposta guardada, SEM gravar nem publicar nada', async () => {
+      idempotency.find.mockResolvedValue(stored);
+
+      const result = await handler.execute(withKey());
+
+      expect(result).toEqual({ taskId: 'tarefa-original', replayed: true });
+      expect(eventStore.append).not.toHaveBeenCalled();
+      expect(eventBus.publish).not.toHaveBeenCalled();
+    });
+
+    it('chave de outro pedido: o 422 do store sobe, sem gravar nada', async () => {
+      idempotency.find.mockResolvedValue({ ...stored, requestHash: 'outro' });
+      idempotency.replay.mockImplementation(() => {
+        throw new IdempotencyKeyReusedError();
+      });
+
+      await expect(handler.execute(withKey())).rejects.toBeInstanceOf(
+        IdempotencyKeyReusedError,
+      );
+      expect(eventStore.append).not.toHaveBeenCalled();
+    });
+
+    it('duas tentativas simultâneas: a que perdeu a chave primária devolve a resposta da vencedora, sem publicar', async () => {
+      idempotency.find
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(stored); // antes do append / depois do conflito
+      eventStore.append.mockRejectedValue(new ConcurrencyConflictError());
+
+      const result = await handler.execute(withKey());
+
+      expect(result).toEqual({ taskId: 'tarefa-original', replayed: true });
+      expect(eventBus.publish).not.toHaveBeenCalled(); // a transação desta foi desfeita: o evento dela não existe
+    });
+
+    it('conflito SEM chave registrada (conflito de versão de verdade): o erro sobe', async () => {
+      eventStore.append.mockRejectedValue(new ConcurrencyConflictError());
+
+      await expect(handler.execute(withKey())).rejects.toBeInstanceOf(
+        ConcurrencyConflictError,
+      );
+    });
+
+    it('sem chave: nada de idempotência (nem busca, nem escrita extra)', async () => {
+      await handler.execute(new CreateTaskCommand(userId, 'p1', 'Sem chave'));
+
+      expect(idempotency.find).not.toHaveBeenCalled();
+      const [, , , options] = eventStore.append.mock.calls[0];
+      expect(options.alsoWrite).toBeUndefined();
+    });
+
+    it('autorização ANTES da chave: projeto de outro usuário dá 404 mesmo com uma chave já usada', async () => {
+      projects.assertOwner.mockRejectedValue(new NotFoundException());
+      idempotency.find.mockResolvedValue(stored);
+
+      await expect(handler.execute(withKey())).rejects.toBeInstanceOf(
+        NotFoundException,
+      );
+      expect(idempotency.find).not.toHaveBeenCalled();
     });
   });
 });

@@ -95,6 +95,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `common/client/` | `X-Platform` + `X-App-Version` (Módulo 14.1): `app-version.ts` (parse e comparação numérica), `resolveClientInfo`, `createClientInfoMiddleware()` (2º middleware: request, span do request, métrica `taskflow_app_requests_total`) e `@AppClient()` | Header inválido nunca vira 400; versão é compatibilidade, **nunca** autorização; métrica só com `MAJOR.MINOR` limitado |
 | `common/client/version-*` + `src/app-version.ts` + `app-version-policy/` | Versão mínima (14.2): `evaluateClient` (pura), `VersionPolicyService` (cache com TTL, leitura única, *fail-open* com o último valor), `VersionGateMiddleware` (426 / `X-App-Update`), comando `npm run app-version` com auditoria em `app_version_policy_changes` | O gate é middleware de **módulo** (depois do `pino-http`, antes dos guards), nunca `app.use()`; quem não se identifica passa; mudar a política só pelo comando (valida e audita) |
 | `common/telemetry/request-span.ts` | `currentRequestSpan()`: o span HTTP do request (do `rpcMetadata`), não o ativo | Atributo de request gravado em middleware vai por aqui: o span ativo ali é o do próprio middleware |
+| `common/idempotency/` | `Idempotency-Key` (14.5, ADR-0009): validação do header, `requestHash` (SHA-256, serialização estável de `common/json/`), `IdempotencyStore` (busca, 422, `writes()` para o `alsoWrite`) e a limpeza a cada hora | A chave vai NA transação do efeito (`alsoWrite` do Event Store), nunca reservada antes nem marcada depois; chave por usuário; só sucesso é guardado; autorização antes da busca |
 | `common/telemetry/route-telemetry.guard.ts` | Preenche `http.route` (span e métrica); **1º `APP_GUARD`** | Não é controle de acesso (sempre `true`); grava o padrão da rota, nunca a URL |
 | `health/` | `/health/live`, `/health/ready`, `ShutdownState` (drenagem) | Liveness **nunca** consulta dependências; readiness não expõe detalhe de infraestrutura |
 | `common/lifecycle/` | Encerramento do OTel pelo ciclo de vida do Nest; `armShutdownWatchdog` (API e relay) | `telemetry-registry.ts` não pode ter imports (é carregado pelo `tracing.ts`, antes de tudo) |
@@ -157,6 +158,13 @@ Os `switch` são exaustivos (`never`) e os `Record` de versão são exaustivos: 
 
 Mudou o formato de um `XData` já gravado? Incremente a versão em `TASK_EVENT_SCHEMA_VERSIONS` e trate a versão antiga na leitura, em `infrastructure/task-event.upcasters.ts` (*upcaster* N → N+1, campo a campo): eventos gravados não são reescritos, e o `toDomainEvent` é o único caminho de leitura (repositório, histórico e replay). Exemplo real: `TaskCreated` v1 `{ dueDate }` → v2 `{ due: { at, timezone: null } }` (Módulo 14.4). Campo que o formato antigo não tinha vira `null`, nunca um palpite.
 
+### Dar `Idempotency-Key` a outro endpoint de criação (Módulo 14.5)
+
+1. Controller: `parseIdempotencyKey(header)` (400 se inválida) e `requestHash(método, rota com os ids, body)`; passe `{ key, requestHash }` no comando.
+2. Handler, DEPOIS da autorização: `find` → se existe, `replay` (mesma resposta ou 422). Senão, grave o efeito com `alsoWrite: store.writes(request, resposta)` na MESMA transação.
+3. No conflito da chave primária (`ConcurrencyConflictError` no Event Store), `find` de novo e devolva a resposta da vencedora.
+4. Devolva `{ ..., replayed }` e ponha `Idempotent-Replayed: true` na resposta repetida. Tipo explícito no controller: o `CommandBus` devolve `any`.
+
 ### Adicionar um comando de ciclo de vida
 
 Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runner.run(target, (task) => task.metodo(valor))` → rota no `TasksController` com `UUID_V4` nos params e `userId` vindo de `@CurrentUser()`.
@@ -196,6 +204,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Gravar na outbox fora do `appendMany`/replay sem `lockAggregateForOutbox`; consumer group novo sem decidir `acceptsReplay` (efeito colateral = `false`).
 - ❌ Redrive sem política declarada em `redrive-policy.ts`, ou para projeção com guarda de versão (o `reports`): a mensagem reenviada cairia como duplicata; o caminho é a reconstrução.
 - ❌ `PROCESSED_EVENTS_RETENTION_DAYS` menor ou igual à retenção do tópico (o schema recusa; se a retenção do tópico mudar, mude o mínimo junto).
+- ❌ Idempotência com reserva separada do efeito ("reservar → executar → marcar") ou num cache externo: é dual-write. A chave vai na transação do efeito (ADR-0009). Chave global (não por usuário) vaza a resposta de outro usuário.
 - ❌ Decidir permissão pela versão ou plataforma do app (`@AppClient()`): o header é do cliente, qualquer um manda `99.0.0`. Serve para compatibilidade e experiência.
 - ❌ Middleware que responde por conta própria registrado com `app.use()`: roda antes do `pino-http` e a resposta não aparece no log de acesso (problema 3 do Módulo 14). Use middleware de módulo.
 - ❌ Ler a política de versão sem cache (uma query por requisição) ou *fail-closed* (bloquear todos os apps se a leitura falhar): o `VersionPolicyService` usa TTL, leitura única e o último valor conhecido.

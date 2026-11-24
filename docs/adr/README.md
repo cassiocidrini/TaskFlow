@@ -14,6 +14,7 @@ funciona; os ADRs registram **por que** ela é assim e **quando** a decisão dei
 | [0006](0006-retry-classificado-e-dlt-por-grupo.md) | Retry classificado e DLT por consumer group; sem DLQ no relay | Aceito | 13.5 · 13.6c |
 | [0007](0007-kafka-para-fatos-sqs-para-trabalho.md) | Kafka para fatos, SQS para trabalho (envio dentro da transação) | Aceito | 13.7 |
 | [0008](0008-depreciacao-e-remocao-de-campos-da-api.md) | Depreciação e remoção de campos da API (expand → contract em dois deploys) | Aceito | 14.4 |
+| [0009](0009-idempotencia-de-requisicoes-na-transacao-do-efeito.md) | Idempotência de requisições (`Idempotency-Key`) na mesma transação do efeito | Aceito | 14.5 |
 
 ## Formato
 

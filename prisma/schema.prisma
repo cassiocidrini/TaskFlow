@@ -297,3 +297,23 @@ enum AppPlatform {
   android
   web
 }
+
+// Módulo 14.5: `Idempotency-Key` do `POST /tasks`. Gravada na MESMA transação do evento que a requisição criou: ou a
+// tarefa existe e a chave está registrada, ou nenhuma das duas (sem estado "em andamento" nem reserva presa).
+// Chave por usuário (PK composta): a mesma chave de dois usuários são duas chaves, e ninguém lê a resposta guardada
+// de outro. Sem FK para `User`: a chave expira (24 h) e não faz parte do modelo de domínio.
+model IdempotencyKey {
+  userId         String   @map("user_id")
+  key            String
+  // SHA-256 do método + rota + corpo (serialização estável): "mesma chave, pedido diferente" = 422
+  requestHash    String   @map("request_hash")
+  // A resposta da 1ª execução, repetida nas tentativas seguintes
+  responseStatus Int      @map("response_status")
+  responseBody   Json     @map("response_body")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@id([userId, key])
+  // Limpeza por data (job periódico) e o filtro de validade na leitura
+  @@index([createdAt])
+  @@map("idempotency_keys")
+}

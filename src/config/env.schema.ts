@@ -51,6 +51,10 @@ export const envSchema = z.object({
   // 0 = sem cache (só nos testes E2E, que mudam a política e precisam ver o efeito na hora).
   APP_VERSION_POLICY_CACHE_TTL_MS: z.coerce.number().int().min(0).max(600_000).default(30_000),
 
+  // Validade da Idempotency-Key do POST /tasks (Módulo 14.5): dentro dela, a mesma chave devolve a mesma resposta.
+  // 24 h é o padrão de mercado (Stripe): cobre as novas tentativas de um app que ficou sem rede por horas.
+  IDEMPOTENCY_KEY_TTL_HOURS: z.coerce.number().int().min(1).max(720).default(24),
+
   DISABLE_THROTTLE: z
     .enum(['true', 'false'])
     .default('false')

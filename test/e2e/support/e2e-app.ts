@@ -79,7 +79,7 @@ export async function startE2EApp(): Promise<E2EContext> {
 export async function resetDatabase(prisma: PrismaClient): Promise<void> {
   // String constante (sem interpolação de entrada) — o "Unsafe" aqui não abre brecha de SQL injection
   await prisma.$executeRawUnsafe(
-    'TRUNCATE TABLE "tasks_read", "events", "outbox", "notifications", "notification_tasks", "processed_events", "report_tasks", "project_stats", "app_version_policies", "app_version_policy_changes", "Task", "Project", "User" RESTART IDENTITY CASCADE',
+    'TRUNCATE TABLE "tasks_read", "events", "outbox", "notifications", "notification_tasks", "processed_events", "report_tasks", "project_stats", "app_version_policies", "app_version_policy_changes", "idempotency_keys", "Task", "Project", "User" RESTART IDENTITY CASCADE',
   );
 }
 

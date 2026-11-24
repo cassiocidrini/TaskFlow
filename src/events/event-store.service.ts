@@ -34,6 +34,12 @@ export interface AppendContext {
  */
 export interface AppendOptions {
   toOutbox?: OutboxMapper;
+  /**
+   * Escritas extras na MESMA transação dos eventos (Módulo 14.5: a chave de idempotência do `POST /tasks`). Genérico de
+   * propósito: o Event Store não sabe o que elas são, só garante que vão juntas com os eventos ou não vão. Comandos do
+   * Prisma ainda não executados (`PrismaPromise`), do mesmo client, porque a transação é em lote.
+   */
+  alsoWrite?: Prisma.PrismaPromise<unknown>[];
 }
 
 /** Resultado de uma gravação: a nova versão do agregado e o envelope de cada evento, na ordem recebida. */
@@ -158,8 +164,9 @@ export class EventStoreService {
       })),
     });
 
+    const alsoWrite = options.alsoWrite ?? [];
     try {
-      if (outbox.length === 0) {
+      if (outbox.length === 0 && alsoWrite.length === 0) {
         await insertEvents;
       } else {
         // Transação em lote (array), e não interativa: não há leitura entre as escritas. Conflito de versão no
@@ -179,6 +186,7 @@ export class EventStoreService {
               createdAt: recordedAt,
             })),
           }),
+          ...alsoWrite,
         ]);
       }
     } catch (error) {

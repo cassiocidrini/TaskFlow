@@ -27,5 +27,13 @@ export class CreateTaskCommand {
     public readonly title: string,
     public readonly assigneeId?: string,
     public readonly due?: DueInput,
+    /** `Idempotency-Key` já validada e o hash do pedido (Módulo 14.5); ausente quando o cliente não a mandou. */
+    public readonly idempotency?: { key: string; requestHash: string },
   ) {}
+}
+
+/** O que a criação devolve ao controller: o id e se a resposta é a REPETIÇÃO de uma criação anterior (14.5). */
+export interface CreateTaskResult {
+  taskId: string;
+  replayed: boolean;
 }

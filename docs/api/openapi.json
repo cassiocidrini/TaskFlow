@@ -2104,7 +2104,7 @@
         ]
       },
       "post": {
-        "description": "Grava o evento `TaskCreated` no Event Store. A prioridade é calculada pelo servidor a partir do título. A tarefa aparece na listagem após a projeção (consistência eventual, normalmente milissegundos). Prazo: `due { at, timezone }` (o `dueDate` antigo foi removido e responde 400).",
+        "description": "Grava o evento `TaskCreated` no Event Store. A prioridade é calculada pelo servidor a partir do título. A tarefa aparece na listagem após a projeção (consistência eventual, normalmente milissegundos). Prazo: `due { at, timezone }` (o `dueDate` antigo foi removido e responde 400). **Repetir com segurança:** envie `Idempotency-Key` (um UUID por intenção, o mesmo em toda nova tentativa). A mesma chave com o mesmo pedido devolve a MESMA resposta (o mesmo `taskId`), sem criar outra tarefa, com `Idempotent-Replayed: true`; com um pedido diferente, 422. Validade: 24 h.",
         "operationId": "TasksController_create",
         "parameters": [
           {
@@ -2114,6 +2114,17 @@
             "required": true,
             "schema": {
               "example": "bab4a090-6a9f-41eb-b3f6-b0302ee4cf87",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Chave de idempotência (1 a 255 caracteres ASCII visíveis; recomendado: UUID v4). Inválida: 400. Por usuário.",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "maxLength": 255,
+              "pattern": "^[\\x21-\\x7E]{1,255}$",
               "type": "string"
             }
           },
@@ -2172,7 +2183,18 @@
                 }
               }
             },
-            "description": "Tarefa criada."
+            "description": "Tarefa criada, ou a resposta da criação anterior com a mesma `Idempotency-Key`.",
+            "headers": {
+              "Idempotent-Replayed": {
+                "description": "`true` quando a resposta é a repetição de uma criação anterior com a mesma chave",
+                "schema": {
+                  "enum": [
+                    "true"
+                  ],
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "description": "Entrada inválida: ID que não é UUID v4, body fora do contrato ou campo não permitido."
@@ -2182,6 +2204,9 @@
           },
           "404": {
             "description": "Projeto ou tarefa inexistente **ou de outro usuário** (anti-enumeração, anti-IDOR)."
+          },
+          "422": {
+            "description": "`code: IDEMPOTENCY_KEY_REUSED`: a mesma `Idempotency-Key` já foi usada num pedido diferente."
           },
           "426": {
             "description": "Versão do app abaixo da mínima da plataforma (`code: \"APP_UPDATE_REQUIRED\"`, com `platform` e `minVersion`). Só para quem envia `X-Platform` e `X-App-Version`."

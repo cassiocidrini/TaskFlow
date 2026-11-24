@@ -3,6 +3,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -10,14 +11,22 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { CommandBus, QueryBus } from '@nestjs/cqrs';
-import { ApiBearerAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiHeader, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CursorPaginationDto } from '../../common/dto/pagination.dto';
+import {
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENT_REPLAYED_HEADER,
+  parseIdempotencyKey,
+  requestHash,
+} from '../../common/idempotency/idempotency-key';
 import { CurrentUser, type AuthenticatedUser } from '../auth/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { CreateTaskCommand, type DueInput } from './commands/create-task.command';
+import { CreateTaskCommand, type CreateTaskResult, type DueInput } from './commands/create-task.command';
 import type { TaskSnapshot } from './commands/task-command.runner';
 import {
   AssignTaskCommand,
@@ -85,20 +94,54 @@ export class TasksController {
     description:
       'Grava o evento `TaskCreated` no Event Store. A prioridade é calculada pelo servidor a partir do título. ' +
       'A tarefa aparece na listagem após a projeção (consistência eventual, normalmente milissegundos). ' +
-      'Prazo: `due { at, timezone }` (o `dueDate` antigo foi removido e responde 400).',
+      'Prazo: `due { at, timezone }` (o `dueDate` antigo foi removido e responde 400). ' +
+      '**Repetir com segurança:** envie `Idempotency-Key` (um UUID por intenção, o mesmo em toda nova tentativa). ' +
+      'A mesma chave com o mesmo pedido devolve a MESMA resposta (o mesmo `taskId`), sem criar outra tarefa, com ' +
+      '`Idempotent-Replayed: true`; com um pedido diferente, 422. Validade: 24 h.',
   })
   @ProjectIdParam()
-  @ApiResponse({ status: 201, description: 'Tarefa criada.', type: CreateTaskResponseDto })
+  @ApiHeader({
+    name: IDEMPOTENCY_KEY_HEADER,
+    required: false,
+    description:
+      'Chave de idempotência (1 a 255 caracteres ASCII visíveis; recomendado: UUID v4). Inválida: 400. Por usuário.',
+    schema: { type: 'string', maxLength: 255, pattern: '^[\\x21-\\x7E]{1,255}$' },
+  })
+  @ApiResponse({
+    status: 201,
+    description: 'Tarefa criada, ou a resposta da criação anterior com a mesma `Idempotency-Key`.',
+    type: CreateTaskResponseDto,
+    headers: {
+      [IDEMPOTENT_REPLAYED_HEADER]: {
+        description: '`true` quando a resposta é a repetição de uma criação anterior com a mesma chave',
+        schema: { type: 'string', enum: ['true'] },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 422,
+    description: '`code: IDEMPOTENCY_KEY_REUSED`: a mesma `Idempotency-Key` já foi usada num pedido diferente.',
+  })
   @CommonTaskErrors()
   async create(
     @Param('projectId', UUID_V4) projectId: string,
     @Body() body: CreateTaskDto,
     @CurrentUser() user: AuthenticatedUser,
+    @Headers('idempotency-key') rawKey: string | undefined,
+    @Res({ passthrough: true }) res: Response, // passthrough: o Nest continua serializando o retorno
   ) {
-    const taskId = await this.commandBus.execute(
-      new CreateTaskCommand(user.userId, projectId, body.title, body.assigneeId, toDueInput(body)),
+    const key = parseIdempotencyKey(rawKey);
+    // "O mesmo pedido" = método + rota + corpo já validado (serialização estável: a ordem das chaves não importa)
+    const idempotency = key
+      ? { key, requestHash: requestHash('POST', `/projects/${projectId}/tasks`, body) }
+      : undefined;
+
+    // O CommandBus devolve `any`: o tipo explícito aqui é o que impede devolver o objeto inteiro como `taskId`
+    const result: CreateTaskResult = await this.commandBus.execute(
+      new CreateTaskCommand(user.userId, projectId, body.title, body.assigneeId, toDueInput(body), idempotency),
     );
-    return { taskId };
+    if (result.replayed) res.setHeader(IDEMPOTENT_REPLAYED_HEADER, 'true');
+    return { taskId: result.taskId };
   }
 
   @Get()
