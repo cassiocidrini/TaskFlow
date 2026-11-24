@@ -1,0 +1,19 @@
+# Contexto de build da imagem (Etapa E.1, Módulo 03): ALLOWLIST, não denylist.
+#
+# Tudo fica de fora, e só entra o que o build precisa. Numa lista do que excluir, cada arquivo novo do repositório
+# (um .env.local, uma chave, um dump) entraria na imagem até alguém lembrar de listá-lo. Sem este arquivo, o
+# `COPY . .` levava para o estágio de build o .env com o JWT_SECRET, o .git inteiro e o node_modules do host
+# (que sobrescrevia o do `npm ci`, com binários compilados para outra libc).
+*
+
+!package.json
+!package-lock.json
+!nest-cli.json
+!tsconfig.json
+!tsconfig.build.json
+!prisma.config.ts
+!prisma/
+!src/
+
+# Testes ao lado do código não vão para a imagem (o tsconfig.build.json já os exclui da compilação)
+**/*.spec.ts

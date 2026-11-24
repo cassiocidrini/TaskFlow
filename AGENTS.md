@@ -124,7 +124,8 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `lambdas/push-sender/` | Lambda do push (Módulo 13.7), deployable próprio: `batch-processor.ts` (`batchItemFailures`), `idempotency.ts` (reserva condicional no DynamoDB), `push-request.ts` (contrato próprio, sem zod), `handler.ts` (só monta dependências) | Só o `@aws-sdk/client-dynamodb` (vem no runtime): dependência nova exige bundler; lógica testável sem AWS em `test/unit/push-sender.spec.ts`; nunca importar de `src/` |
 | `terraform/push.tf` | Fila `taskflow-push` + DLQ, tabela de idempotência com TTL, Lambda (`nodejs22.x`) e event source mapping | Tempos amarrados: timeout da Lambda < `LEASE_SECONDS` < visibility timeout; `ReportBatchItemFailures` obrigatório; IAM só nos ARNs desta fila e tabela |
 | `docs/api/openapi.json` + `scripts/openapi/` | Contrato da API versionado (14.3): `snapshot.ts` gera do **`dist/`** (o plugin do Swagger só roda no `nest build`) com chaves ordenadas; `diff.mjs` roda o oasdiff; workflow `api-contract.yml` | Nunca editar o JSON à mão (é gerado); `buildOpenApiDocument` é a fonte única do `/docs` e do snapshot |
-| `scripts/` | Ferramentas de dev rodadas com `ts-node`: `list-events.ts`, `dynamo/` (lab do Módulo 4), `kafka/smoke.ts` (Módulo 13) | Script novo de dev entra aqui, **nunca** em `src/` |
+| `Dockerfile` + `.dockerignore` + `scripts/docker/image-smoke.mjs` | Imagem de produção (Etapa E.1, Módulo 03): estágios `deps` → `build` → `prod-deps` → `runtime`, e o target `migrate`; uma imagem para todos os processos (o comando muda). `npm run docker:smoke` = job `image` do CI | `.dockerignore` é **allowlist** (arquivo novo que a imagem precise: `!caminho`); base por tag exata + digest no estágio `base`; runtime como `USER node`, código do root, sem npm; `CMD` em forma exec com `node` (nunca um shell vivo como PID 1); migração nunca no boot da API; `HEALTHCHECK` só no *live* |
+| `scripts/` | Ferramentas de dev (`.ts` com `ts-node`; `.mjs` com `node`, sem dependências): `list-events.ts`, `dynamo/` (lab do Módulo 4), `kafka/smoke.ts` (Módulo 13), `docker/image-smoke.mjs` (Etapa E.1) | Script novo de dev entra aqui, **nunca** em `src/` |
 | `load/k6/`, `load/autocannon/` | Testes de carga da API (Módulo 10) | Medem a API rodando; não são testes do Jest |
 | `labs/node-internals/` | Experimentos do runtime (Módulo 11) | Arquivos gerados (`*.txt`, ~100 MB) são ignorados pelo Git |
 
@@ -264,7 +265,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · trace pelo SQS/Lambda (o `traceparent` para no consumer) · provedor de push real e registro de dispositivos · agregador de logs (Loki) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes, `HEALTHCHECK` no Dockerfile) · roteamento de alertas (Alertmanager) · Dockerfile em `node:24` e não-root · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · trace pelo SQS/Lambda (o `traceparent` para no consumer) · provedor de push real e registro de dispositivos · agregador de logs (Loki) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes; o `HEALTHCHECK` da imagem existe) · roteamento de alertas (Alertmanager) · publicação da imagem em registry (CD) · rate limit distribuído (Redis).
 
 ---
 

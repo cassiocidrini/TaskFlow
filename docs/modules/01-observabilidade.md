@@ -576,7 +576,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 
 ## 🚧 Limitações e próximos passos
 
-- **Probes ainda sem consumidor:** não há manifesto Kubernetes nem `HEALTHCHECK` no Dockerfile. Os probes existem e foram testados, mas nada os chama automaticamente (Módulo 02 e a troca do Dockerfile para `node:24` não-root).
+- **Probes com consumo parcial:** o `HEALTHCHECK` da imagem chama o `/health/live` (Módulo 03, Etapa E.1), mas o `/health/ready` e o graceful shutdown só ganham um consumidor de verdade com o manifesto Kubernetes (Módulo 02).
 - **Coleta de logs:** os logs saem em JSON no stdout, mas nenhum agregador os coleta localmente (ex.: Loki + Promtail no compose). Hoje se lê com `docker logs`/terminal.
 - **`correlationId` fora do HTTP:** um log emitido fora de uma requisição (boot, script) sai sem `correlationId`, e um evento gravado fora dela fica sem o campo no envelope.
 - **Alertas sem roteamento:** as regras existem e são testadas (Módulo 13.6d), mas sem Alertmanager: disparam em `/alerts` do Prometheus e ninguém é avisado fora dele. O próximo passo é o Alertmanager com roteamento por `severity` (critical → plantão, warning → canal), e silêncio durante deploy.
