@@ -10,15 +10,10 @@ import {
   Patch,
   Post,
   Query,
-  Res,
   UseGuards,
 } from '@nestjs/common';
-import type { Response } from 'express';
 import { CommandBus, QueryBus } from '@nestjs/cqrs';
 import { ApiBearerAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { AppClient } from '../../common/client/app-client.decorator';
-import type { ClientInfo } from '../../common/client/client-info';
-import { DeprecationNotifier, DUE_DATE_DEPRECATION } from '../../common/deprecation/deprecation';
 import { CursorPaginationDto } from '../../common/dto/pagination.dto';
 import { CurrentUser, type AuthenticatedUser } from '../auth/current-user.decorator';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -82,7 +77,6 @@ export class TasksController {
   constructor(
     private readonly commandBus: CommandBus,
     private readonly queryBus: QueryBus,
-    private readonly deprecations: DeprecationNotifier,
   ) {}
 
   @Post()
@@ -91,7 +85,7 @@ export class TasksController {
     description:
       'Grava o evento `TaskCreated` no Event Store. A prioridade é calculada pelo servidor a partir do título. ' +
       'A tarefa aparece na listagem após a projeção (consistência eventual, normalmente milissegundos). ' +
-      'Prazo: envie `due { at, timezone }`; o `dueDate` antigo ainda é aceito, com os headers `Deprecation` e `Sunset` na resposta.',
+      'Prazo: `due { at, timezone }` (o `dueDate` antigo foi removido e responde 400).',
   })
   @ProjectIdParam()
   @ApiResponse({ status: 201, description: 'Tarefa criada.', type: CreateTaskResponseDto })
@@ -100,12 +94,7 @@ export class TasksController {
     @Param('projectId', UUID_V4) projectId: string,
     @Body() body: CreateTaskDto,
     @CurrentUser() user: AuthenticatedUser,
-    @AppClient() client: ClientInfo,
-    @Res({ passthrough: true }) res: Response, // passthrough: o Nest continua serializando o retorno
   ) {
-    if (body.dueDate !== undefined) {
-      this.deprecations.fieldUsed(res, DUE_DATE_DEPRECATION, client);
-    }
     const taskId = await this.commandBus.execute(
       new CreateTaskCommand(user.userId, projectId, body.title, body.assigneeId, toDueInput(body)),
     );
@@ -214,12 +203,7 @@ export class TasksController {
   }
 }
 
-/**
- * Os dois formatos do prazo viram UM na borda (Módulo 14.4): daqui para dentro só existe `due`. O antigo (`dueDate`)
- * não tem fuso, e o fuso fica `null` (desconhecido), nunca inventado. JSON ISO → `Date` aqui, como antes.
- */
+/** JSON ISO → `Date` na borda (Módulo 14.4). Desde o contract (14.4b), o prazo só chega no formato `due`. */
 function toDueInput(body: CreateTaskDto): DueInput | undefined {
-  if (body.due) return { at: new Date(body.due.at), timezone: body.due.timezone };
-  if (body.dueDate) return { at: new Date(body.dueDate), timezone: null };
-  return undefined;
+  return body.due ? { at: new Date(body.due.at), timezone: body.due.timezone } : undefined;
 }

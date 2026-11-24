@@ -1,12 +1,14 @@
 /**
- * Expand do prazo via HTTP (Módulo 14.4a): o app ANTIGO e o app NOVO usando a mesma API ao mesmo tempo.
+ * Prazo depois do contract (Módulo 14.4b), via HTTP: o `dueDate` saiu da API, e quem o usava foi excluído ANTES pela
+ * versão mínima.
  *
- * Protege o contrato da fase expand:
- * - o app antigo manda `dueDate` e continua funcionando: 201, a listagem e o histórico devolvem o `dueDate` que ele lê,
- *   e a resposta traz `Deprecation`, `Sunset` e `Link` (expostos pelo CORS ao front web);
- * - o app novo manda `due { at, timezone }`: sem headers de depreciação, e recebe o instante em UTC + o fuso;
- * - os dois juntos, `at` sem fuso e fuso que não é IANA: 400;
- * - o prazo do formato antigo sai com `timezone: null` (desconhecido), nunca com um fuso inventado.
+ * Protege a sequência que torna o contract seguro (ADR-0008):
+ * - pré-condição: com a versão mínima acima da última que mandava `dueDate` (2.13), esse app recebe 426 e nunca chega
+ *   à validação: o usuário vê "atualize", e não um erro de formulário;
+ * - um cliente SEM versão (o 426 não o alcança) que ainda mande `dueDate` recebe 400 (`forbidNonWhitelisted`): é a
+ *   quebra aprovada pela label `breaking-change`;
+ * - o app atual cria com `due`, e listagem e histórico devolvem só `due` (o instante em UTC + o fuso), sem `dueDate`;
+ * - `at` sem fuso, offset no lugar do fuso e fuso inexistente: 400.
  */
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
@@ -19,20 +21,23 @@ import {
   type TestUser,
 } from './support/e2e-app';
 
-describe('Prazo: dueDate (antigo) e due (novo) lado a lado (e2e)', () => {
+describe('Prazo depois do contract: só due { at, timezone } (e2e)', () => {
   let ctx: E2EContext;
   let app: INestApplication;
   let user: TestUser;
   let projectId: string;
 
   const http = () => request(app.getHttpServer());
-  const oldApp = { 'X-Platform': 'android', 'X-App-Version': '2.13.0' };
-  const newApp = { 'X-Platform': 'android', 'X-App-Version': '2.14.0' };
+  const currentApp = { 'X-Platform': 'android', 'X-App-Version': '2.14.0' };
 
   beforeAll(async () => {
     ctx = await startE2EApp();
     app = ctx.app;
     await resetDatabase(ctx.prisma);
+    // A pré-condição do contract: mínima acima da última versão que mandava `dueDate`
+    await ctx.prisma.appVersionPolicy.create({
+      data: { platform: 'android', minVersion: '2.14.0', updatedBy: 'e2e' },
+    });
     user = await registerAndLogin(app, 'Dono');
     projectId = (
       await http()
@@ -47,56 +52,37 @@ describe('Prazo: dueDate (antigo) e due (novo) lado a lado (e2e)', () => {
     await ctx?.close();
   });
 
-  const listed = async (taskId: string) => {
-    let item: Record<string, unknown> | undefined;
-    await eventually(async () => {
-      const res = await http()
-        .get(`/projects/${projectId}/tasks`)
-        .set(user.auth)
-        .expect(200);
-      item = (res.body.items as Array<Record<string, unknown>>).find(
-        (t) => t.id === taskId,
-      );
-      expect(item).toBeDefined();
-    });
-    return item!;
-  };
-
-  it('app antigo (dueDate): 201 com Deprecation/Sunset/Link, e lê o dueDate de volta; o fuso fica null', async () => {
+  it('app 2.13 (o último que mandava dueDate): 426 antes de qualquer validação', async () => {
     const res = await http()
       .post(`/projects/${projectId}/tasks`)
       .set(user.auth)
-      .set(oldApp)
-      .set('Origin', 'http://localhost:5173')
+      .set({ 'X-Platform': 'android', 'X-App-Version': '2.13.0' })
       .send({ title: 'Formato antigo', dueDate: '2026-12-31T23:59:59Z' })
-      .expect(201);
-
-    expect(res.headers.deprecation).toMatch(/^@\d+$/);
-    expect(res.headers.sunset).toBe('Mon, 01 Mar 2027 00:00:00 GMT');
-    expect(res.headers.link).toContain('rel="deprecation"');
-    const exposed = String(res.headers['access-control-expose-headers']);
-    expect(exposed).toContain('Deprecation');
-    expect(exposed).toContain('Sunset');
-
-    const item = await listed(res.body.taskId as string);
-    expect(item.dueDate).toBe('2026-12-31T23:59:59.000Z');
-    expect(item.due).toEqual({
-      at: '2026-12-31T23:59:59.000Z',
-      timezone: null,
-    });
+      .expect(426);
+    expect(res.body.code).toBe('APP_UPDATE_REQUIRED');
   });
 
-  it('app novo (due): sem headers de depreciação; instante em UTC + o fuso, na listagem e no histórico', async () => {
+  it('cliente sem versão que ainda manda dueDate: 400 (a quebra aprovada no contract)', async () => {
     const res = await http()
       .post(`/projects/${projectId}/tasks`)
       .set(user.auth)
-      .set(newApp)
+      .send({ title: 'Formato antigo', dueDate: '2026-12-31T23:59:59Z' })
+      .expect(400);
+    expect(JSON.stringify(res.body.message)).toContain(
+      'property dueDate should not exist',
+    );
+  });
+
+  it('app atual (due): listagem e histórico devolvem só due, sem dueDate e sem headers de depreciação', async () => {
+    const res = await http()
+      .post(`/projects/${projectId}/tasks`)
+      .set(user.auth)
+      .set(currentApp)
       .send({
         title: 'Formato novo',
         due: { at: '2026-12-31T23:59:59-03:00', timezone: 'America/Sao_Paulo' },
       })
       .expect(201);
-
     expect(res.headers.deprecation).toBeUndefined();
     const taskId = res.body.taskId as string;
     const expected = {
@@ -104,49 +90,50 @@ describe('Prazo: dueDate (antigo) e due (novo) lado a lado (e2e)', () => {
       timezone: 'America/Sao_Paulo',
     };
 
-    const item = await listed(taskId);
-    expect(item.due).toEqual(expected);
-    expect(item.dueDate).toBe(expected.at); // o app antigo, lendo a mesma tarefa, continua vendo o prazo
+    await eventually(async () => {
+      const list = await http()
+        .get(`/projects/${projectId}/tasks`)
+        .set(user.auth)
+        .set(currentApp)
+        .expect(200);
+      const item = (list.body.items as Array<Record<string, unknown>>).find(
+        (t) => t.id === taskId,
+      );
+      expect(item?.due).toEqual(expected);
+      expect(item).not.toHaveProperty('dueDate');
+    });
 
     const history = await http()
       .get(`/projects/${projectId}/tasks/${taskId}/history`)
       .set(user.auth)
+      .set(currentApp)
       .expect(200);
-    expect(history.body.current).toMatchObject({
-      due: expected,
-      dueDate: expected.at,
-    });
+    expect(history.body.current.due).toEqual(expected);
+    expect(history.body.current).not.toHaveProperty('dueDate');
   });
 
   it.each([
     [
-      'os dois formatos juntos',
-      {
-        dueDate: '2026-12-31T23:59:59Z',
-        due: { at: '2026-12-31T23:59:59Z', timezone: 'UTC' },
-      },
-      'não os dois',
-    ],
-    [
       'due.at sem fuso (ambíguo)',
-      { due: { at: '2026-12-31T23:59:59', timezone: 'UTC' } },
+      { at: '2026-12-31T23:59:59', timezone: 'UTC' },
       'fuso explícito',
     ],
     [
       'offset no lugar do fuso',
-      { due: { at: '2026-12-31T23:59:59Z', timezone: '-03:00' } },
+      { at: '2026-12-31T23:59:59Z', timezone: '-03:00' },
       'fuso IANA',
     ],
     [
       'fuso inexistente',
-      { due: { at: '2026-12-31T23:59:59Z', timezone: 'Terra/Media' } },
+      { at: '2026-12-31T23:59:59Z', timezone: 'Terra/Media' },
       'fuso IANA',
     ],
-  ])('400: %s', async (_label, body, message) => {
+  ])('400: %s', async (_label, due, message) => {
     const res = await http()
       .post(`/projects/${projectId}/tasks`)
       .set(user.auth)
-      .send({ title: 'Inválida', ...body })
+      .set(currentApp)
+      .send({ title: 'Inválida', due })
       .expect(400);
     expect(JSON.stringify(res.body.message)).toContain(message);
   });

@@ -17,17 +17,17 @@ export interface DeprecatedField {
 /** Headers que o JavaScript de outra origem precisa conseguir LER (entram no `exposedHeaders` do CORS). */
 export const DEPRECATION_HEADERS = ['Deprecation', 'Sunset', 'Link'] as const;
 
-/** Módulo 14.4: `dueDate` → `due { at, timezone }`. */
-export const DUE_DATE_DEPRECATION: DeprecatedField = Object.freeze({
-  name: 'dueDate',
-  deprecatedAt: new Date('2026-11-24T00:00:00Z'),
-  sunsetAt: new Date('2027-03-01T00:00:00Z'),
-  link: 'https://github.com/cassiocidrini/TaskFlow/blob/main/docs/modules/14-api-para-web-e-apps.md',
-});
+/*
+ * Nenhum campo em depreciação no momento. O último foi o `dueDate` → `due { at, timezone }` (Módulo 14.4: depreciado
+ * na 14.4a, removido na 14.4b). Para depreciar o próximo, declare um `DeprecatedField` aqui e chame `fieldUsed` no
+ * handler (política no ADR-0008).
+ */
 
 /**
- * Avisa e mede o uso de um campo depreciado (Módulo 14.4). Chamado pelo handler SÓ quando a requisição usou o campo
- * antigo: os headers chegam a quem precisa migrar, e a métrica diz QUEM ainda não migrou.
+ * Avisa e mede o uso de um campo depreciado (Módulo 14.4). É o mecanismo padrão de depreciação do ADR-0008, pronto
+ * mesmo sem campo depreciado no momento (entra como provider do módulo dono do campo quando houver um). Chamado pelo
+ * handler SÓ quando a requisição usou o campo antigo: os headers chegam a quem precisa migrar, e a métrica diz QUEM
+ * ainda não migrou.
  *
  * - **`Deprecation: @<epoch>`** (RFC 9745) e **`Sunset: <HTTP-date>`** (RFC 8594), mais `Link` com
  *   `rel="deprecation"`: o desenvolvedor do app vê no log de rede, e ferramentas de cliente sabem ler.

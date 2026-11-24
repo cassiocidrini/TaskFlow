@@ -114,7 +114,10 @@ describe('Tasks (e2e)', () => {
   // ============================================================
   describe('criação e leitura', () => {
     it('tarefa criada deve aparecer no GET com prioridade calculada e prazo (consistência eventual)', async () => {
-      const taskId = await createTask({ title: 'Bug urgente no login', dueDate: '2026-12-31T23:59:59.000Z' });
+      const taskId = await createTask({
+        title: 'Bug urgente no login',
+        due: { at: '2026-12-31T23:59:59.000Z', timezone: 'America/Sao_Paulo' },
+      });
 
       // A projeção roda DEPOIS da resposta 201 — por isso "eventually", e não uma leitura imediata
       await eventually(async () => {
@@ -122,7 +125,7 @@ describe('Tasks (e2e)', () => {
           title: 'Bug urgente no login',
           status: 'PENDING',
           priority: 'HIGH', // "bug" e "urgente" → KeywordPriorityStrategy
-          dueDate: '2026-12-31T23:59:59.000Z',
+          due: { at: '2026-12-31T23:59:59.000Z', timezone: 'America/Sao_Paulo' },
         });
       });
     });
@@ -130,7 +133,7 @@ describe('Tasks (e2e)', () => {
     it.each([
       ['título curto demais', { title: 'ab' }],
       ['campo extra (mass assignment)', { title: 'Tarefa válida', ownerId: 'hacker' }],
-      ['dueDate inválido', { title: 'Tarefa válida', dueDate: 'amanhã' }],
+      ['prazo inválido', { title: 'Tarefa válida', due: { at: 'amanhã', timezone: 'UTC' } }],
     ])('deve rejeitar body inválido com 400: %s', async (_caso, body) => {
       await http().post(tasksUrl()).set(owner.auth).send(body).expect(400);
     });
