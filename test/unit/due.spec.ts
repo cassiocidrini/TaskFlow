@@ -8,7 +8,7 @@
  *   alto; campo inesperado do payload antigo não atravessa;
  * - a **entrada**: `due.at` com fuso explícito, `timezone` como nome IANA (offset recusado), e o `dueDate` removido
  *   (campo desconhecido, recusado pelo `forbidNonWhitelisted`);
- * - a **saída da listagem**: só as colunas novas; a `due_date` (sem uso, sai do banco na 14.4c) não é lida nem vaza;
+ * - a **saída da listagem**: o prazo das colunas `due_at`/`due_timezone`, sem nenhuma coluna interna vazando;
  * - o **mecanismo de depreciação** (ADR-0008), pronto para o próximo campo: headers das RFCs 9745 e 8594.
  */
 import { plainToInstance } from 'class-transformer';
@@ -128,7 +128,6 @@ describe('saída: toTaskListItem', () => {
     status: 'PENDING',
     priority: 'MEDIUM',
     assigneeId: null,
-    dueDate: null,
     dueAt: null,
     dueTimezone: null,
     completedAt: null,
@@ -140,7 +139,7 @@ describe('saída: toTaskListItem', () => {
   it('prazo das colunas novas: due completo, sem o dueDate', () => {
     const at = new Date('2027-01-01T02:59:59Z');
     const item = toTaskListItem(
-      row({ dueAt: at, dueTimezone: 'America/Sao_Paulo', dueDate: at }),
+      row({ dueAt: at, dueTimezone: 'America/Sao_Paulo' }),
     );
     expect(item.due).toEqual({
       at: '2027-01-01T02:59:59.000Z',
@@ -149,15 +148,10 @@ describe('saída: toTaskListItem', () => {
     expect(item).not.toHaveProperty('dueDate');
   });
 
-  it('a due_date (sem uso desde o contract) não é mais lida: a reserva do expand saiu', () => {
-    // Só depois do backfill final isto é seguro: nenhuma linha fica só com a coluna antiga
-    expect(toTaskListItem(row({ dueDate: new Date() })).due).toBeNull();
-  });
-
   it('sem prazo: due null; e nenhuma coluna interna vaza para a resposta', () => {
     const item = toTaskListItem(row({}));
     expect(item.due).toBeNull();
-    for (const column of ['dueAt', 'dueTimezone', 'dueDate']) {
+    for (const column of ['dueAt', 'dueTimezone']) {
       expect(item).not.toHaveProperty(column);
     }
   });

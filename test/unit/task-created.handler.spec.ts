@@ -64,7 +64,7 @@ describe('TaskCreatedHandler (projeção para tasks_read)', () => {
     });
   });
 
-  it('contract (Módulo 14.4b): grava o prazo só nas colunas novas; a due_date não é mais tocada', async () => {
+  it('grava o prazo em due_at (UTC) e due_timezone (Módulo 14.4)', async () => {
     const comPrazo = new TaskCreatedEvent({
       ...eventData,
       due: { at: '2026-12-31T23:59:59.000Z', timezone: 'America/Sao_Paulo' },
@@ -77,7 +77,6 @@ describe('TaskCreatedHandler (projeção para tasks_read)', () => {
       dueAt: new Date('2026-12-31T23:59:59.000Z'),
       dueTimezone: 'America/Sao_Paulo',
     });
-    expect(args.data[0]).not.toHaveProperty('dueDate'); // a coluna fica no banco até a 14.4c, sem ser usada
   });
 
   it('sem prazo: as colunas do prazo nulas', async () => {

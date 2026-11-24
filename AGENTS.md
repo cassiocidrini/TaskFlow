@@ -167,6 +167,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 2. Mudança de **tipo** de coluna: o Prisma gera `DROP COLUMN` + `ADD COLUMN` (**perde dados**). Reescreva com `ALTER COLUMN … TYPE … USING …` (exemplo: `prisma/migrations/*_read_model_status_enum_completed_at`).
 3. Coluna `NOT NULL` nova em tabela com dados: default ou *expand → backfill → contract*.
 4. Índice em tabela grande: `CREATE INDEX CONCURRENTLY` (migração separada, fora de transação).
+   `ALTER`/`DROP` em tabela com tráfego: comece com `SET LOCAL lock_timeout = '5s'` (o lock exclusivo esperando uma consulta longa enfileira todas as requisições atrás dele), e um `DROP` de dado copiado confere antes que nada se perde (exemplo: `*_tasks_read_drop_due_date`).
 5. `npx prisma migrate dev` → `npx prisma generate`. Migração já aplicada em ambiente compartilhado é **imutável**.
 
 ---
