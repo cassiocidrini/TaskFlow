@@ -209,6 +209,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ `PROCESSED_EVENTS_RETENTION_DAYS` menor ou igual à retenção do tópico (o schema recusa; se a retenção do tópico mudar, mude o mínimo junto).
 - ❌ Idempotência com reserva separada do efeito ("reservar → executar → marcar") ou num cache externo: é dual-write. A chave vai na transação do efeito (ADR-0009). Chave global (não por usuário) vaza a resposta de outro usuário.
 - ❌ Rollout sem critério de avanço escrito antes (ADR-0011) ou comparando "antes × depois" em vez de variante × controle na mesma janela; alerta de regressão só com limite relativo (dispara por ruído em latência baixa); flag sem data para sair.
+- ❌ Versão na URL (`/v2`) para trocar um campo, ou depreciar sem prazo: a política é o ADR-0012 (compatível por padrão, `/v2` só para redesenho, janela de 6 meses). Campo depreciado vai em `DEPRECATED_FIELDS` (`common/deprecation/`) com `Sunset` ≥ 90 dias depois do `Deprecation`: o `deprecation-policy.spec.ts` quebra o build se for menos.
 - ❌ Mandar a regra da flag para o app (porcentagem, lista de usuários): vaza os testadores e congela a lógica na versão do app. O app recebe só o `true`/`false`.
 - ❌ Bucket de rollout sem o nome da flag no hash (os mesmos usuários seriam cobaia de todo rollout) ou aleatório por requisição (a tela pisca); e flag lida "fail-open": sem configuração, desligada.
 - ❌ Decidir permissão pela versão ou plataforma do app (`@AppClient()`): o header é do cliente, qualquer um manda `99.0.0`. Serve para compatibilidade e experiência.

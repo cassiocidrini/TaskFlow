@@ -17,11 +17,31 @@ export interface DeprecatedField {
 /** Headers que o JavaScript de outra origem precisa conseguir LER (entram no `exposedHeaders` do CORS). */
 export const DEPRECATION_HEADERS = ['Deprecation', 'Sunset', 'Link'] as const;
 
-/*
- * Nenhum campo em depreciação no momento. O último foi o `dueDate` → `due { at, timezone }` (Módulo 14.4: depreciado
- * na 14.4a, removido na 14.4b). Para depreciar o próximo, declare um `DeprecatedField` aqui e chame `fieldUsed` no
- * handler (política no ADR-0008).
+/**
+ * Aviso mínimo entre `Deprecation` e `Sunset` (ADR-0012): o tempo de o app publicar uma versão sem o campo e de os
+ * usuários atualizarem. O `dueDate` (14.4) teve 97 dias.
  */
+export const MIN_DEPRECATION_NOTICE_DAYS = 90;
+
+/**
+ * Todo campo da API em depreciação, declarado AQUI (Módulo 14.8). A lista é o que o teste
+ * `deprecation-policy.spec.ts` confere no CI: um `Sunset` com menos de 90 dias de aviso quebra o build, em vez de
+ * virar uma promessa que o app não consegue cumprir.
+ *
+ * Vazia no momento. A última foi o `dueDate` → `due { at, timezone }` (Módulo 14.4: depreciado na 14.4a, removido na
+ * 14.4b). Para depreciar o próximo: declare o `DeprecatedField` aqui, chame `fieldUsed` no handler e siga o ADR-0008.
+ */
+export const DEPRECATED_FIELDS: readonly DeprecatedField[] = [];
+
+/** Os campos cujo aviso é curto demais (vazio = a política está cumprida). Pura: o teste a aplica à lista acima. */
+export function violatesNoticePolicy(
+  fields: readonly DeprecatedField[],
+): DeprecatedField[] {
+  const minMs = MIN_DEPRECATION_NOTICE_DAYS * 86_400_000;
+  return fields.filter(
+    (f) => f.sunsetAt.getTime() - f.deprecatedAt.getTime() < minMs,
+  );
+}
 
 /**
  * Avisa e mede o uso de um campo depreciado (Módulo 14.4). É o mecanismo padrão de depreciação do ADR-0008, pronto
@@ -53,7 +73,10 @@ export class DeprecationNotifier {
       `@${Math.floor(field.deprecatedAt.getTime() / 1000)}`,
     );
     res.setHeader('Sunset', field.sunsetAt.toUTCString());
-    res.setHeader('Link', `<${field.link}>; rel="deprecation"; type="text/html"`);
+    res.setHeader(
+      'Link',
+      `<${field.link}>; rel="deprecation"; type="text/html"`,
+    );
     this.usage.add(1, {
       field: field.name,
       platform: client.platform,

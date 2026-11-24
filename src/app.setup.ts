@@ -121,6 +121,12 @@ export function buildOpenApiDocument(app: INestApplication): OpenAPIObject {
           '**Versão mínima:** abaixo da versão mínima da plataforma, qualquer rota responde `426` com ' +
             `\`code: "${APP_UPDATE_REQUIRED}"\` e a \`minVersion\`. Abaixo da recomendada, a resposta é normal e traz ` +
             '`X-App-Update: recommended` e `X-App-Recommended-Version`. Cheque o `code`, não só o status.',
+          '',
+          '**Compatibilidade (ADR-0012):** a API evolui sem versão na URL, só com mudanças compatíveis (campo ou rota ' +
+            'novos, opcionais). Um campo que precisa mudar é depreciado antes (`deprecated` aqui, e os headers ' +
+            '`Deprecation`/`Sunset` na resposta), com pelo menos 90 dias até sair. Versões do app lançadas nos ' +
+            'últimos 6 meses são suportadas; abaixo disso, a versão mínima pode responder `426`. Ignore campos que ' +
+            'você não conhece: a API acrescenta campos sem avisar.',
         ].join('\n'),
       )
       .setVersion('1.0')
