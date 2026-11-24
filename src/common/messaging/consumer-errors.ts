@@ -5,7 +5,8 @@
  * esvaziaria o tópico inteiro no DLT durante 5 minutos de Postgres fora, e a culpa não era de nenhuma mensagem.
  * Por isso três classes:
  * - `permanent`: a mensagem nunca vai ser processável (contrato violado) → DLT na hora;
- * - `infrastructure`: o banco está fora ou inalcançável → tenta para sempre, com backoff; nunca DLT;
+ * - `infrastructure`: o banco (ou outra dependência, como o SQS do push) está fora ou inalcançável → tenta para
+ *   sempre, com backoff; nunca DLT;
  * - `unknown`: o resto (bug, constraint inesperada) → algumas tentativas (pode ser transitório) e depois DLT.
  *
  * Funções puras: o runner só executa a decisão, e os testes unitários cobrem cada caminho sem Kafka.
@@ -16,6 +17,15 @@
  * de novo" (ex.: `InvalidMessageError` do consumer de notificações), e o runner a manda direto para o DLT.
  */
 export class NonRetryableError extends Error {}
+
+/**
+ * O contrário da {@link NonRetryableError}: uma dependência EXTERNA ao banco falhou, e não a mensagem. Quem conhece
+ * a dependência é quem lança: o adapter do SQS (Módulo 13.7) embrulha qualquer falha do envio nesta classe, porque
+ * nenhum erro do `SendMessage` é culpa de um evento de tarefa (fila inexistente, credencial, throttling e rede são
+ * todos problemas de ambiente). Sem a marca, essas falhas cairiam em `unknown` e, depois de 5 tentativas, um SQS fora
+ * do ar esvaziaria o tópico no DLT.
+ */
+export class InfrastructureError extends Error {}
 
 export type FailureClass = 'permanent' | 'infrastructure' | 'unknown';
 
@@ -54,7 +64,8 @@ const NODE_NETWORK_CODES = new Set([
 ]);
 
 /**
- * O banco (ou a rede até ele) falhou, e não a mensagem.
+ * O banco (ou a rede até ele) falhou, e não a mensagem; ou um adapter declarou a falha com
+ * {@link InfrastructureError}.
  *
  * Duas fontes, porque o código do Prisma depende do TIPO de query: a mesma conexão derrubada no meio sai como
  * P2010 num SQL cru e com outro código num `createMany`. O que não varia é o SQLSTATE do Postgres, que o adapter-pg
@@ -62,6 +73,7 @@ const NODE_NETWORK_CODES = new Set([
  * desligando ou reiniciando) e `53300` (conexões esgotadas).
  */
 export function isInfrastructureError(error: unknown): boolean {
+  if (error instanceof InfrastructureError) return true;
   if (!isRecord(error)) return false;
   const code = typeof error.code === 'string' ? error.code : undefined;
   if (

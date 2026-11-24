@@ -23,6 +23,7 @@ import {
   type KafkaConsumerOptions,
 } from '../../src/common/messaging/kafka-consumer.runner';
 import { NotificationsHandler } from '../../src/modules/notifications/consumer/notifications.handler';
+import { DisabledPushQueue } from '../../src/modules/notifications/consumer/push-queue';
 import {
   startTestDatabase,
   type TestDatabase,
@@ -161,7 +162,10 @@ describe('Retry e dead-letter topic (streaming)', () => {
   beforeAll(async () => {
     [db, kafka] = await Promise.all([startTestDatabase(), startTestKafka()]);
     prisma = db.prisma;
-    handler = new NotificationsHandler(prisma as never);
+    handler = new NotificationsHandler(
+      prisma as never,
+      new DisabledPushQueue(),
+    );
     client = new KafkaJS.Kafka({
       kafkaJS: { brokers: kafka.brokers, logLevel: KafkaJS.logLevel.ERROR },
     });

@@ -26,6 +26,7 @@ import type { RelayEnv } from '../../src/config/relay-env.schema';
 import { EventStoreService } from '../../src/events/event-store.service';
 import { TaskAggregate } from '../../src/modules/tasks/domain/task.aggregate';
 import { NotificationsHandler } from '../../src/modules/notifications/consumer/notifications.handler';
+import { DisabledPushQueue } from '../../src/modules/notifications/consumer/push-queue';
 import { NOTIFICATIONS_DLT } from '../../src/modules/notifications/consumer/notifications.consumer';
 import {
   TASK_EVENTS_TOPIC,
@@ -141,7 +142,10 @@ describe('Evento → Kafka → consumer de notificações (streaming)', () => {
     [db, kafka] = await Promise.all([startTestDatabase(), startTestKafka()]);
     prisma = db.prisma;
     eventStore = new EventStoreService(prisma as never);
-    handler = new NotificationsHandler(prisma as never);
+    handler = new NotificationsHandler(
+      prisma as never,
+      new DisabledPushQueue(),
+    );
 
     const admin = new KafkaJS.Kafka({
       kafkaJS: { brokers: kafka.brokers, logLevel: KafkaJS.logLevel.ERROR },

@@ -7,19 +7,42 @@
  * - marca e efeito são atômicos: se o efeito falha, `processed_events` NÃO fica marcado, e a reentrega processa
  *   (o contrário perderia a notificação para sempre);
  * - a projeção local leva o responsável do `TaskAssigned` até o `TaskCompleted`;
- * - tipo ignorado não escreve nada.
+ * - tipo ignorado não escreve nada;
+ * - o push (Módulo 13.7) é enfileirado DENTRO da transação: fila fora desfaz marca e notificação (a reentrega
+ *   processa tudo de novo), e duplicata não enfileira outra vez. Fila falsa que grava ou falha: o SQS de verdade é
+ *   do roteiro manual com LocalStack (o token dele não vai para o CI).
  */
 import { randomUUID } from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import type { ConsumedMessage } from '../../src/common/messaging/kafka-consumer.runner';
 import { NotificationsHandler } from '../../src/modules/notifications/consumer/notifications.handler';
+import {
+  PushQueue,
+  type PushRequest,
+} from '../../src/modules/notifications/consumer/push-queue';
 import { InvalidMessageError } from '../../src/modules/notifications/consumer/task-event.message';
+import { InfrastructureError } from '../../src/common/messaging/consumer-errors';
 import { startTestDatabase, TestDatabase } from './support/test-database';
+
+/** Fila falsa: guarda o que foi enfileirado e, com `failing`, recusa como um SQS fora do ar. */
+class RecordingPushQueue extends PushQueue {
+  readonly sent: PushRequest[] = [];
+  failing = false;
+
+  enqueue(request: PushRequest): Promise<void> {
+    if (this.failing) {
+      return Promise.reject(new InfrastructureError('SQS fora (simulado)'));
+    }
+    this.sent.push(request);
+    return Promise.resolve();
+  }
+}
 
 describe('NotificationsHandler (integração)', () => {
   let db: TestDatabase;
   let prisma: PrismaClient;
   let handler: NotificationsHandler;
+  const pushQueue = new RecordingPushQueue();
 
   const OWNER = randomUUID();
   const ANA = randomUUID();
@@ -75,7 +98,7 @@ describe('NotificationsHandler (integração)', () => {
   beforeAll(async () => {
     db = await startTestDatabase();
     prisma = db.prisma;
-    handler = new NotificationsHandler(prisma as never);
+    handler = new NotificationsHandler(prisma as never, pushQueue);
   }, 120_000);
 
   afterAll(async () => {
@@ -86,6 +109,8 @@ describe('NotificationsHandler (integração)', () => {
     await prisma.$executeRawUnsafe(
       'TRUNCATE TABLE "notifications", "notification_tasks", "processed_events"',
     );
+    pushQueue.sent.length = 0;
+    pushQueue.failing = false;
   });
 
   it('ciclo completo: notifica a atribuição e a conclusão ao responsável', async () => {
@@ -166,5 +191,51 @@ describe('NotificationsHandler (integração)', () => {
     await expect(handling).rejects.toThrow('TaskAssigned inválido');
     // A classe é o que decide o destino: NonRetryableError vai ao DLT sem novas tentativas
     await expect(handling).rejects.toBeInstanceOf(InvalidMessageError);
+  });
+
+  describe('push (13.7)', () => {
+    const eventIdOf = (m: ConsumedMessage) =>
+      (JSON.parse(m.value ?? '{}') as { eventId: string }).eventId;
+
+    it('cada notificação enfileira um push, com o eventId como chave de idempotência', async () => {
+      const events = lifecycle();
+      for (const m of events) await handler.handle(m);
+
+      // TaskCreated sem responsável não notifica; atribuição e conclusão, sim
+      expect(pushQueue.sent.map((p) => [p.pushId, p.userId, p.type])).toEqual([
+        [eventIdOf(events[1]), ANA, 'TASK_ASSIGNED'],
+        [eventIdOf(events[2]), ANA, 'TASK_COMPLETED'],
+      ]);
+    });
+
+    it('fila fora: nada fica gravado nem marcado, e a reentrega faz tudo', async () => {
+      const [created, assigned] = lifecycle();
+      await handler.handle(created);
+
+      pushQueue.failing = true;
+      const handling = handler.handle(assigned);
+      // A classe decide o destino no runner: infraestrutura = retry para sempre, nunca DLT
+      await expect(handling).rejects.toBeInstanceOf(InfrastructureError);
+      expect(await prisma.notification.count()).toBe(0);
+      expect(
+        await prisma.processedEvent.count({
+          where: { eventId: eventIdOf(assigned) },
+        }),
+      ).toBe(0);
+
+      pushQueue.failing = false;
+      await expect(handler.handle(assigned)).resolves.toBe('processed');
+      expect(await prisma.notification.count()).toBe(1);
+      expect(pushQueue.sent).toHaveLength(1);
+    });
+
+    it('duplicata não enfileira de novo', async () => {
+      const [created, assigned] = lifecycle();
+      await handler.handle(created);
+      await handler.handle(assigned);
+      await expect(handler.handle(assigned)).resolves.toBe('duplicate');
+
+      expect(pushQueue.sent).toHaveLength(1);
+    });
   });
 });

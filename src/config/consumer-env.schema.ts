@@ -4,6 +4,12 @@ import { relayEnvSchema } from './relay-env.schema';
 
 const shared = envSchema.shape;
 
+/** URL opcional em que `VAR=` (vazia, como no `.env.example`) vale como não definida, e não como URL inválida. */
+const optionalUrl = z.preprocess(
+  (value) => (value === '' ? undefined : value),
+  z.url().optional(),
+);
+
 /**
  * Variáveis de ambiente dos processos CONSUMER do Kafka (`src/notifications-consumer.ts`, Módulo 13.4, e
  * `src/reports-consumer.ts`, Módulo 13.6a). Um schema para os dois: cada processo lê a SUA porta de métricas.
@@ -47,6 +53,17 @@ export const consumerEnvSchema = z
       })
       .max(365)
       .default(14),
+
+    /**
+     * Fila SQS do envio de push (Módulo 13.7). Sem ela, o consumer de notificações grava a notificação e NÃO
+     * enfileira o push (`DisabledPushQueue`): é o modo do dev sem AWS, do CI e da suíte de streaming. Vazia no `.env`
+     * conta como ausente.
+     */
+    PUSH_QUEUE_URL: optionalUrl,
+    /** Região do SQS do push. Credenciais NÃO entram aqui: vêm da cadeia padrão do SDK (env no dev, role IAM na AWS). */
+    AWS_REGION: z.string().min(1).default('us-east-1'),
+    /** Só para LocalStack (`http://localhost:4566`). Na AWS real fica vazio: o SDK resolve o endpoint pela região. */
+    AWS_ENDPOINT_URL: optionalUrl,
 
     /** Porta do `/metrics` do consumer de relatórios (Módulo 13.6a). */
     REPORTS_METRICS_PORT: z.coerce
