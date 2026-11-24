@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
-> **Status:** 🚧 em construção, etapa **14.4a de 14.8** (expand do `dueDate` → `due { at, timezone }`). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **14.4b de 14.8** (contract do `dueDate`: o campo sai da API). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está em "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`src/common/client/`](../../src/common/client/client-info.ts) (headers, parser de versão,
@@ -44,7 +44,8 @@ e todos os apps que ainda estão por aí. As perguntas que o módulo responde:
 | **14.2** | Versão mínima por plataforma, configurável sem deploy (tabela + cache de 30 s + `npm run app-version` com auditoria): `426` + `APP_UPDATE_REQUIRED`; aviso de atualização recomendada | ✅ |
 | **14.3** | Contrato versionado (`docs/api/openapi.json`) conferido no CI, e mudanças **incompatíveis** classificadas pelo oasdiff, liberadas só com a label `breaking-change` | ✅ |
 | **14.4a** | **Expand** do `dueDate` → `due { at, timezone }`: os dois formatos aceitos e devolvidos, `Deprecation`/`Sunset`, métrica de uso por versão, `TaskCreated` v2 com *upcaster*, read model com expand + backfill | ✅ |
-| 14.4b | **Contract**: versão mínima acima da última que usa `dueDate`, remover o campo e a coluna (label `breaking-change`) | 🔜 |
+| **14.4b** | **Contract**, passo 1: o `dueDate` sai da API; o código para de gravar e de ler a `due_date`; backfill final; ADR-0008 (política de depreciação) | ✅ |
+| 14.4c | **Contract**, passo 2 (outro deploy): `DROP COLUMN due_date`; e os campos sempre presentes das respostas documentados como obrigatórios | 🔜 |
 | 14.5 | `Idempotency-Key` no `POST /tasks` | 🔜 |
 | 14.6 | Feature flags em módulo próprio (kill switch, allowlist, porcentagem) e `GET /me/features` | 🔜 |
 | 14.7 | Flag `task-list-with-stats` e o critério de avanço em ADR | 🔜 |
@@ -261,7 +262,8 @@ pode devolver um valor que o contrato anterior excluía* (se a lista é feita pa
 
 **E quando a mudança incompatível é necessária?** Não se faz de uma vez: **expand/contract** (14.4). Acrescenta-se o
 novo (compatível), mantém-se o antigo enquanto houver apps que o usam, e remove-se depois que a versão mínima (14.2)
-exclui esses apps. Só esse último passo precisa da label.
+exclui esses apps. Mesmo esse último passo pode passar sem a label: o oasdiff aceita, por desenho, remover o que foi
+depreciado antes (ver o contract, a seguir).
 
 ### Expand/contract (14.4): mudar um campo sem quebrar quem não atualizou
 
@@ -283,7 +285,7 @@ check da 14.3 bloquearia o PR). O caminho tem três fases, em PRs e momentos dif
 |---|---|---|
 | **Expand** (14.4a) | A API aceita e devolve OS DOIS formatos; o antigo é marcado como depreciado; mede-se quem ainda o usa | ✅ O oasdiff confirmou: 0 erros, 6 mudanças informativas (`dueDate` depreciado em 3 lugares, `due` novo em 3) |
 | Transição | Os apps novos usam `due`; a métrica de uso do `dueDate` cai, versão por versão | — |
-| **Contract** (14.4b) | Versão mínima acima da última que manda `dueDate`; o campo sai da API e a coluna sai do banco | ❌ Precisa da label `breaking-change` |
+| **Contract** (14.4b, 14.4c) | Versão mínima acima da última que manda `dueDate`; o campo sai da API (14.4b) e a coluna sai do banco, em outro deploy (14.4c) | Incompatível para quem não atualizou, mas o oasdiff classificou como **informativo** (problema 11): a depreciação anunciada fez o trabalho |
 
 **A entrada aceita um OU outro.** O `dueDate` vira `due { at, timezone: null }` na borda (no controller, numa função
 só), e daqui para dentro só existe `due`. Os dois juntos = 400: aceitar os dois exigiria escolher qual vence quando
@@ -317,11 +319,37 @@ O read model segue as mesmas três fases:
 1. **expand** (migração): `ADD COLUMN due_at, due_timezone`, aceitando NULL e sem default, o que no Postgres só muda
    metadados (sem reescrever a tabela nem segurar lock longo). A projeção grava nas colunas novas E na antiga;
 2. **backfill** (migração separada): `UPDATE ... SET due_at = due_date WHERE due_at IS NULL`, sem inventar fuso;
-3. **contract** (14.4b): parar de gravar e remover a `due_date`.
+3. **contract**, em DOIS deploys: na 14.4b o código para de gravar e de ler a `due_date` (e o backfill roda uma última
+   vez); na 14.4c, a coluna sai. Juntos, a versão anterior, ainda no ar durante o deploy e ainda gravando na
+   `due_date`, quebraria a cada tarefa criada.
 
 A armadilha do backfill: as migrações rodam **antes** do código novo subir, então durante o deploy a versão anterior
 ainda cria linhas só com `due_date`, depois do backfill. Duas defesas: o backfill é **idempotente** (o contract o
 repete antes de remover a coluna) e, durante a transição, a leitura usa **`due_at ?? due_date`**.
+
+**O contract (14.4b): o que decide, e o que o CI vê.** A remoção do `dueDate` só é segura com os três critérios do
+[ADR-0008](../adr/0008-depreciacao-e-remocao-de-campos-da-api.md): o `Sunset` passou, a versão mínima está acima de
+toda versão que manda o campo (aqui, simulado com `npm run app-version -- --platform android --min 2.14.0`) e a métrica
+de uso está zerada acima da mínima. Com isso, o app 2.13 recebe **426** antes de chegar à validação (o usuário vê
+"atualize", não um erro de formulário), e só um cliente **sem** versão que ainda mande `dueDate` recebe **400** pelo
+`forbidNonWhitelisted`.
+
+O que eu esperava do CI, e o que aconteceu: a remoção deveria falhar o check do contrato e pedir a label. O oasdiff
+classificou as três remoções como **informativas**, por dois motivos que valem a pergunta de entrevista:
+
+- **Entrada:** `request-property-removed-with-deprecation`. O campo foi **depreciado antes**, e remover algo depreciado é
+  o desfecho anunciado do ciclo de vida, não uma surpresa.
+- **Saída:** `response-optional-property-removed`. O `dueDate` estava documentado como **opcional** nas respostas, embora
+  viesse sempre. Pelo contrato, um cliente correto já tolerava a ausência; a ferramenta não tinha como saber que o app
+  dependia dele. **A documentação prometia menos do que a API entregava.** A correção (campos sempre presentes como
+  `required`, ainda que `nullable`) é compatível e entra na 14.4c.
+
+A conclusão está no ADR-0008: **o CI pega a quebra acidental; a quebra planejada é decidida pelos critérios.**
+
+O que **não** sai: o *upcaster* (os eventos v1 continuam gravados, e para sempre), o `dueDate` do contrato público do
+tópico (outro ciclo de vida, ADR-0004) e o `DeprecationNotifier` (o mecanismo padrão para o próximo campo, sem uso
+agora). E um efeito colateral bom: o E2E de tarefas ainda criava com `dueDate` e quebrou com 400. Foi o primeiro
+"cliente que não migrou" (problema 12).
 
 **O contrato público do tópico também faz expand.** O `TaskCreated` de integração ganhou `due` como campo **opcional**
 (compatível: os consumers são leitores tolerantes e ignoram o que não conhecem) e mantém o `dueDate`, derivado do
@@ -372,6 +400,17 @@ npm run openapi:diff -- --base x.json # contra outro arquivo (experimentos)
 Para ver o `check` falhar: mude o `maxLength` de um DTO e rode `npm run openapi:check`; ele aponta a linha. Para ver
 uma mudança incompatível: gere uma base com `jq` (ex.: `jq '.components.schemas.CreateTaskDto.required -= ["title"]'
 docs/api/openapi.json > /tmp/base.json`) e rode `npm run openapi:diff -- --base /tmp/base.json`.
+
+### Prazo: contract (14.4b)
+
+```bash
+npm run app-version -- --platform android --min 2.14.0 --by "contract do dueDate"   # a pré-condição
+curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'X-Platform: android' -H 'X-App-Version: 2.13.0' -d '{"title":"x","dueDate":"2026-12-31T23:59:59Z"}'   # 426
+curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"title":"x","dueDate":"2026-12-31T23:59:59Z"}'                                                      # 400
+npm run openapi:diff     # 0 incompatíveis; o changelog do oasdiff mostra as 3 remoções como informativas
+```
 
 ### Prazo: expand (14.4a)
 
@@ -427,6 +466,8 @@ npm run app-version -- --platform android --min none --recommended none         
 | 8 | **(14.4a)** A listagem devolvia a linha do Prisma crua: as colunas novas do expand (`due_at`, `due_timezone`) vazariam como campos soltos no contrato | O handler retornava `findMany()` direto, sem mapeamento. Achado lendo o código antes de mudar o schema | `toTaskListItem()`, campo a campo (como o contrato de integração já fazia); teste de que nenhuma coluna interna aparece na resposta |
 | 9 | **(14.4a)** O backfill rodaria antes do código novo: linhas criadas pela versão anterior da API no meio do deploy ficariam sem `due_at` | Migrações rodam antes do deploy, e a versão anterior ainda escreve só na coluna velha | Backfill idempotente (o contract o repete) e leitura `due_at ?? due_date` durante a transição; testes da idempotência com o SQL da própria migração |
 | 10 | **(14.4a)** Os testes unitários do repositório quebraram com o upcaster | As linhas simuladas não tinham a coluna `metadata`, que o upcaster passou a ler (no banco ela é `NOT NULL DEFAULT '{}'`) | Linhas simuladas realistas (`metadata: {}`, um evento legado) |
+| 11 | **(14.4b)** A remoção do `dueDate` não falhou o check do contrato, como eu tinha previsto (e escrito na 14.4a) | O oasdiff aceita remover campo de entrada **depreciado antes** (`request-property-removed-with-deprecation`) e campo de resposta documentado como **opcional** (`response-optional-property-removed`). O `dueDate` das respostas vinha sempre, mas era `@ApiPropertyOptional` | Registrado no ADR-0008: o CI pega a quebra não anunciada; a planejada é decidida pelos critérios. Campos sempre presentes das respostas viram `required` na 14.4c |
+| 12 | **(14.4b)** O E2E de tarefas quebrou com 400 | Ele ainda criava tarefas com `dueDate`: era, na prática, um cliente que não migrou | Atualizado para `due`. É o efeito exato do contract em quem ficou para trás, e por isso a versão mínima vem antes |
 
 ---
 
@@ -496,6 +537,18 @@ npm run app-version -- --platform android --min none --recommended none         
 | Testes novos | 13 unitários (upcaster, validação, mapeamento da listagem, headers) e 4 de integração (upcaster no banco real, com e sem envelope; backfill e idempotência), 6 E2E; e 9 existentes adaptados ao formato novo |
 | Suítes | 347 unitários · 84 integração · 66 E2E · 13 streaming |
 
+**14.4b — contract do prazo, passo 1**
+
+| Experimento | Resultado |
+|---|---|
+| oasdiff contra a `main` | **0 incompatíveis**; `changelog`: 3 informativas (`request-property-removed-with-deprecation` na entrada; `response-optional-property-removed` na listagem e no histórico) |
+| Mínima do Android em 2.14.0; app 2.13 manda `dueDate` | 426 `APP_UPDATE_REQUIRED`, antes da validação |
+| Cliente sem versão manda `dueDate` | 400 `property dueDate should not exist` |
+| App atual com `due` | 201; listagem e histórico só com `due`, sem `dueDate`; sem headers de depreciação |
+| Backfill final + `migrate dev --create-only` | Aplicado; migração de checagem vazia (a coluna continua no schema até a 14.4c, sem drift) |
+| Testes | Os do expand reescritos para o estado depois do contract (unitário `due.spec.ts`, E2E `due.e2e-spec.ts`); o E2E de tarefas e o teste de integração da projeção migrados para `due` |
+| Suítes | 346 unitários · 84 integração · 66 E2E · 13 streaming |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -507,6 +560,7 @@ npm run app-version -- --platform android --min none --recommended none         
 | Nenhuma forma de parar uma versão quebrada do app | **(14.2)** Mínima e recomendada por plataforma, mudadas por comando com auditoria e valendo em até 30 s, sem deploy | Uma correção na loja não chega a quem não atualiza; o servidor precisa poder dizer "atualize" |
 | O contrato da API só existia em `/docs`, gerado na hora | **(14.3)** `docs/api/openapi.json` versionado, conferido no CI, e mudanças incompatíveis bloqueadas sem a label `breaking-change` | Mudar o contrato passa a ser uma decisão visível no PR, e não um efeito colateral |
 | Prazo só como instante (`dueDate`), sem o fuso do usuário | **(14.4a)** `due { at, timezone }` ao lado do `dueDate` depreciado, nos dois sentidos; `TaskCreated` v2 com o primeiro *upcaster* do projeto | Lembrete "vence hoje" precisa do fuso; e a mudança mostra o expand/contract inteiro (API, evento, banco, contrato público) |
+| `dueDate` e `due` lado a lado na API | **(14.4b)** Só `due`; a `due_date` sem uso, esperando o `DROP` num deploy separado; política de depreciação no ADR-0008 | Contract com os três critérios cumpridos; e o aprendizado de que o CI não substitui a política |
 | CORS só com `Content-Type`, `Authorization` e `X-Correlation-Id` | **(14.1)** Também `X-Platform` e `X-App-Version` | Sem isso, o preflight barraria o front web que os envia |
 
 ---
@@ -530,7 +584,10 @@ npm run app-version -- --platform android --min none --recommended none         
   continua `string` mas muda de formato, uma regra de negócio nova) passa. Para isso, testes de contrato do lado do
   consumidor (*consumer-driven contracts*, como o Pact) seriam o próximo passo.
 - **O `dueDate` continua no contrato público do tópico** (derivado do `due`): tirá-lo é mudança incompatível de um
-  contrato que outros serviços leem (`eventVersion` 2 ou tópico `.v2`), fora do escopo do 14.4b.
+  contrato que outros serviços leem (`eventVersion` 2 ou tópico `.v2`), fora do escopo.
+- **A coluna `due_date` ainda existe**, sem uso, até a 14.4c (outro deploy).
+- **Campos sempre presentes documentados como opcionais** na listagem (`assigneeId`, `completedAt`): uma remoção futura
+  deles passaria pelo CI como a do `dueDate`. Corrigido na 14.4c.
 - **O histórico devolve o `data` dos eventos já convertido** (v2): quem lê a linha do tempo vê o `due`, não o `dueDate`
   que foi gravado. É coerente com o contrato atual; o payload original continua no banco.
 - **Não dá para medir quem LÊ o campo antigo**, só quem o envia. Daí o contract depender da versão mínima.
@@ -550,7 +607,8 @@ npm run app-version -- --platform android --min none --recommended none         
 - [x] Versão mínima e recomendada por plataforma, sem deploy, com auditoria, *fail-open* e o 426 no log (14.2)
 - [x] Contrato da API versionado e conferido no CI; mudanças incompatíveis classificadas e liberadas só com label (14.3)
 - [x] Expand do `dueDate` → `due { at, timezone }`: dois formatos, depreciação sinalizada e medida, *upcaster*, backfill (14.4a)
-- [ ] Contract do `dueDate` (14.4b)
+- [x] Contract do `dueDate`, passo 1: fora da API, código sem a coluna antiga, backfill final, ADR-0008 (14.4b)
+- [ ] Contract, passo 2: `DROP COLUMN` num deploy separado; respostas com `required` corretos (14.4c)
 - [ ] `Idempotency-Key` (14.5)
 - [ ] Feature flags (14.6, 14.7)
 - [ ] Estratégia de versionamento (14.8)
