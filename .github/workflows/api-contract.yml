@@ -1,0 +1,68 @@
+name: Contrato da API
+
+# Mudanças INCOMPATÍVEIS no contrato (Módulo 14.3): compara docs/api/openapi.json da base do PR com o do PR, com o
+# oasdiff. O snapshot já ser o contrato do código é garantido pelo job "quality" do ci.yml (`openapi:check`).
+#
+# Workflow separado porque precisa rodar de novo quando a label `breaking-change` é posta ou tirada (`labeled`,
+# `unlabeled`): no ci.yml, isso dispararia também os quatro jobs pesados.
+on:
+  pull_request:
+    branches: [main, master]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  breaking:
+    name: Mudanças incompatíveis no contrato da API
+    runs-on: ubuntu-latest
+    env:
+      # Mesma versão do `npm run openapi:diff` (scripts/openapi/diff.mjs): o resultado local é o do CI
+      OASDIFF_IMAGE: tufin/oasdiff:v1.37.0
+      # Booleano calculado pelo GitHub: nenhum texto do PR entra no shell (sem risco de injeção de comando)
+      BREAKING_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'breaking-change') }}
+      BASE_REF: ${{ github.base_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # a base do PR precisa estar disponível para o `git show`
+
+      - name: Contrato da base do PR
+        id: base
+        run: |
+          if git show "origin/${BASE_REF}:docs/api/openapi.json" > "$RUNNER_TEMP/base.json" 2>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::A base ainda não tem docs/api/openapi.json: nada a comparar."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Comparar com oasdiff
+        if: steps.base.outputs.exists == 'true'
+        run: |
+          cp docs/api/openapi.json "$RUNNER_TEMP/revision.json"
+          # Base vazia ou inválida: o oasdiff compararia contra nada e diria "nenhuma mudança" (falso OK)
+          for spec in base revision; do
+            jq -e '.openapi | type == "string"' "$RUNNER_TEMP/$spec.json" > /dev/null \
+              || { echo "::error::$spec.json não é um documento OpenAPI válido"; exit 1; }
+          done
+          run_oasdiff() {
+            docker run --rm -v "$RUNNER_TEMP:/specs:ro" "$OASDIFF_IMAGE" breaking /specs/base.json /specs/revision.json "$@"
+          }
+          # Anotações no PR (aparecem no diff de docs/api/openapi.json) e o resumo do job
+          run_oasdiff --format githubactions || true
+          { echo "## Mudanças incompatíveis no contrato da API"; run_oasdiff --format markdown || true; } >> "$GITHUB_STEP_SUMMARY"
+
+          if run_oasdiff --fail-on ERR > /dev/null; then
+            echo "Nenhuma mudança incompatível."
+          elif [ "$BREAKING_APPROVED" = "true" ]; then
+            echo "::warning::Mudança incompatível APROVADA pela label breaking-change. Confira a versão mínima do app (Módulo 14.2) e a janela de suporte."
+          else
+            echo "::error::Mudança incompatível no contrato: um app instalado que use o que mudou vai quebrar. Prefira expand/contract; se for intencional, adicione a label breaking-change ao PR."
+            exit 1
+          fi

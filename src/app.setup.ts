@@ -1,6 +1,6 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { DocumentBuilder, type OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { APP_VERSION_HEADER, PLATFORM_HEADER } from './common/client/client-info';
 import { createClientInfoMiddleware } from './common/client/client-info.middleware';
@@ -66,7 +66,21 @@ export function configureApp(app: INestApplication): void {
  * facilita reconhecimento por atacantes (OWASP A05 — Security Misconfiguration).
  */
 export function setupSwagger(app: INestApplication): void {
-  const document = SwaggerModule.createDocument(
+  SwaggerModule.setup('docs', app, buildOpenApiDocument(app), {
+    swaggerOptions: { persistAuthorization: true }, // o token sobrevive a um F5
+  });
+}
+
+/**
+ * O documento OpenAPI da API: a MESMA fonte para o `/docs` e para o snapshot versionado em `docs/api/openapi.json`
+ * (Módulo 14.3), gerado por `scripts/openapi/snapshot.mjs` a partir do `dist/`. Duas montagens divergiriam, e o
+ * snapshot deixaria de ser o contrato que a API serve.
+ *
+ * Não precisa de banco nem de servidor escutando: lê só os metadados dos controllers e DTOs (que o plugin do Swagger
+ * no `nest build` completa a partir dos tipos e do `class-validator`).
+ */
+export function buildOpenApiDocument(app: INestApplication): OpenAPIObject {
+  return SwaggerModule.createDocument(
     app,
     new DocumentBuilder()
       .setTitle('TaskFlow API')
@@ -137,8 +151,4 @@ export function setupSwagger(app: INestApplication): void {
       .addTag('app', 'Rota raiz (smoke test) e health checks para o orquestrador (liveness e readiness)')
       .build(),
   );
-
-  SwaggerModule.setup('docs', app, document, {
-    swaggerOptions: { persistAuthorization: true }, // o token sobrevive a um F5
-  });
 }

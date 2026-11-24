@@ -36,8 +36,10 @@ jobs:
         run: npm run lint
       - name: Testes unitários
         run: npm run test:unit
-      - name: Build
-        run: npm run build
+      # Build + o contrato da API (Módulo 14.3): falha se o código mudou o OpenAPI e docs/api/openapi.json não foi
+      # atualizado no mesmo PR. Do código COMPILADO, porque o plugin do Swagger só roda no `nest build`
+      - name: Build e contrato da API (snapshot do OpenAPI)
+        run: npm run openapi:check
 
   integration:
     name: Testes de integração (Testcontainers)
