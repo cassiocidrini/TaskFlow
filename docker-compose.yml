@@ -161,7 +161,7 @@ services:
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --describe --topic taskflow.task-events.v1
 
   localstack:
-    image: localstack/localstack:2026.9.0
+    image: localstack/localstack:2026.10.8
     container_name: taskflow-localstack
     ports:
       - "4566:4566"
