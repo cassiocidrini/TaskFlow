@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
-> **Status:** 🚧 em construção, etapa **14.4c de 14.8** (fim do expand/contract do prazo). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **14.5 de 14.8** (`Idempotency-Key` no `POST /tasks`). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está em "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`src/common/client/`](../../src/common/client/client-info.ts) (headers, parser de versão,
@@ -15,7 +15,8 @@
 > [`src/app-version.ts`](../../src/app-version.ts) · contrato em [`docs/api/openapi.json`](../api/openapi.json),
 > [`scripts/openapi/`](../../scripts/openapi/snapshot.ts) e [`api-contract.yml`](../../.github/workflows/api-contract.yml) ·
 > prazo em [`due.dto.ts`](../../src/modules/tasks/dto/due.dto.ts), [`task-event.upcasters.ts`](../../src/modules/tasks/infrastructure/task-event.upcasters.ts) e
-> [`deprecation.ts`](../../src/common/deprecation/deprecation.ts)
+> [`deprecation.ts`](../../src/common/deprecation/deprecation.ts) · idempotência em
+> [`src/common/idempotency/`](../../src/common/idempotency/idempotency.store.ts)
 
 ---
 
@@ -46,7 +47,7 @@ e todos os apps que ainda estão por aí. As perguntas que o módulo responde:
 | **14.4a** | **Expand** do `dueDate` → `due { at, timezone }`: os dois formatos aceitos e devolvidos, `Deprecation`/`Sunset`, métrica de uso por versão, `TaskCreated` v2 com *upcaster*, read model com expand + backfill | ✅ |
 | **14.4b** | **Contract**, passo 1: o `dueDate` sai da API; o código para de gravar e de ler a `due_date`; backfill final; ADR-0008 (política de depreciação) | ✅ |
 | **14.4c** | **Contract**, passo 2 (outro deploy): `DROP COLUMN due_date` com `lock_timeout` e checagem anti-perda; campos sempre presentes das respostas documentados como obrigatórios | ✅ |
-| 14.5 | `Idempotency-Key` no `POST /tasks` | 🔜 |
+| **14.5** | `Idempotency-Key` no `POST /tasks`: a nova tentativa devolve a mesma resposta; a chave gravada na mesma transação da tarefa (ADR-0009) | ✅ |
 | 14.6 | Feature flags em módulo próprio (kill switch, allowlist, porcentagem) e `GET /me/features` | 🔜 |
 | 14.7 | Flag `task-list-with-stats` e o critério de avanço em ADR | 🔜 |
 | 14.8 | Estratégia de versionamento com janela de suporte | 🔜 |
@@ -374,6 +375,53 @@ opcionais. A prova, com o oasdiff, simulando a remoção do `assigneeId` da list
 `due`. Tirar o `dueDate` do tópico é mudança incompatível de um contrato que outros serviços leem (`eventVersion` 2),
 e fica fora do escopo.
 
+### Idempotency-Key (14.5): repetir uma requisição sem duplicar o efeito
+
+**O problema.** O app manda `POST /tasks`, o servidor cria a tarefa, e a resposta se perde (túnel, troca de Wi-Fi para
+4G, timeout). O app não sabe se deu certo e repete: duas tarefas. Numa fintech, duas transferências. Só o **cliente**
+sabe se duas requisições iguais são a mesma intenção (duas transferências de R$ 100 para a mesma pessoa podem ser
+legítimas), então é ele quem gera uma chave por intenção e a manda em `Idempotency-Key`, a MESMA em toda nova
+tentativa.
+
+| Situação | Resposta |
+|---|---|
+| Chave nova | Cria; guarda a resposta |
+| Mesma chave, mesmo pedido | **A mesma resposta** (201, o mesmo `taskId`), sem criar nada, com `Idempotent-Replayed: true` |
+| Mesma chave, pedido diferente | **422** `IDEMPOTENCY_KEY_REUSED` (um bug no app, que reaproveitou a chave) |
+| Sem o header | Como antes (é opcional: exigi-lo quebraria os apps instalados) |
+| Header inválido | **400**: o cliente pediu uma garantia, e ignorá-la em silêncio poderia criar o duplicado |
+
+**A decisão central: a chave NA MESMA transação da tarefa** ([ADR-0009](../adr/0009-idempotencia-de-requisicoes-na-transacao-do-efeito.md)).
+O desenho ingênuo é "reservar a chave → criar → marcar como concluída": duas escritas em dois momentos, o dual-write do
+Módulo 13 outra vez. Um crash entre criar e marcar deixa a chave presa; com prazo na reserva, a tentativa seguinte cria
+uma SEGUNDA tarefa. Aqui, a linha da chave (com a resposta, já conhecida: o `taskId` é gerado antes) é mais um INSERT
+da transação do `TaskCreated`, junto com o evento e a outbox, pelo gancho genérico `alsoWrite` do Event Store. Ou a
+tarefa existe e a chave está registrada, ou nenhuma das duas. É o `processed_events` (13.4) do lado HTTP.
+
+**A corrida.** Duas tentativas simultâneas passam pela busca sem achar nada e tentam gravar. A chave primária
+`(user_id, key)` deixa uma só: o INSERT da segunda espera o COMMIT da primeira e falha, a transação dela é desfeita
+inteira (a tarefa dela não existe), e o handler busca de novo e devolve a resposta da vencedora. Provado com 10
+requisições simultâneas: uma tarefa, e o mesmo `taskId` nas 10 respostas. Para separar essa colisão de um conflito de
+versão, o handler consulta a tabela de novo em vez de interpretar o nome da constraint no erro do Prisma (frágil entre
+versões); um conflito de versão num agregado NOVO exigiria dois UUIDs aleatórios iguais.
+
+**Os detalhes que fazem diferença:**
+- **Por usuário** (a PK é `(user_id, key)`): ninguém recebe a resposta guardada de outro adivinhando a chave (OWASP
+  A01). E a autorização vem ANTES da busca: projeto alheio dá 404 mesmo com uma chave já usada.
+- **"O mesmo pedido"** = SHA-256 de método + rota (com o `projectId`) + corpo validado, numa serialização estável (a
+  mesma do snapshot do contrato da 14.3, agora em `src/common/json/`): a ordem das chaves do JSON não muda o hash.
+- **Só o sucesso é guardado.** Uma criação que falhou (404, 400) não teve efeito; a nova tentativa executa de novo.
+- **Validade de 24 h** (`IDEMPOTENCY_KEY_TTL_HOURS`), como no Stripe. Vencida conta como nova: a busca a ignora e a
+  gravação a substitui na mesma transação. Um job apaga as vencidas a cada hora, em lotes (o padrão do 13.6c).
+- **Métrica** `taskflow_idempotency_requests_total{outcome}`: `created`, `replayed` (alto = rede ruim ou app repetindo
+  demais) e `reused` (422: bug de cliente).
+- **O `CommandBus` devolve `any`.** O handler passou a devolver `{ taskId, replayed }`, e o controller, que esperava o
+  `taskId` como texto, compilaria e responderia `{ "taskId": { "taskId": ..., "replayed": ... } }`. O tipo explícito
+  no controller (`const result: CreateTaskResult`) e o E2E fecham essa porta (problema 14).
+
+O limite: funciona porque o efeito é uma transação no MESMO banco. Um efeito externo (cobrar num gateway) exigiria a
+reserva com prazo e a chave repassada ao sistema externo, que também precisa ser idempotente.
+
 ### Em qual span gravar: o do request, não o ativo
 
 Dentro de um middleware Express, o span **ativo** é o que o `instrumentation-express` abre para o próprio middleware
@@ -418,6 +466,20 @@ npm run openapi:diff -- --base x.json # contra outro arquivo (experimentos)
 Para ver o `check` falhar: mude o `maxLength` de um DTO e rode `npm run openapi:check`; ele aponta a linha. Para ver
 uma mudança incompatível: gere uma base com `jq` (ex.: `jq '.components.schemas.CreateTaskDto.required -= ["title"]'
 docs/api/openapi.json > /tmp/base.json`) e rode `npm run openapi:diff -- --base /tmp/base.json`.
+
+### Idempotency-Key (14.5)
+
+```bash
+K=$(uuidgen)
+for i in 1 2; do
+  curl -s -D - -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' -H "Idempotency-Key: $K" -d '{"title":"Transferência"}' \
+    | grep -iE '^(HTTP|idempotent)|taskId'
+done      # 2x 201 com o MESMO taskId; a 2ª com Idempotent-Replayed: true
+curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $K" -d '{"title":"Outra coisa"}'   # 422
+curl -s localhost:9464/metrics | grep taskflow_idempotency_requests_total
+```
 
 ### Prazo: fim do contract (14.4c)
 
@@ -495,6 +557,7 @@ npm run app-version -- --platform android --min none --recommended none         
 | 11 | **(14.4b)** A remoção do `dueDate` não falhou o check do contrato, como eu tinha previsto (e escrito na 14.4a) | O oasdiff aceita remover campo de entrada **depreciado antes** (`request-property-removed-with-deprecation`) e campo de resposta documentado como **opcional** (`response-optional-property-removed`). O `dueDate` das respostas vinha sempre, mas era `@ApiPropertyOptional` | Registrado no ADR-0008: o CI pega a quebra não anunciada; a planejada é decidida pelos critérios. Campos sempre presentes das respostas viram `required` na 14.4c |
 | 12 | **(14.4b)** O E2E de tarefas quebrou com 400 | Ele ainda criava tarefas com `dueDate`: era, na prática, um cliente que não migrou | Atualizado para `due`. É o efeito exato do contract em quem ficou para trás, e por isso a versão mínima vem antes |
 | 13 | **(14.4c)** O teste da migração do `DROP` não conseguia rodar o arquivo SQL pelo Prisma | O arquivo tem vários comandos e um bloco `DO`; o Prisma executa um comando por vez (protocolo estendido) | O teste usa o driver `pg` (protocolo simples, aceita vários comandos), agora declarado como `devDependency` em vez de usado como dependência indireta do adapter do Prisma |
+| 14 | **(14.5)** O `tsc` não acusou que o controller continuava tratando o retorno do handler como texto | O `CommandBus.execute` devolve `any`: a mudança de `string` para `{ taskId, replayed }` compilaria e a resposta viraria `{ "taskId": { ... } }` | Tipo explícito no controller (`const result: CreateTaskResult`) e o E2E conferindo o corpo. Lição: onde a API do framework devolve `any`, o tipo não protege |
 
 ---
 
@@ -589,6 +652,19 @@ npm run app-version -- --platform android --min none --recommended none         
 | Testes | 2 de integração novos (a migração); os do backfill da 14.4a saíram (a coluna não existe); o do upcaster renomeado |
 | Suítes | 345 unitários · 84 integração · 66 E2E · 13 streaming |
 
+**14.5 — Idempotency-Key**
+
+| Experimento | Resultado |
+|---|---|
+| 10 requisições simultâneas com a mesma chave (Postgres real) | 1 tarefa, 1 evento, 1 mensagem na outbox, 1 chave; as 10 respostas com o mesmo `taskId` (1 criada, 9 repetidas). 3 execuções estáveis |
+| **Mutação:** a chave gravada DEPOIS, numa transação separada (o desenho ingênuo) | 2 testes falham: o das requisições simultâneas e o do "tudo ou nada" |
+| A gravação da chave falhando (CHECK de tamanho) | A transação inteira desfeita: nem a tarefa existe |
+| Mesma chave de dois usuários / chave vencida | Duas tarefas / conta como nova (a vencida é substituída) |
+| HTTP: nova tentativa · outro pedido · chave inválida · sem header · criação que falhou | Mesmo `taskId` + `Idempotent-Replayed: true` · 422 · 400 · duas tarefas · nada guardado |
+| oasdiff contra a `main` | 0 incompatíveis: parâmetro opcional novo, header de resposta novo, 422 novo (todos informativos) |
+| Testes novos | 18 unitários (header, hash, 422, os caminhos no handler), 6 de integração, 6 E2E |
+| Suítes | 363 unitários · 90 integração · 72 E2E · 13 streaming |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -602,6 +678,7 @@ npm run app-version -- --platform android --min none --recommended none         
 | Prazo só como instante (`dueDate`), sem o fuso do usuário | **(14.4a)** `due { at, timezone }` ao lado do `dueDate` depreciado, nos dois sentidos; `TaskCreated` v2 com o primeiro *upcaster* do projeto | Lembrete "vence hoje" precisa do fuso; e a mudança mostra o expand/contract inteiro (API, evento, banco, contrato público) |
 | `dueDate` e `due` lado a lado na API | **(14.4b)** Só `due`; a `due_date` sem uso, esperando o `DROP` num deploy separado; política de depreciação no ADR-0008 | Contract com os três critérios cumpridos; e o aprendizado de que o CI não substitui a política |
 | Coluna `due_date` sem uso; respostas prometendo menos do que entregam | **(14.4c)** Coluna removida (com `lock_timeout` e checagem anti-perda); campos sempre presentes como `required` | Fecha o expand/contract e o achado do oasdiff: uma remoção futura desses campos é pega pelo CI |
+| Repetir o `POST /tasks` criava outra tarefa | **(14.5)** `Idempotency-Key`: a mesma chave devolve a mesma resposta; a chave gravada na transação da tarefa | A rede do celular falha no meio; o cliente precisa poder repetir sem medo |
 | CORS só com `Content-Type`, `Authorization` e `X-Correlation-Id` | **(14.1)** Também `X-Platform` e `X-App-Version` | Sem isso, o preflight barraria o front web que os envia |
 
 ---
@@ -629,6 +706,9 @@ npm run app-version -- --platform android --min none --recommended none         
 - **O histórico devolve o `data` dos eventos já convertido** (v2): quem lê a linha do tempo vê o `due`, não o `dueDate`
   que foi gravado. É coerente com o contrato atual; o payload original continua no banco.
 - **Não dá para medir quem LÊ o campo antigo**, só quem o envia. Daí o contract depender da versão mínima.
+- **Só o `POST /tasks` tem `Idempotency-Key`.** Os comandos de ciclo de vida não duplicam efeito (a regra de domínio),
+  mas concluir de novo responde 409 em vez da mesma resposta. Outro endpoint de criação segue a mesma receita.
+- **Idempotência só para efeito no mesmo banco** (ver o ADR-0009).
 - **Política por comando, sem interface:** em produção, uma configuração gerenciada (AWS AppConfig) daria versões,
   rollback e deploy gradual da própria configuração.
 - **Sem link da loja no 426:** o app recebe a `minVersion`, mas a API não sabe se há uma versão na loja que a
@@ -647,7 +727,7 @@ npm run app-version -- --platform android --min none --recommended none         
 - [x] Expand do `dueDate` → `due { at, timezone }`: dois formatos, depreciação sinalizada e medida, *upcaster*, backfill (14.4a)
 - [x] Contract do `dueDate`, passo 1: fora da API, código sem a coluna antiga, backfill final, ADR-0008 (14.4b)
 - [x] Contract, passo 2: `DROP COLUMN` num deploy separado, com `lock_timeout` e checagem anti-perda; respostas com `required` corretos (14.4c)
-- [ ] `Idempotency-Key` (14.5)
+- [x] `Idempotency-Key` no `POST /tasks`, com a chave na mesma transação da tarefa (14.5)
 - [ ] Feature flags (14.6, 14.7)
 - [ ] Estratégia de versionamento (14.8)
 
