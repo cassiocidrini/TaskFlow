@@ -2,7 +2,7 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
 >
-> **Status:** 🚧 em construção, etapa **14.5 de 14.8** (`Idempotency-Key` no `POST /tasks`). Cada etapa acrescenta a sua parte a
+> **Status:** 🚧 em construção, etapa **14.6 de 14.8** (feature flags). Cada etapa acrescenta a sua parte a
 > este documento; o mapa completo está em "Roteiro do módulo", logo abaixo.
 >
 > **Onde vive no código:** [`src/common/client/`](../../src/common/client/client-info.ts) (headers, parser de versão,
@@ -16,7 +16,9 @@
 > [`scripts/openapi/`](../../scripts/openapi/snapshot.ts) e [`api-contract.yml`](../../.github/workflows/api-contract.yml) ·
 > prazo em [`due.dto.ts`](../../src/modules/tasks/dto/due.dto.ts), [`task-event.upcasters.ts`](../../src/modules/tasks/infrastructure/task-event.upcasters.ts) e
 > [`deprecation.ts`](../../src/common/deprecation/deprecation.ts) · idempotência em
-> [`src/common/idempotency/`](../../src/common/idempotency/idempotency.store.ts)
+> [`src/common/idempotency/`](../../src/common/idempotency/idempotency.store.ts) · flags em
+> [`src/modules/feature-flags/`](../../src/modules/feature-flags/feature-flag.rules.ts) e o comando
+> [`src/feature-flag.ts`](../../src/feature-flag.ts)
 
 ---
 
@@ -48,7 +50,7 @@ e todos os apps que ainda estão por aí. As perguntas que o módulo responde:
 | **14.4b** | **Contract**, passo 1: o `dueDate` sai da API; o código para de gravar e de ler a `due_date`; backfill final; ADR-0008 (política de depreciação) | ✅ |
 | **14.4c** | **Contract**, passo 2 (outro deploy): `DROP COLUMN due_date` com `lock_timeout` e checagem anti-perda; campos sempre presentes das respostas documentados como obrigatórios | ✅ |
 | **14.5** | `Idempotency-Key` no `POST /tasks`: a nova tentativa devolve a mesma resposta; a chave gravada na mesma transação da tarefa (ADR-0009) | ✅ |
-| 14.6 | Feature flags em módulo próprio (kill switch, allowlist, porcentagem) e `GET /me/features` | 🔜 |
+| **14.6** | Feature flags em módulo próprio (ADR-0010): kill switch, restrições de plataforma e versão, lista de usuários, porcentagem por bucket; `GET /me/features`; `npm run feature-flag` com auditoria | ✅ |
 | 14.7 | Flag `task-list-with-stats` e o critério de avanço em ADR | 🔜 |
 | 14.8 | Estratégia de versionamento com janela de suporte | 🔜 |
 
@@ -375,6 +377,17 @@ opcionais. A prova, com o oasdiff, simulando a remoção do `assigneeId` da list
 `due`. Tirar o `dueDate` do tópico é mudança incompatível de um contrato que outros serviços leem (`eventVersion` 2),
 e fica fora do escopo.
 
+### Feature flags (14.6)
+
+```bash
+npm run feature-flag -- --key tela-nova --description "Tela nova"                       # nasce desligada
+npm run feature-flag -- --key tela-nova --enable --allow <seu-userId>                     # só você
+npm run feature-flag -- --key tela-nova --rollout 10 --platforms ios,android --min-app-version 2.15.0 --dry-run
+curl -s localhost:3000/me/features -H "Authorization: Bearer $TOKEN" -H 'X-Platform: ios' -H 'X-App-Version: 2.15.0'
+npm run feature-flag -- --key tela-nova --kill --by "seu-nome (motivo)"                    # em até 5 s, para todos
+npm run feature-flag -- --show
+```
+
 ### Idempotency-Key (14.5): repetir uma requisição sem duplicar o efeito
 
 **O problema.** O app manda `POST /tasks`, o servidor cria a tarefa, e a resposta se perde (túnel, troca de Wi-Fi para
@@ -421,6 +434,56 @@ versões); um conflito de versão num agregado NOVO exigiria dois UUIDs aleatór
 
 O limite: funciona porque o efeito é uma transação no MESMO banco. Um efeito externo (cobrar num gateway) exigiria a
 reserva com prazo e a chave repassada ao sistema externo, que também precisa ser idempotente.
+
+### Feature flags (14.6): liberar aos poucos e desligar em segundos
+
+**Por que, num sistema com apps.** Uma tela nova com bug só se corrige publicando outra versão na loja: horas ou dias.
+Com a tela atrás de uma flag, ela é liberada aos poucos (time interno → 10% → 50% → todos) e **desligada em segundos**,
+sem deploy e sem loja. A decisão de construir (e não usar LaunchDarkly, Unleash ou AppConfig) está no
+[ADR-0010](../adr/0010-feature-flags-proprias.md), com o que se perde (interface, experimentos, segmentação rica) e
+quando revisitar.
+
+**A arquitetura:** a porta `FeatureFlags` (`isEnabled`, `evaluateAll`) é tudo o que o resto do sistema conhece; o
+adapter `PostgresFeatureFlags` lê as regras (são poucas) com cache e avalia localmente, sem chamada de rede por
+requisição. Trocar por um serviço gerenciado seria outro adapter.
+
+**A avaliação: uma função pura, e a ORDEM é a decisão** ([`feature-flag.rules.ts`](../../src/modules/feature-flags/feature-flag.rules.ts)):
+
+| # | Regra | Por que nesta posição |
+|---|---|---|
+| 1 | Flag inexistente → desligada | Código que pergunta por uma flag que ninguém criou não liga nada por engano |
+| 2 | Kill switch → desligada para TODOS | Antes de tudo, inclusive da lista de usuários: em incidente, desligar é absoluto. Mutação (a lista antes do kill switch): o teste falha |
+| 3 | Restrições: plataforma fora da lista, ou app abaixo da versão mínima → desligada | A tela só existe a partir de uma versão; cliente desconhecido (sem os headers da 14.1) não passa por uma restrição |
+| 4 | Lista de usuários → ligada | Time interno e beta, mesmo com 0% |
+| 5 | Porcentagem: `bucket < rollout` → ligada | O rollout gradual |
+
+**O bucket: `sha256("flagKey:userId")`, 4 bytes, `mod 100`.** As três propriedades, todas com teste sobre 10 mil
+usuários simulados (e 10% liga ~10% deles):
+- **determinístico:** o mesmo usuário cai sempre no mesmo grupo, em qualquer réplica. Sem isso, a tela apareceria e
+  sumiria aleatoriamente;
+- **monotônico:** `bucket < rollout` com o rollout subindo de 10 para 20 mantém os primeiros 10%. Ninguém perde a
+  funcionalidade que já tinha;
+- **o nome da flag no hash:** cada flag sorteia os SEUS usuários. Sem ele, os mesmos 10% seriam a cobaia de todo rollout
+  (mutação: o teste de independência falha).
+
+**Fail-closed, o contrário da versão mínima.** O cache é de 5 s (menor que os 30 s da 14.2: o kill switch precisa
+valer rápido), com leitura única e o último valor conhecido. Mas, se a configuração NUNCA foi lida, toda flag fica
+desligada. Na versão mínima, o desastre seria BLOQUEAR todo mundo, e lá a falha deixa passar; aqui, o desastre seria
+LIGAR algo para todos, e a falha desliga. **O lado seguro depende do que a falha causa.** E o fail-closed nem precisou
+de código próprio: sem regras, toda flag "não existe" (regra 1).
+
+**`GET /me/features`: só o resultado.** O app chama ao abrir e recebe `{ "flags": { "tela-nova": true } }`, nunca a
+porcentagem, a lista de usuários ou as restrições. Ninguém descobre os testadores lendo o tráfego, e a regra muda sem
+versão nova do app. `Cache-Control: private, no-cache`: o resultado é do usuário e é revalidado a cada abertura.
+
+**O comando `npm run feature-flag`** segue o `app-version`: valida com mensagem legível (e as mesmas regras viram
+CHECK no banco), grava numa transação sob advisory lock, audita antes/depois em `feature_flag_changes`, tem
+`--dry-run`. Flag nova nasce desligada e com 0%. E o kill switch desliga **sem apagar a regra**: religar volta
+exatamente ao estado de antes do incidente.
+
+**Métrica:** `taskflow_feature_flag_evaluations_total{flag, enabled, reason}`. O nome da flag é seguro como label (são
+poucas e criadas por nós; uma chave inventada pelo código não vira série), e a `reason` responde "por que o usuário X
+não vê a tela?". O `userId` nunca entra.
 
 ### Em qual span gravar: o do request, não o ativo
 
@@ -665,6 +728,20 @@ npm run app-version -- --platform android --min none --recommended none         
 | Testes novos | 18 unitários (header, hash, 422, os caminhos no handler), 6 de integração, 6 E2E |
 | Suítes | 363 unitários · 90 integração · 72 E2E · 13 streaming |
 
+**14.6 — feature flags**
+
+| Experimento | Resultado |
+|---|---|
+| Bucket com 10 mil usuários simulados | 10% liga entre 8,5% e 11,5%; subir para 20% mantém todos os primeiros; duas flags a 10% se sobrepõem em menos de 20% (sorteios independentes) |
+| **Mutação:** sem o nome da flag no hash | 1 teste falha: o da independência entre flags |
+| **Mutação:** lista de usuários antes do kill switch | 2 testes falham: o kill switch deixou de ser absoluto |
+| Adapter | 20 avaliações simultâneas = 1 leitura; kill switch vale quando o cache vence; banco fora = última configuração; nunca lida = todas desligadas |
+| Comando ao vivo | Cria desligada → `--dry-run` → liga a 10% no mobile ≥ 2.15 → kill → recusa de `--rollout 150` → `--show`; 3 linhas de auditoria com quem fez cada mudança; o kill manteve a regra |
+| `GET /me/features` (E2E) | Só o resultado (a lista de testadores não vaza); desligada fora da lista, na web e no app 2.14; kill switch na resposta seguinte; 401 sem token |
+| oasdiff contra a `main` | 0 incompatíveis (rota nova) |
+| Testes novos | 15 unitários, 5 de integração, 4 E2E |
+| Suítes | 378 unitários · 95 integração · 76 E2E · 13 streaming |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -679,6 +756,7 @@ npm run app-version -- --platform android --min none --recommended none         
 | `dueDate` e `due` lado a lado na API | **(14.4b)** Só `due`; a `due_date` sem uso, esperando o `DROP` num deploy separado; política de depreciação no ADR-0008 | Contract com os três critérios cumpridos; e o aprendizado de que o CI não substitui a política |
 | Coluna `due_date` sem uso; respostas prometendo menos do que entregam | **(14.4c)** Coluna removida (com `lock_timeout` e checagem anti-perda); campos sempre presentes como `required` | Fecha o expand/contract e o achado do oasdiff: uma remoção futura desses campos é pega pelo CI |
 | Repetir o `POST /tasks` criava outra tarefa | **(14.5)** `Idempotency-Key`: a mesma chave devolve a mesma resposta; a chave gravada na transação da tarefa | A rede do celular falha no meio; o cliente precisa poder repetir sem medo |
+| Toda funcionalidade nova ia para todos de uma vez, e desligar exigia deploy (e loja) | **(14.6)** Feature flags com kill switch, restrições, lista de usuários e porcentagem; `GET /me/features` | Liberar aos poucos e desligar em segundos, sem depender da aprovação da loja |
 | CORS só com `Content-Type`, `Authorization` e `X-Correlation-Id` | **(14.1)** Também `X-Platform` e `X-App-Version` | Sem isso, o preflight barraria o front web que os envia |
 
 ---
@@ -709,6 +787,9 @@ npm run app-version -- --platform android --min none --recommended none         
 - **Só o `POST /tasks` tem `Idempotency-Key`.** Os comandos de ciclo de vida não duplicam efeito (a regra de domínio),
   mas concluir de novo responde 409 em vez da mesma resposta. Outro endpoint de criação segue a mesma receita.
 - **Idempotência só para efeito no mesmo banco** (ver o ADR-0009).
+- **Flags sem interface e sem experimentos** (ADR-0010): só um engenheiro muda uma flag, e comparar as variantes é
+  feito pelas métricas (14.7). Segmentação só por usuário, plataforma e versão.
+- **Até 5 s de propagação** de qualquer mudança de flag, inclusive do kill switch (o cache por réplica).
 - **Política por comando, sem interface:** em produção, uma configuração gerenciada (AWS AppConfig) daria versões,
   rollback e deploy gradual da própria configuração.
 - **Sem link da loja no 426:** o app recebe a `minVersion`, mas a API não sabe se há uma versão na loja que a
@@ -728,7 +809,8 @@ npm run app-version -- --platform android --min none --recommended none         
 - [x] Contract do `dueDate`, passo 1: fora da API, código sem a coluna antiga, backfill final, ADR-0008 (14.4b)
 - [x] Contract, passo 2: `DROP COLUMN` num deploy separado, com `lock_timeout` e checagem anti-perda; respostas com `required` corretos (14.4c)
 - [x] `Idempotency-Key` no `POST /tasks`, com a chave na mesma transação da tarefa (14.5)
-- [ ] Feature flags (14.6, 14.7)
+- [x] Feature flags em módulo próprio, com kill switch, restrições, lista de usuários, bucket determinístico e monotônico, `GET /me/features` (14.6)
+- [ ] Uma funcionalidade real atrás de uma flag, com o critério de avanço do rollout (14.7)
 - [ ] Estratégia de versionamento (14.8)
 
 ---

@@ -37,6 +37,7 @@ npm run consumer:reports:dev            # consumer group reports (build: npm run
 npm run replay                          # republica o Event Store pela outbox (--aggregate <taskId>; build: start:replay)
 npm run redrive -- --group notifications --dry-run   # DLT → tópico de origem, só para o grupo (auditoria em dlt_redrives)
 npm run app-version -- --platform ios --min 2.10.0 --dry-run   # versão mínima/recomendada do app (--show; auditoria)
+npm run feature-flag -- --key <flag> --rollout 10 --dry-run   # feature flags (--show, --enable, --kill; auditoria)
 npm run openapi:generate                # mudou a API (rota, DTO, Swagger)? regera docs/api/openapi.json e commita junto
 npm run openapi:diff                    # mudanças incompatíveis no contrato contra a main (oasdiff via Docker)
 npm run lambda:build                    # compila a Lambda do push (lambdas/push-sender → dist; o aws:up já roda)
@@ -108,6 +109,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `common/telemetry/trace-context.ts` | `captureTraceContext`, `carrierFor`, `contextFromCarrier` | Contexto de trace que atravessa a outbox e o Kafka (W3C). Sempre pelo propagador global, nunca montando o `traceparent` à mão |
 | `modules/notifications/` | API: `GET /me/notifications` (só leitura). `consumer/`: `NotificationsHandler` (idempotente), contrato próprio (`task-event.message.ts`, zod), regras puras (`notification-rules.ts`), porta `PushQueue` → `SqsPushQueue` / `DisabledPushQueue` (13.7), processo em `notifications-consumer.ts` | Marca em `processed_events` e efeito na **mesma** `$transaction`; o `SendMessage` do push é a **última** escrita antes do COMMIT, com `pushId` = `eventId`; o consumer **não importa** o contrato do produtor nem lê tabelas da API; a API só **lê** `notifications` |
 | `modules/reports/` | API: `GET /projects/:projectId/stats` (só leitura, `assertOwner`). `consumer/`: `ReportsHandler` (idempotência pela **versão** do agregado), contrato próprio (`task-event.message.ts`), deltas puros (`report-rules.ts`), processo em `reports-consumer.ts` | Guarda `version >=` + `FOR UPDATE` na mesma `$transaction` do delta; contador só por incremento atômico (`coluna = coluna + delta`), nunca ler-somar-gravar; upsert de `project_stats` só no `TaskCreated` (CHECK avalia a linha candidata); evento que muda o projeto da tarefa = `InvalidReportMessageError` |
+| `modules/feature-flags/` + `src/feature-flag.ts` | Feature flags (14.6, ADR-0010): `evaluate()` pura (inexistente → kill switch → restrições → lista → porcentagem), `bucket()` = `sha256(flag:usuário) mod 100`, porta `FeatureFlags` → `PostgresFeatureFlags` (cache 5 s, *fail-closed*), `GET /me/features`, comando com auditoria | Quem usa uma flag injeta a PORTA; o app recebe só o resultado, nunca a regra; flag nova nasce desligada; `userId` nunca vira label |
 | `common/logging/logger.options.ts` | Opções do `nestjs-pino` (JSON, serializers, nível por status) | Serializers são **allowlist**: não adicione headers ao log |
 
 **Fora de `src/`** (não entram no build nem na imagem de produção; o lint cobre todos):
@@ -205,6 +207,8 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Redrive sem política declarada em `redrive-policy.ts`, ou para projeção com guarda de versão (o `reports`): a mensagem reenviada cairia como duplicata; o caminho é a reconstrução.
 - ❌ `PROCESSED_EVENTS_RETENTION_DAYS` menor ou igual à retenção do tópico (o schema recusa; se a retenção do tópico mudar, mude o mínimo junto).
 - ❌ Idempotência com reserva separada do efeito ("reservar → executar → marcar") ou num cache externo: é dual-write. A chave vai na transação do efeito (ADR-0009). Chave global (não por usuário) vaza a resposta de outro usuário.
+- ❌ Mandar a regra da flag para o app (porcentagem, lista de usuários): vaza os testadores e congela a lógica na versão do app. O app recebe só o `true`/`false`.
+- ❌ Bucket de rollout sem o nome da flag no hash (os mesmos usuários seriam cobaia de todo rollout) ou aleatório por requisição (a tela pisca); e flag lida "fail-open": sem configuração, desligada.
 - ❌ Decidir permissão pela versão ou plataforma do app (`@AppClient()`): o header é do cliente, qualquer um manda `99.0.0`. Serve para compatibilidade e experiência.
 - ❌ Middleware que responde por conta própria registrado com `app.use()`: roda antes do `pino-http` e a resposta não aparece no log de acesso (problema 3 do Módulo 14). Use middleware de módulo.
 - ❌ Ler a política de versão sem cache (uma query por requisição) ou *fail-closed* (bloquear todos os apps se a leitura falhar): o `VersionPolicyService` usa TTL, leitura única e o último valor conhecido.
