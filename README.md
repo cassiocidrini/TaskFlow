@@ -24,10 +24,11 @@ teste que a comprova; o que **não** está implementado aparece em [Limitações
 | **Projeções idempotentes** | `INSERT … ON CONFLICT DO NOTHING` e `UPDATE … SET`: entrega duplicada, 5 entregas simultâneas e replay completo resultam no mesmo estado | [`projections.spec.ts`](test/integration/projections.spec.ts) |
 | **Health checks e graceful shutdown** | `/health/live` × `/health/ready`; no SIGTERM, readiness 503 e drenagem → HTTP fecha esperando as requisições → banco → telemetria. Sob carga: 0 requisições cortadas | [`health/`](src/health/health.controller.ts) |
 | **Mensageria confiável (Kafka)** | Transactional Outbox na mesma transação do Event Store + relay em processo separado (ordem por tarefa, failover entre réplicas, API de pé com o Kafka fora do ar) + consumer **idempotente** (marca e efeito na mesma transação): 300 eventos com `kill -9` no meio = 300 notificações, 0 duplicadas; dois consumer groups no mesmo tópico, com idempotência por tabela de marcas e pela versão do agregado (contador sem *lost update*: a mutação perdeu 17 de 20); replay do Event Store pela outbox (reconstrução do read model: 6 projetos idênticos, 72 fantasmas injetados no tópico eliminados); retry classificado + dead-letter topic com redrive auditado (só o grupo que falhou reprocessa) (Postgres fora 45 s = **0** no DLT; sem a classificação, 6 de 40 eventos legítimos iriam para lá) | [Módulo 13](docs/modules/13-mensageria-kafka.md) · [`notifications.streaming-spec.ts`](test/streaming/notifications.streaming-spec.ts) |
+| **Kafka para fatos, SQS para trabalho** | O consumer de notificações grava o fato e enfileira o push no SQS **dentro da transação** (fila fora = rollback e retry infinito, nunca DLT); Lambda idempotente no DynamoDB (reserva com prazo), `batchItemFailures` e DLQ após 3 recebimentos, tudo em Terraform. SQS pausado: 0 notificações durante a queda, 0 no DLT, push enviado na volta | [Módulo 13.7](docs/modules/13-mensageria-kafka.md) · [`lambdas/push-sender/`](lambdas/push-sender/batch-processor.ts) · [`push.tf`](terraform/push.tf) |
 | **Fail-fast de configuração** | Variáveis de ambiente validadas com `zod` no boot: configuração inválida impede a app de subir | [`env.schema.ts`](src/config/env.schema.ts) |
-| **Testes com infraestrutura real** | 272 unitários · 71 de integração, 49 E2E e 13 de streaming contra **PostgreSQL e Kafka reais** via Testcontainers | [Testes](#-testes) |
+| **Testes com infraestrutura real** | 285 unitários · 74 de integração, 49 E2E e 13 de streaming contra **PostgreSQL e Kafka reais** via Testcontainers | [Testes](#-testes) |
 | **Observabilidade** | OpenTelemetry → Jaeger (traces) e Prometheus (métricas com `http_route`, sem os probes); Grafana **provisionado** com dashboard RED + banco + event loop; logs JSON com `correlationId` e `trace_id`; **um trace só** do request ao consumer do Kafka (contexto W3C gravado na outbox); dashboard de mensageria (outbox, lag pelo broker, DLTs) e **9 alertas como código testados com `promtool`** | [`tracing.ts`](src/tracing.ts) · [`grafana/`](grafana/dashboards/taskflow-api.json) |
-| **IaC** | Terraform (S3, SQS, SNS, IAM de menor privilégio) com backend remoto, sobre LocalStack | [`terraform/`](terraform/) |
+| **IaC** | Terraform (SQS com DLQ, Lambda, DynamoDB, S3, SNS, IAM de menor privilégio) com backend remoto, sobre LocalStack | [`terraform/`](terraform/) |
 
 ---
 
@@ -46,6 +47,8 @@ flowchart LR
 
     OB -->|relay<br/>processo separado| K[[Kafka<br/>taskflow.task-events.v1]]
     K -->|consumer group<br/>notifications| NO[(notifications)]
+    NO -.->|push: SQS na mesma transação| Q[[SQS taskflow-push<br/>+ DLQ]]
+    Q --> L[Lambda push-sender<br/>idempotente · DynamoDB]
 
     subgraph Leitura [Leitura — Query side]
         CT -->|Query| QH[Query Handler]
@@ -61,6 +64,7 @@ flowchart LR
 - **Leitura:** listagens vêm do Read Model `tasks_read`, uma projeção desnormalizada e paginada por cursor. O histórico vem direto do Event Store.
 - **Projeções** rodam depois da resposta HTTP (**consistência eventual**) e são idempotentes, o que torna seguro reprocessá-las.
 - **Kafka:** cada evento ganha, na mesma transação, um evento de **integração** na `outbox`. Um relay (outro processo) publica no tópico em ordem por tarefa; o consumer group `notifications` (outro processo) gera as notificações, deduplicando por `eventId`. A API nunca fala com o broker ([Módulo 13](docs/modules/13-mensageria-kafka.md)).
+- **SQS:** o envio do push é trabalho, não fato: o consumer de notificações o enfileira no SQS dentro da mesma transação, e uma Lambda o envia uma vez (Módulo 13.7).
 
 ### Event Sourcing na prática
 
@@ -172,7 +176,8 @@ curl -s $API/projects/$PROJECT/tasks/$TASK/history -H "$AUTH" | jq
 | `npm run infra:up:obs` | Postgres + Jaeger + Prometheus + Grafana |
 | `npm run infra:down` | Derruba os containers (os dados ficam nos volumes) |
 | `npm run aws:up` · `aws:down` · `aws:recreate` | LocalStack + Terraform ([Módulo 09](docs/modules/09-infraestrutura-como-codigo.md)) |
-| `npm run aws:resources` | Lista as filas SQS e os buckets S3 criados |
+| `npm run aws:resources` | Lista filas SQS, buckets S3, tabelas DynamoDB e Lambdas criados |
+| `npm run lambda:build` | Compila a Lambda do push (o `aws:up` já roda) |
 | `npm run streaming:up` · `streaming:down` · `streaming:topics` | Kafka 4 (KRaft) e criação dos tópicos ([Módulo 13](docs/modules/13-mensageria-kafka.md)); fora do `npm run dev` |
 | `npm run kafka:smoke` | Produz e consome uma mensagem de teste (valida cliente e broker) |
 | `npm run relay:dev` · `start:relay` | Relay da outbox → Kafka, processo separado da API (precisa do `streaming:up`) |
@@ -209,8 +214,8 @@ de outro usuário** · `409` regra de negócio violada ou conflito de concorrên
 
 | Suíte | Qtd. | Infraestrutura | O que prova |
 |---|---:|---|---|
-| **Unitários** | 272 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish`, contrato de integração, loop e backoff do relay, spans `create`/`publish` do relay, regras de notificação e leitor tolerante, deltas dos relatórios |
-| **Integração** | 71 | PostgreSQL real e `promtool` (Testcontainers) | Concorrência otimista, atomicidade de `events` + `outbox`, envelope de metadados, idempotência das projeções e do consumer, ordem do graceful shutdown, lock do relay com duas réplicas, contexto de trace gravado na outbox, guarda de versão e contadores sem *lost update* nos relatórios, regras de alerta disparando quando devem |
+| **Unitários** | 285 | Nenhuma (mocks) | Regras do agregado (sem mocks), handlers, autorização, ordem `save → publish`, contrato de integração, loop e backoff do relay, spans `create`/`publish` do relay, regras de notificação e leitor tolerante, deltas dos relatórios, Lambda do push (`batchItemFailures`, duplicata, reserva em andamento) e adapter SQS contra falhas de rede reais |
+| **Integração** | 74 | PostgreSQL real e `promtool` (Testcontainers) | Concorrência otimista, atomicidade de `events` + `outbox`, envelope de metadados, idempotência das projeções e do consumer, push enfileirado na transação (fila fora desfaz tudo), ordem do graceful shutdown, lock do relay com duas réplicas, contexto de trace gravado na outbox, guarda de versão e contadores sem *lost update* nos relatórios, regras de alerta disparando quando devem |
 | **E2E** | 49 | HTTP + PostgreSQL real | 401/400/404/409, anti-IDOR, ciclo de vida, histórico com autor, paginação, consistência eventual, `X-Correlation-Id`, health checks, API → outbox, `/me/notifications` só do próprio usuário, stats do projeto só para o dono |
 | **Streaming** | 13 | Kafka + PostgreSQL reais | Outbox → relay → tópico → consumer: chave, partição, ordem, headers; republicação sem notificação extra; restart sem reprocessar; falha com backoff sem furar a ordem; **um trace só** do request ao consumer; poison pill no DLT sem parar a partição; banco fora sem nada no DLT; DLT fora sem perder a mensagem; dois consumer groups no mesmo tópico sem dobrar números na republicação |
 
@@ -257,6 +262,7 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 - **Consumer de notificações:** o redrive do DLT é manual e por grupo inteiro (`npm run redrive`, com `--dry-run` e auditoria) e, ao desviar uma mensagem, as seguintes da mesma tarefa passam sem ela (ordem trocada por disponibilidade); API e consumer dividem o Postgres (fronteira por convenção); um crash (`kill -9`) pausa as partições por 30 s (session timeout).
 - **Consumer de relatórios:** tarefas criadas antes da outbox só entram nos números com um replay; reconstruir a projeção exige parar o consumer até o lag zerar; `project_stats` é uma linha quente por projeto.
 - **Replay:** republica o histórico inteiro (sem filtro por período ou projeto), e o lock por agregado que garante a ordem custa uma instrução por gravação da API.
+- **Push (SQS + Lambda):** o provedor é simulado e não há registro de dispositivos (Módulo 14); o trace para no SQS; com a fila fora, as notificações também esperam (o envio está na transação); a integração com a AWS é exercida só no roteiro manual com LocalStack (o token não vai para o CI).
 - **Logs:** JSON no stdout com `correlationId` e `trace_id`, mas sem agregador local (Loki).
 - **Alertas sem roteamento:** 9 regras de alerta testadas no CI disparam no Prometheus, mas sem Alertmanager ninguém é avisado fora dele; os limiares são pontos de partida, não derivados de SLO.
 - **Eventos antigos sem autor:** eventos gravados antes do envelope de metadados aparecem no histórico com `actorId: null`; o autor não é inferido. O metadata ainda não chega ao `EventBus` nem às projeções.
@@ -305,7 +311,8 @@ src/
 ├── reports-consumer.ts     # entrypoint do consumer group reports
 └── main.ts                 # entrypoint da API
 test/                       # unit/ · integration/ · e2e/ · streaming/ — a pirâmide de testes (Jest)
-terraform/                  # IaC (S3, SQS, SNS, IAM)
+terraform/                  # IaC (push: SQS + DLQ, Lambda, DynamoDB; S3, SNS, IAM)
+lambdas/push-sender/        # Lambda do push (deployable próprio, compilado com npm run lambda:build)
 grafana/                    # datasources e dashboard provisionados (dashboard como código)
 
 # Fora do produto: não entram no build nem na imagem de produção
