@@ -1,27 +1,11 @@
+import { stableStringify as stableJson } from '../../src/common/json/stable-json';
+
 /**
- * JSON determinístico para o snapshot do contrato da API (Módulo 14.3): chaves de OBJETO em ordem alfabética, em todos
- * os níveis; ordem de ARRAY preservada.
- *
- * Por que ordenar: o Nest monta o documento na ordem em que encontra controllers e DTOs. Mover um método no arquivo ou
- * mudar a ordem dos imports mudaria o JSON sem mudar o contrato, e o diff do PR mostraria uma "mudança" que não existe.
- *
- * Por que NÃO ordenar arrays: neles a ordem é informação (a ordem dos parâmetros, dos valores de um `enum`, das tags
- * na documentação). Ordená-los esconderia uma mudança real.
+ * O snapshot do contrato da API (Módulo 14.3): a serialização estável de `src/common/json/stable-json.ts` (a mesma do
+ * hash da `Idempotency-Key`, 14.5), com indentação de 2 e quebra de linha final (diff limpo no Git).
  */
 export function stableStringify(value: unknown): string {
-  return `${JSON.stringify(sortKeys(value), null, 2)}\n`;
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-        .map(([key, child]) => [key, sortKeys(child)]),
-    );
-  }
-  return value;
+  return `${stableJson(value, 2)}\n`;
 }
 
 /**
