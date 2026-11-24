@@ -89,6 +89,8 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | `modules/projects/` | CRUD de projetos + `assertOwner` | Ponto único de autorização por projeto |
 | `common/dto/pagination.dto.ts` | Paginação por cursor (`limit ≤ 100`) | Reusar em toda listagem |
 | `common/correlation/` | `X-Correlation-Id` (1º middleware) + `AsyncLocalStorage` | Ler o id com `currentCorrelationId()`, nunca de parâmetro ou header |
+| `common/client/` | `X-Platform` + `X-App-Version` (Módulo 14.1): `app-version.ts` (parse e comparação numérica), `resolveClientInfo`, `createClientInfoMiddleware()` (2º middleware: request, span do request, métrica `taskflow_app_requests_total`) e `@AppClient()` | Header inválido nunca vira 400; versão é compatibilidade, **nunca** autorização; métrica só com `MAJOR.MINOR` limitado |
+| `common/telemetry/request-span.ts` | `currentRequestSpan()`: o span HTTP do request (do `rpcMetadata`), não o ativo | Atributo de request gravado em middleware vai por aqui: o span ativo ali é o do próprio middleware |
 | `common/telemetry/route-telemetry.guard.ts` | Preenche `http.route` (span e métrica); **1º `APP_GUARD`** | Não é controle de acesso (sempre `true`); grava o padrão da rota, nunca a URL |
 | `health/` | `/health/live`, `/health/ready`, `ShutdownState` (drenagem) | Liveness **nunca** consulta dependências; readiness não expõe detalhe de infraestrutura |
 | `common/lifecycle/` | Encerramento do OTel pelo ciclo de vida do Nest; `armShutdownWatchdog` (API e relay) | `telemetry-registry.ts` não pode ter imports (é carregado pelo `tracing.ts`, antes de tudo) |
@@ -188,6 +190,8 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ Gravar na outbox fora do `appendMany`/replay sem `lockAggregateForOutbox`; consumer group novo sem decidir `acceptsReplay` (efeito colateral = `false`).
 - ❌ Redrive sem política declarada em `redrive-policy.ts`, ou para projeção com guarda de versão (o `reports`): a mensagem reenviada cairia como duplicata; o caminho é a reconstrução.
 - ❌ `PROCESSED_EVENTS_RETENTION_DAYS` menor ou igual à retenção do tópico (o schema recusa; se a retenção do tópico mudar, mude o mínimo junto).
+- ❌ Decidir permissão pela versão ou plataforma do app (`@AppClient()`): o header é do cliente, qualquer um manda `99.0.0`. Serve para compatibilidade e experiência.
+- ❌ Versão completa (PATCH) ou `userId` como label de métrica; atributo de request com `trace.getActiveSpan()` dentro de middleware (cai no span do middleware): use `currentRequestSpan()`.
 - ❌ Histograma customizado sem buckets explícitos (`advice.explicitBucketBoundaries`): os padrões do OTel são para ms, e o percentil de uma métrica em segundos sai inventado.
 - ❌ DLQ no relay da outbox: decidido contra no Módulo 13.5 (falhas ali são de infraestrutura e atingem todas as mensagens); use o runbook.
 - ❌ Enviar o push depois do COMMIT (crash no meio = push perdido) ou usar como chave de idempotência um id gerado na tentativa (o id da notificação): a chave é o `eventId`.
