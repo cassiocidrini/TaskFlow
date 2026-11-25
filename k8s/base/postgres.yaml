@@ -1,0 +1,94 @@
+# PostgreSQL do TaskFlow no cluster (Módulo 02, etapa 2.2): um StatefulSet com volume persistente, e um Service
+# headless que dá ao banco um nome DNS estável (`postgres`).
+#
+# StatefulSet, e não Deployment: o banco tem IDENTIDADE e DADOS. O StatefulSet dá nome estável (`postgres-0`, sempre),
+# um volume só dele que sobrevive ao pod (o substituto monta o MESMO disco) e criação/remoção uma réplica por vez.
+# Com Deployment, os pods são intercambiáveis e o disco não acompanha a réplica.
+#
+# Banco de verdade em produção costuma ficar FORA do cluster (RDS, Cloud SQL: backup, failover e upgrade gerenciados).
+# Aqui ele está dentro para o cluster local ser completo, e para exercitar estado no Kubernetes.
+---
+# Headless (`clusterIP: None`): sem IP virtual nem balanceamento. O DNS `postgres` (e `postgres-0.postgres`) resolve
+# direto para o IP do pod. É o Service que o StatefulSet exige (`serviceName`), e basta para um banco de 1 réplica
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: taskflow
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: taskflow
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      containers:
+        - name: postgres
+          # A MESMA versão do compose e dos testes (o test-images.spec.ts confere as quatro fontes), por tag e digest
+          image: postgres:16.15@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: taskflow
+            - name: POSTGRES_DB
+              value: taskflow
+            # A senha vem do Secret `taskflow-db`, criado por comando (nunca no Git): ver o Módulo 02, 2.2
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: taskflow-db
+                  key: password
+            # Os dados numa SUBPASTA do volume: o initdb recusa um diretório que não esteja vazio, e alguns provedores
+            # de disco criam um `lost+found` na raiz do volume
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          # Pronto = aceita conexões. Sem isto, o Job de migração e a API tentariam conectar num banco ainda no initdb
+          readinessProbe:
+            exec:
+              command: ['pg_isready', '-U', 'taskflow', '-d', 'taskflow']
+            periodSeconds: 5
+            timeoutSeconds: 3
+  # Um PersistentVolumeClaim POR réplica (data-postgres-0), criado pelo StatefulSet. O StorageClass padrão do kind
+  # (`standard`, local-path) cria o volume quando o pod é agendado, numa pasta do nó. Apagar o pod NÃO apaga o PVC:
+  # o substituto monta o mesmo disco
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: postgres
+          app.kubernetes.io/part-of: taskflow
+      spec:
+        accessModes: ['ReadWriteOnce']
+        resources:
+          requests:
+            storage: 1Gi

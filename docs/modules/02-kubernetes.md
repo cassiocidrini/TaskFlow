@@ -2,11 +2,12 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 25/11/2026
 >
-> **Status:** 🚧 em construção, etapa **2.1 de 2.6** (cluster local, o primeiro Deployment e o diagnóstico de uma
-> falha). Cada etapa acrescenta a sua parte a este documento; o mapa completo está em "Roteiro do módulo".
+> **Status:** 🚧 em construção, etapa **2.2 de 2.6** (a API rodando no cluster, com o Postgres num StatefulSet, a
+> configuração em ConfigMap e Secret, e a migração como Job). Cada etapa acrescenta a sua parte a este documento; o mapa completo está em "Roteiro do módulo".
 >
 > **Onde vive no código:** [`k8s/kind-config.yaml`](../../k8s/kind-config.yaml) (o cluster) ·
-> [`k8s/base/`](../../k8s/base/api.yaml) (os manifestos) · a imagem que o cluster roda vem do workflow
+> [`k8s/base/`](../../k8s/base/api.yaml) (API e Service) · [`postgres.yaml`](../../k8s/base/postgres.yaml) ·
+> [`config.yaml`](../../k8s/base/config.yaml) · [`migrate-job.yaml`](../../k8s/base/migrate-job.yaml) · a imagem que o cluster roda vem do workflow
 > [`publish-image.yml`](../../.github/workflows/publish-image.yml) ([Módulo 03](03-ci-cd-github-actions.md), E.3)
 
 ---
@@ -42,7 +43,7 @@ trabalha continuamente para que o real fique igual ao declarado.
 | Etapa | O que entrega | Status |
 |---|---|:-:|
 | **2.1** | Cluster local com **kind** (1 control-plane + 2 workers, versão fixada por digest), `kubectl`, e o primeiro Deployment da API, que falha de propósito: o diagnóstico de um `CrashLoopBackOff` e a reconciliação observada | ✅ |
-| 2.2 | Postgres no cluster (StatefulSet + volume persistente), ConfigMap e Secret, e a **migração como Job** | 🔜 |
+| **2.2** | Postgres no cluster (StatefulSet + volume persistente), ConfigMap e Secret (fora do Git), a **migração como Job**, e a API respondendo por um Service | ✅ |
 | 2.3 | A API de verdade: probes, recursos, `securityContext`, **rolling update sob carga sem erro** e rollback | 🔜 |
 | 2.4 | Kafka, relay e consumers no cluster | 🔜 |
 | 2.5 | Ingress, escala automática (HPA) e NetworkPolicy | 🔜 |
@@ -50,11 +51,12 @@ trabalha continuamente para que o real fique igual ao declarado.
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 2.1)
+## 🏗️ Arquitetura (estado atual: 2.2)
 
 ```text
 sua máquina
   ├─ kubectl ──HTTPS──► 127.0.0.1:<porta>  (a API do cluster, publicada pelo kind; credencial em ~/.kube/config)
+  ├─ kubectl port-forward svc/taskflow-api 8080:80 ──► (túnel pela API do cluster, para testar)
   │
   └─ Docker
        ├─ compose: postgres, kafka, jaeger, prometheus, grafana, localstack   (ambiente de dev, sem relação com o cluster)
@@ -63,10 +65,18 @@ sua máquina
             │                             (taint control-plane:NoSchedule: não recebe os pods da aplicação)
             ├─ taskflow-worker   ──┐
             └─ taskflow-worker2  ──┴─ kubelet + containerd · kube-proxy · kindnet (rede dos pods, 10.244.0.0/16)
-                                       namespace taskflow:
-                                         Deployment taskflow-api → ReplicaSet → 2 Pods (um por worker)
-                                         imagem ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e0… (commit aa4d4a0)
-                                         ⚠️ CrashLoopBackOff de propósito: sem DATABASE_URL e JWT_SECRET (2.2 resolve)
+
+namespace taskflow
+  ConfigMap taskflow-api (NODE_ENV, LOG_LEVEL, OTEL_SDK_DISABLED)        ← Git
+  Secret taskflow-db (password) · Secret taskflow-api (jwt-secret)       ← kubectl create, NUNCA no Git
+       │
+       ├─► Service postgres (headless) ─► StatefulSet postgres ─► postgres-0 ─► PVC data-postgres-0 (1 GiB) ─► PV (local-path)
+       │                                    readiness: pg_isready
+       ├─► Job taskflow-migrate-aa4d4a0 ─► prisma migrate deploy (20 migrações) ─► Complete     (1º, com kubectl wait)
+       └─► Service taskflow-api (ClusterIP :80) ─► EndpointSlice (IPs dos pods prontos)
+                                                  └─► Deployment taskflow-api ─► ReplicaSet ─► 2 pods (um por worker)
+                                                        imagem ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e0… (aa4d4a0)
+                                                        DATABASE_URL = postgresql://taskflow:$(POSTGRES_PASSWORD)@postgres:5432/taskflow
 ```
 
 ---
@@ -172,6 +182,89 @@ processo que está quebrado (nem o banco, nem a API externa que ele chama no boo
 O `kind` só cria e apaga o cluster. Todo o resto passa pelo `kubectl`, como seria no EKS ou no GKE: o que se aprende
 aqui vale lá.
 
+### Estado no Kubernetes: StatefulSet e volumes (2.2)
+
+| | Deployment | **StatefulSet** |
+|---|---|---|
+| Nome dos pods | Aleatório (`taskflow-api-6b456c7c95-2qfbh`) | **Estável** (`postgres-0`, sempre) |
+| Disco | Nenhum por réplica (os pods são intercambiáveis) | **Um PVC por réplica**, que sobrevive ao pod |
+| Ordem | Todos de uma vez | Uma réplica por vez, em ordem |
+| Para | Processos sem estado (a API) | Bancos, brokers (o Kafka, na 2.4) |
+
+**O disco tem três peças:**
+
+| Peça | O que é | No experimento |
+|---|---|---|
+| **StorageClass** | O "fornecedor" de discos e as regras dele | `standard` (o `local-path` do kind): uma pasta no nó |
+| **PersistentVolumeClaim** (PVC) | O **pedido**: "1 GiB, leitura e escrita por um nó" (`RWO`) | `data-postgres-0`, criado pelo `volumeClaimTemplates` |
+| **PersistentVolume** (PV) | O **disco de fato**, que atende o pedido | Criado pelo StorageClass; `Bound` ao PVC |
+
+- **`WaitForFirstConsumer`:** o disco só é criado quando o pod é agendado (o PV nasceu 2 s depois do PVC), e por isso
+  nasce **no nó do pod**. Um disco local não pode ser montado de outra máquina.
+- **A prova:** o pod `postgres-0` apagado voltou com o mesmo nome, montou o mesmo PVC (10 min de idade contra 8 s do
+  pod), subiu em 8 s sem *initdb* (a primeira subida levou 16 s), e o cadastro continuava lá.
+- **`RECLAIM POLICY: Delete`:** apagar o **pod** é seguro, apagar o **StatefulSet** também (por padrão ele não apaga os
+  PVCs), mas apagar o **PVC** apaga o disco. Em produção, volume de banco usa `Retain`, e **backup não é opcional**:
+  volume persistente protege da queda de um pod, não de um comando errado.
+- **Banco em produção costuma ficar fora do cluster** (RDS, Cloud SQL): backup, failover e upgrade gerenciados. Aqui
+  está dentro para o cluster local ser completo e para exercitar estado no Kubernetes.
+
+### Service: um endereço estável (2.2)
+
+O IP de um pod muda a cada recriação (visto na 2.1). Um **Service** dá um nome e um endereço estáveis, e o DNS
+interno (CoreDNS) resolve o nome dentro do cluster:
+
+| Tipo | Como funciona | No TaskFlow |
+|---|---|---|
+| **ClusterIP** | Um IP virtual que o `kube-proxy` de cada nó distribui entre os pods do `selector` | `taskflow-api` (porta 80 → `http` do container) |
+| **Headless** (`clusterIP: None`) | Sem IP virtual: o DNS devolve direto o IP do pod (e `postgres-0.postgres` aponta para aquele pod) | `postgres`, o Service que o StatefulSet exige |
+
+**Quem está por trás do Service:** um controller mantém o **EndpointSlice**, a lista de IPs dos pods que têm o label
+do `selector` **e estão prontos**. Um pod que deixa de estar pronto sai da lista e para de receber tráfego: é isso que
+a readiness probe controla (2.3). `targetPort: http` usa o **nome** da porta do container: mudar o número lá não
+exige mudar aqui.
+
+### ConfigMap × Secret (2.2)
+
+| | ConfigMap | Secret |
+|---|---|---|
+| Para quê | Configuração comum (`NODE_ENV`, `LOG_LEVEL`) | Senha do banco, `JWT_SECRET` |
+| Vai para o Git? | ✅ Como qualquer manifesto | ❌ **Nunca.** Criado por `kubectl create secret`, com valores aleatórios gerados na hora |
+| Como chega ao container | `envFrom` (todas as chaves viram variáveis) | `valueFrom.secretKeyRef` (uma chave por variável) |
+
+**Um Secret não é cifrado, é base64.** O `kubectl get secret … -o jsonpath='{.data.password}' | base64 -d` mostrou a
+senha em claro, sem chave nenhuma. Quem pode **ler** Secrets no namespace lê a senha, e um YAML de Secret no Git é uma
+senha no Git. Em produção: RBAC restringindo a leitura de Secrets, o etcd configurado para cifrá-los no disco, e o
+valor vindo de um cofre (**External Secrets Operator** + AWS Secrets Manager/Vault) ou cifrado no Git (**Sealed
+Secrets**, **SOPS**). O Git guarda **qual** segredo a API espera (nome e chaves); o valor fica fora. É a exceção
+consciente à regra do "Git é a fonte da verdade".
+
+**A senha existe num lugar só:** o Kubernetes expande `$(POSTGRES_PASSWORD)` dentro do `value` de outra variável,
+desde que ela venha **antes** na lista. A `DATABASE_URL` é montada no manifesto, e a senha é gerada em hex (sem `@`,
+`/` ou `:`, que quebrariam a URL).
+
+### A migração como Job (2.2)
+
+Um **Job** roda um processo **até terminar com sucesso**; um Deployment o mantém vivo para sempre. A migração roda
+**uma vez**, antes da API, e não no boot de cada réplica (corrida entre réplicas e permissão de DDL na API): o desenho
+do target `migrate` da imagem ([Módulo 03](03-ci-cd-github-actions.md), E.1) virando realidade.
+
+| Decisão | Por quê |
+|---|---|
+| **Nome com o commit** (`taskflow-migrate-aa4d4a0`) | O template de um Job é **imutável**: não se "atualiza" um Job que já rodou. Cada versão é um Job novo, e o histórico diz qual migração rodou com qual versão |
+| `backoffLimit: 3` | Cobre o banco ainda subindo. Uma migração com erro falha as 4 vezes, o Job fica `Failed`, e o `kubectl wait` do deploy estoura: a API nova não sobe sobre um schema pela metade |
+| `restartPolicy: Never` | Cada tentativa é um pod novo, e o log das que falharam continua lá |
+| Sem `ttlSecondsAfterFinished` | O pod `Completed` (`0/1`: não há nada rodando para estar pronto) fica para o log ser lido |
+| A ordem, à mão (`kubectl wait --for=condition=complete`) | Ver na mão o que precisa acontecer em sequência. Automatizar a ordem é a 2.6 |
+
+### Troca de versão: o primeiro rolling update (2.2)
+
+Mudar o template do pod (a API ganhou `envFrom` e `env`) criou um **ReplicaSet novo** (`6b456c7c95`) e esvaziou o
+antigo (`7c6999f7c`, que ficou com `0`, guardado: é para ele que um rollback volta). `kubectl rollout status` acompanha
+a troca até o fim, e é o comando que um pipeline usa para saber se o deploy deu certo. Sem probes (2.3), "pronto"
+ainda é "processo rodando".
+
+
 ---
 
 ## 📋 Como reproduzir
@@ -246,7 +339,48 @@ kubectl diff -f k8s/base/api.yaml                     # drift: replicas 3 no clu
 kubectl apply -f k8s/base/api.yaml                    # o arquivo vence: volta para 2
 ```
 
-Para apagar tudo: `kind delete cluster --name taskflow`.
+### 6. Configuração e segredos (2.2)
+
+```bash
+kubectl create secret generic taskflow-db -n taskflow --from-literal=password="$(openssl rand -hex 24)"
+kubectl create secret generic taskflow-api -n taskflow --from-literal=jwt-secret="$(openssl rand -hex 32)"
+kubectl get secret taskflow-db -n taskflow -o jsonpath='{.data.password}' | base64 -d; echo   # base64 não é cifra
+kubectl apply -f k8s/base/config.yaml
+```
+
+### 7. O banco, a migração e a API, nesta ordem (2.2)
+
+```bash
+kubectl apply -f k8s/base/postgres.yaml
+kubectl get pods -n taskflow -l app.kubernetes.io/name=postgres --watch     # postgres-0: Running 0/1 → 1/1 (initdb)
+kubectl get pvc,pv -n taskflow                                              # Bound; o PV criado com o pod
+
+kubectl apply -f k8s/base/migrate-job.yaml
+kubectl wait --for=condition=complete job/taskflow-migrate-aa4d4a0 -n taskflow --timeout=120s
+kubectl logs -n taskflow job/taskflow-migrate-aa4d4a0                       # 20 migrações aplicadas
+
+kubectl apply -f k8s/base/api.yaml
+kubectl rollout status deployment/taskflow-api -n taskflow --timeout=120s
+kubectl get replicaset,pods,endpointslices -n taskflow
+```
+
+### 8. Testar de fora e provar o StatefulSet (2.2)
+
+```bash
+kubectl port-forward -n taskflow svc/taskflow-api 8080:80        # numa aba própria: o túnel prende o terminal
+curl -s localhost:8080/health/ready; echo                         # database: up
+curl -s -X POST localhost:8080/auth/register -H 'Content-Type: application/json' \
+  -d '{"name":"Cassio K8s","email":"k8s@example.com","password":"Senha-forte-123"}'; echo
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/docs      # 404: NODE_ENV=production
+kubectl exec -n taskflow postgres-0 -- psql -U taskflow -d taskflow -c 'SELECT email FROM "User";'
+
+kubectl delete pod postgres-0 -n taskflow                         # o pod some...
+kubectl get pods,pvc -n taskflow -l app.kubernetes.io/name=postgres
+kubectl exec -n taskflow postgres-0 -- psql -U taskflow -d taskflow -c 'SELECT email FROM "User";'   # ...os dados, não
+```
+
+Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Secrets precisam ser criados de novo
+(não estão no Git).
 
 ---
 
@@ -257,8 +391,9 @@ Para apagar tudo: `kind delete cluster --name taskflow`.
 | 1 | Por ~2 s, o pod que ia morrer apareceu como `READY 1/1` | Sem *readiness probe*, "processo rodando" é tratado como "pronto". Com um Service na frente, chegaria tráfego a um pod que nem subiu | Esperado na 2.1 (o manifesto mínimo); as probes entram na 2.3 |
 | 2 | `kubectl describe pod -l …` não trouxe a seção `Events` | No `kubectl` 1.37, o `describe` com seletor de label veio sem os eventos | `kubectl get events -n <ns> --sort-by=.lastTimestamp`: o histórico do namespace inteiro, em ordem. Eventos **expiram** (1 h por padrão): num incidente, colete cedo |
 | 3 | `kubectl logs --previous` respondeu `unable to retrieve container logs` | Com o pod parado em `Error`/`CrashLoopBackOff`, o container "atual" **já é** a tentativa que morreu, e o anterior a ela o kubelet já descartou | Pod parado: `kubectl logs` **sem** `--previous`. O `--previous` é para o pod que reiniciou e está `Running` |
-| 4 | A mensagem de erro de boot manda conferir o `.env` | Escrita para o desenvolvimento local; num container não existe `.env` | Registrado; o texto muda na 2.2, com a configuração do cluster |
+| 4 | A mensagem de erro de boot manda conferir o `.env` | Escrita para o desenvolvimento local; num container não existe `.env` | **(2.2)** O texto passou a citar os dois lugares: o `.env` no desenvolvimento, o ConfigMap e o Secret num container |
 | 5 | O erro de boot saiu em **texto**, não em JSON | O logger JSON (pino) só assume depois de o Nest subir; um erro antes disso sai no formato padrão do Nest | Registrado (limitações): a linha mais importante de um `CrashLoopBackOff` chega a um agregador sem estrutura |
+| 6 | **(2.2)** O `curl` digitado na aba do `port-forward` não executou | O `port-forward` prende o terminal enquanto o túnel está aberto; o texto fica na fila e só roda quando o túnel fecha | O túnel numa aba própria, os testes em outra |
 
 ---
 
@@ -278,6 +413,19 @@ Para apagar tudo: `kind delete cluster --name taskflow`.
 | `delete` dos 2 pods | 2 pods novos em ~5 s, mesmo ReplicaSet, IPs novos, `RESTARTS` do 0 |
 | `scale --replicas=3` + `diff` + `apply` | O 3º pod no worker que já tinha um; o `diff` mostrou o drift (3 × 2); o `apply` voltou para 2, tirando um pod do worker com dois |
 
+
+**2.2 — banco, configuração e migração**
+
+| Experimento | Resultado |
+|---|---|
+| Secrets por comando, valores aleatórios | `taskflow-db` e `taskflow-api` (`Opaque`); `base64 -d` mostrou a senha em claro |
+| Postgres (StatefulSet) | `postgres-0` no `taskflow-worker2`: `Running` aos 11 s e `1/1` aos 16 s (o *initdb*); PVC `data-postgres-0` `Bound` a um PV de 1 GiB criado 2 s depois, com o pod |
+| Job de migração | As 20 migrações aplicadas em 20 s (com o download da imagem `taskflow-migrate`); `Complete 1/1`; o pod ficou `Completed` |
+| API | `kubectl apply` criou o ReplicaSet `6b456c7c95` (2/2 prontos, 0 reinícios); o `7c6999f7c` ficou com 0; EndpointSlice com os 2 IPs; logs em JSON com o nome do pod no `hostname` |
+| De fora (`port-forward`) | `/health/ready` com `database: up`; cadastro 201, conferido com `psql` no pod do banco; `/docs` 404 (`NODE_ENV=production`) |
+| `postgres-0` apagado | Voltou com o mesmo nome em 8 s, sem *initdb*, no mesmo PVC (10 min × 8 s); o cadastro continuava lá; a API reconectou sozinha (`database: up`), sem reiniciar |
+| `test-images.spec.ts` | Confere também o Postgres do manifesto (tag do compose + digest). **Mutação:** `postgres:18.6` no manifesto → o teste falha dizendo a versão esperada |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -285,16 +433,24 @@ Para apagar tudo: `kind delete cluster --name taskflow`.
 | Antes | Hoje | Por quê |
 |---|---|---|
 | A imagem publicada no GHCR, sem ninguém para rodá-la | **(2.1)** Um cluster local reproduzível (arquivo versionado, versão fixada) rodando a imagem por digest | O fim do pipeline precisa de um orquestrador: réplicas, troca de versão, tráfego só para o que está pronto |
+| A API em `CrashLoopBackOff`, sem configuração nem banco | **(2.2)** Postgres num StatefulSet com volume, ConfigMap no Git e Secrets fora dele, migração como Job, e a API atrás de um Service | O deploy completo de um serviço com estado: a ordem banco → migração → API, e cada tipo de objeto no seu papel |
+| A versão do Postgres em três lugares (compose, testes, smoke) | **(2.2)** Quatro, com o manifesto, e o `test-images.spec.ts` vigiando os quatro | O Dependabot não lê manifestos do Kubernetes: sem o teste, o cluster ficaria numa versão e o resto em outra |
 | Módulo planejado "para um ambiente Linux dedicado" | Feito no Linux de desenvolvimento, com kind | O kind roda o Kubernetes oficial em containers: não precisa de máquina dedicada |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
-- **A API não sobe ainda:** sem configuração e sem banco no cluster (2.2).
 - **Sem probes, recursos nem `securityContext`:** o pod é considerado pronto assim que o processo inicia, sem limite
   de CPU/memória, e sem exigir o não-root que a imagem já oferece (2.3).
-- **Sem Service:** os pods não têm endereço estável (2.2).
+- **Secrets criados à mão:** num cluster novo, alguém precisa rodar o `kubectl create secret` (e guardar os valores
+  fora). O caminho de produção é o External Secrets Operator lendo de um cofre, ou Sealed Secrets/SOPS no Git.
+- **Postgres sem backup, sem réplica e como root:** um pod, um disco local, `RECLAIM POLICY: Delete`, e a imagem
+  oficial rodando com o usuário padrão. Em produção, um banco gerenciado (ou um operador como o CloudNativePG).
+- **A ordem banco → migração → API é manual** (`kubectl wait`); automatizá-la é a 2.6.
+- **Telemetria desligada no cluster** (`OTEL_SDK_DISABLED`): ainda não há coletor lá dentro.
+- **Acesso só por `port-forward`:** um túnel de depuração, que fixa um pod e não balanceia; o acesso de verdade é o
+  Ingress (2.5).
 - **Erro de boot fora do JSON:** o que acontece antes de o pino assumir sai em texto.
 - **O digest no manifesto é atualizado à mão:** a cada imagem nova, alguém precisa trocar o `sha256`. Automatizar
   (a segunda metade do CD) é a 2.6.
@@ -310,7 +466,10 @@ Para apagar tudo: `kind delete cluster --name taskflow`.
 - [x] Namespace próprio e o primeiro Deployment, com a imagem por digest (2.1)
 - [x] Um `CrashLoopBackOff` diagnosticado com `get`, `describe`, `events` e `logs` (2.1)
 - [x] Reconciliação observada: pods recriados, escala, drift e o `apply` como fonte da verdade (2.1)
-- [ ] Postgres, configuração e migração como Job (2.2)
+- [x] Postgres num StatefulSet com volume persistente, provado apagando o pod (2.2)
+- [x] ConfigMap no Git e Secrets fora dele; a `DATABASE_URL` montada a partir do Secret (2.2)
+- [x] Migração como Job, com nome por commit e a ordem garantida por `kubectl wait` (2.2)
+- [x] A API respondendo por um Service, com o primeiro rolling update (2.2)
 - [ ] Probes, recursos, `securityContext` e rolling update sem erro (2.3)
 - [ ] Workers no cluster (2.4)
 - [ ] Ingress, HPA e NetworkPolicy (2.5)
@@ -327,6 +486,19 @@ Para apagar tudo: `kind delete cluster --name taskflow`.
   é o processo; 137 é SIGKILL (memória, probe).
 - **"Por que o Kubernetes é declarativo?"** Grava-se o estado desejado; controllers reconciliam continuamente.
   Resiste a falhas (o que some é recriado) e deixa o Git como fonte da verdade.
+
+### Perguntas de entrevista (2.2)
+
+- **"StatefulSet × Deployment?"** Identidade estável, um volume por réplica que sobrevive ao pod, ordem. Para banco e
+  broker; Deployment para o que não tem estado.
+- **"Secret do Kubernetes é seguro?"** É base64, não cifra. Segurança vem de RBAC, cifra do etcd no disco e de o valor
+  vir de um cofre (External Secrets) ou ir cifrado (Sealed Secrets/SOPS); nunca em texto no Git.
+- **"Por que a migração é um Job, e não um initContainer da API?"** O initContainer roda em CADA réplica, a cada
+  pod novo: corrida entre réplicas e DDL a cada escala. O Job roda uma vez, antes, e falha o deploy se falhar.
+- **"Por que o Job tem nome novo a cada versão?"** O template de um Job é imutável; e o nome com o commit vira o
+  histórico de qual migração rodou com qual versão.
+- **"O que acontece com os dados se o pod do banco morrer? E se apagarem o PVC?"** O pod volta e monta o mesmo disco;
+  apagar o PVC (com `Delete`) apaga o disco. Por isso `Retain` e backup.
 
 ---
 

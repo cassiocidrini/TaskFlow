@@ -1,9 +1,8 @@
-# A API do TaskFlow como Deployment (Módulo 02).
+# A API do TaskFlow como Deployment, e o Service na frente dela (Módulo 02).
 #
-# Etapa 2.1: a versão MÍNIMA, de propósito. Sem configuração (DATABASE_URL, JWT_SECRET) e sem banco no cluster, o
-# processo recusa subir (validação do ambiente, fail-fast do Módulo 01) e o pod entra em CrashLoopBackOff. O
-# objetivo da etapa é investigar isso com o kubectl. Entram nas próximas etapas: a configuração e o Postgres (2.2),
-# probes, recursos, securityContext e a estratégia de rolling update (2.3).
+# 2.1: sem configuração nem banco, o processo recusava subir (CrashLoopBackOff, diagnosticado com o kubectl).
+# 2.2: a configuração (ConfigMap `taskflow-api` + Secrets `taskflow-db` e `taskflow-api`), o Postgres no cluster e o
+# Service. Ainda de fora, e são a 2.3: probes, recursos, securityContext e a estratégia de rolling update.
 #
 # Deployment, e não Pod direto: um Pod sozinho não é recriado se morrer nem se o nó cair. O Deployment declara
 # "quero N réplicas desta versão"; ele cria um ReplicaSet (que mantém as N cópias vivas) e, numa troca de versão,
@@ -38,3 +37,43 @@ spec:
           ports:
             - name: http
               containerPort: 3000
+          # O que não é sensível, de uma vez: cada chave do ConfigMap vira uma variável de ambiente
+          envFrom:
+            - configMapRef:
+                name: taskflow-api
+          env:
+            # Mesma montagem do Job de migração: a senha vem do Secret, e o Kubernetes expande $(POSTGRES_PASSWORD)
+            # na URL (só funciona com a variável declarada ANTES). `postgres` é o Service headless do banco
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: taskflow-db
+                  key: password
+            - name: DATABASE_URL
+              value: postgresql://taskflow:$(POSTGRES_PASSWORD)@postgres:5432/taskflow
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: taskflow-api
+                  key: jwt-secret
+---
+# O endereço ESTÁVEL da API dentro do cluster: o IP de um pod muda a cada recriação (visto na 2.1), o do Service não.
+# ClusterIP: um IP virtual, alcançável só de dentro do cluster, que o kube-proxy de cada nó distribui entre os pods
+# com o label abaixo. O DNS `taskflow-api.taskflow` (ou só `taskflow-api`, no mesmo namespace) resolve para ele.
+# De fora, por enquanto: `kubectl port-forward` (o acesso de verdade, Ingress, é a 2.5)
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskflow-api
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-api
+    app.kubernetes.io/part-of: taskflow
+spec:
+  selector:
+    app.kubernetes.io/name: taskflow-api
+  ports:
+    - name: http
+      port: 80
+      # Pelo NOME da porta do container (`http`): mudar o número lá não exige mudar aqui
+      targetPort: http
