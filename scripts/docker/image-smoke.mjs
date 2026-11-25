@@ -12,13 +12,17 @@
  *
  * Tudo numa rede Docker própria, com nomes únicos, e removido no fim (inclusive se falhar). Só usa módulos nativos
  * do Node, como os scripts de `scripts/dev/`.
+ *
+ * Imagens prontas (Etapa E.3): com `IMAGE` e `MIGRATE_IMAGE` no ambiente, o smoke testa ESSAS imagens, sem construir
+ * nem apagar. É o que o workflow de publicação usa para publicar exatamente o digest que foi testado.
  */
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
 const id = `taskflow-smoke-${process.pid}`;
-const image = `${id}:runtime`;
-const migrateImage = `${id}:migrate`;
+const prebuilt = Boolean(process.env.IMAGE && process.env.MIGRATE_IMAGE);
+const image = process.env.IMAGE || `${id}:runtime`;
+const migrateImage = process.env.MIGRATE_IMAGE || `${id}:migrate`;
 const network = `${id}-net`;
 const db = `${id}-db`;
 const api = `${id}-api`;
@@ -55,13 +59,18 @@ async function waitFor(name, probe, timeoutMs) {
 function cleanup() {
   docker(['rm', '-f', api, db], { check: false, quiet: true });
   docker(['network', 'rm', network], { check: false, quiet: true });
-  docker(['rmi', '-f', image, migrateImage], { check: false, quiet: true });
+  // Imagem recebida pronta é de quem chamou (o workflow vai publicá-la): só apaga a que o smoke construiu
+  if (!prebuilt) docker(['rmi', '-f', image, migrateImage], { check: false, quiet: true });
 }
 
 async function main() {
-  console.log('Construindo a imagem (runtime e migrate)...');
-  docker(['build', '-q', '-t', image, '.']);
-  docker(['build', '-q', '--target', 'migrate', '-t', migrateImage, '.']);
+  if (prebuilt) {
+    console.log(`Testando as imagens prontas: ${image} e ${migrateImage}`);
+  } else {
+    console.log('Construindo a imagem (runtime e migrate)...');
+    docker(['build', '-q', '-t', image, '.']);
+    docker(['build', '-q', '--target', 'migrate', '-t', migrateImage, '.']);
+  }
 
   docker(['network', 'create', network], { quiet: true });
   docker(['run', '-d', '--name', db, '--network', network,

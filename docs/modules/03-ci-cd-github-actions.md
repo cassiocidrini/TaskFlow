@@ -32,8 +32,8 @@ em equipe: ninguém precisa "confiar" que o colega rodou os testes, porque o pip
 | Sigla | Nome | O que faz | No TaskFlow |
 |---|---|---|---|
 | **CI** | Integração Contínua | Valida automaticamente cada mudança | ✅ |
-| **CD** | Entrega Contínua | Deixa cada versão aprovada **pronta** para deploy | ⏳ a imagem é construída e testada em todo PR; falta publicá-la |
-| **CD** | Deploy Contínuo | Publica em produção automaticamente | ❌ ainda não |
+| **CD** | Entrega Contínua | Deixa cada versão aprovada **pronta** para deploy | ✅ a imagem testada e atestada vai para o GHCR a cada merge (E.3) |
+| **CD** | Deploy Contínuo | Publica em produção automaticamente | ❌ o deploy é o Módulo 02 (Kubernetes) |
 
 ### Vocabulário do GitHub Actions
 
@@ -382,6 +382,56 @@ O Dependabot lê `uses:`, Dockerfile e compose, mas não comandos dentro de `run
 
 ---
 
+## 📦 CD: a imagem publicada no GHCR (Etapa E.3)
+
+A cada merge na `main`, o workflow [`publish-image.yml`](../../.github/workflows/publish-image.yml) publica a imagem
+de produção no GitHub Container Registry, testada e atestada. É a primeira metade do CD: a entrega. O deploy
+(Kubernetes) é o Módulo 02.
+
+```text
+merge na main ─► "Publicar imagem" (push na main; também manual, só na main)
+  1. docker build UMA vez: taskflow:sha-<commit> e o target migrate (taskflow-migrate), com labels OCI
+  2. smoke (7 verificações) e Trivy NESSAS imagens, sem rebuild
+  3. push: ghcr.io/cassiocidrini/taskflow:sha-<commit> (imutável) e :main (ponteiro)
+           ghcr.io/cassiocidrini/taskflow-migrate:sha-<commit>
+  4. atestados assinados (Sigstore), presos ao digest: proveniência SLSA das duas imagens e o SBOM (CycloneDX) da API
+```
+
+| Decisão | Por quê |
+|---|---|
+| **A imagem publicada é a testada** | Constrói uma vez, testa e publica o mesmo digest. Construir de novo para publicar seria publicar algo que ninguém testou (uma dependência pode ter mudado entre os dois builds). O smoke aceita imagens prontas (`IMAGE` e `MIGRATE_IMAGE`) e, nesse caso, não as apaga |
+| **Workflow separado, só ele com escrita** | `packages: write`, `id-token: write` e `attestations: write` ficam só no job de publicação. O CI dos PRs continua só com leitura: código de PR nunca roda com um token que publica |
+| **`sha-<commit>` imutável, sem `latest`** | O `latest` não diz o que está rodando nem permite rollback. O deploy referencia o **digest** (o resumo do workflow mostra o `@sha256:` de cada imagem); a tag `main` é só para humanos |
+| **`docker login`/`push` direto** | Sem `docker/login-action` nem `build-push-action`: cada action a menos é uma dependência a menos (E.2). As únicas actions novas são as oficiais de atestado (`actions/attest`), fixadas por SHA |
+| **Digest da saída do `push`** | É o que o registry de fato guardou. O `docker inspect` muda de comportamento com o image store do Docker (clássico × containerd) |
+| **Proveniência e SBOM atestados** | Qualquer pessoa confere: esta imagem saiu deste commit, por este workflow, e contém isto. Fecha a "imagem não assinada" do A08 (Módulo 06). O SBOM vem do Trivy, que já estava no pipeline |
+| **Publicações em fila** (`cancel-in-progress: false`) | Um push cancelado no meio deixaria a `main` apontando para uma imagem e a `sha-` para outra |
+
+**Validado antes do merge, num registry local** (`registry:2` no lugar do GHCR): os mesmos comandos do workflow
+construíram, o smoke passou nas imagens prontas (7/7) sem apagá-las, o Trivy passou, o SBOM saiu com 443
+componentes, e o digest extraído da saída do `push` **é o ID da imagem testada**: apagada a local e baixada pelo
+digest, o ID bateu. Os atestados só existem no GitHub (OIDC); conferidos depois do primeiro run.
+
+**Conferir uma imagem publicada:**
+
+```bash
+gh attestation verify oci://ghcr.io/cassiocidrini/taskflow@sha256:<digest> --repo cassiocidrini/TaskFlow
+docker pull ghcr.io/cassiocidrini/taskflow@sha256:<digest>      # deploy e rollback: sempre pelo digest
+```
+
+**Visibilidade:** um pacote novo no GHCR nasce privado. Para o Kubernetes local (Módulo 02) baixar sem
+credencial, ele fica público (*Packages → taskflow → Package settings*).
+
+### Perguntas de entrevista
+
+- **"Como você garante que a imagem em produção é a que foi testada?"** Construindo uma vez, testando, publicando o
+  mesmo digest e fazendo o deploy pelo digest.
+- **"Por que não `latest`?"** Não diz o que está rodando, e "voltar para o latest de ontem" não existe.
+- **"Como alguém confere de onde veio a imagem?"** Pelo atestado de proveniência, assinado com um certificado de
+  curta duração emitido para o workflow (sem chave guardada em segredo), verificado com `gh attestation verify`.
+
+---
+
 ## 🔒 Proteção da `main` (Ruleset)
 
 A proteção é um **Ruleset** (*Settings → Rules → Rulesets*), o formato que o GitHub recomenda no lugar da "regra
@@ -500,7 +550,8 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 
 ## 🚧 Limitações e próximos passos
 
-- **CD não implementado:** não há deploy automático. O próximo passo natural é um workflow disparado no merge para a `main` que publica a imagem Docker e faz o deploy (ex.: Render/Fly.io + Neon).
+- **Deploy não automatizado:** a imagem é publicada (E.3), mas nada a coloca no ar. O deploy por digest, com a migração
+  como Job antes do rollout, é o Módulo 02 (Kubernetes).
 - **Scripts de instalação sem política:** o npm 11.19 roda os scripts de `postinstall` de qualquer dependência (só
   avisa). Um `allowScripts` no `package.json` com `strict-allow-scripts` faria de um script novo um erro de build
   (o vetor de worms como o Shai-Hulud, de 2025).
@@ -509,7 +560,6 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - **`overrides` do `effect`:** dívida com prazo; sai quando o Prisma atualizar a dependência.
 - **O `HEALTHCHECK` da imagem é o da API:** um worker (relay, consumers) roda com `--no-healthcheck`. No Kubernetes,
   o `HEALTHCHECK` é ignorado e as probes ficam no manifesto (Módulo 02).
-- **A imagem não é publicada:** o job `image` constrói e testa, mas nenhum registry a recebe (próximo passo do CD).
 - **`--omit=optional` é uma aposta conferida:** uma dependência opcional nova de que a API precise sairia da imagem;
   o smoke pega se ela quebrar o boot, não se quebrar só um caminho raro.
 - **Setup repetido nos jobs de teste:** uma *composite action* eliminaria as linhas duplicadas.
@@ -528,7 +578,8 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - [x] Badge do CI no README
 - [x] Contrato da API conferido no CI e mudanças incompatíveis bloqueadas sem label (Módulo 14.3)
 - [x] Imagem de produção em Node 24, não-root, com `HEALTHCHECK`, migração separada, e construída e executada no CI (Etapa E.1)
-- [ ] CD (publicar a imagem e fazer o deploy)
+- [x] CD, entrega: imagem testada publicada no GHCR por digest, com proveniência e SBOM atestados (Etapa E.3)
+- [ ] CD, deploy (Módulo 02)
 - [x] Cadeia de suprimentos: `npm audit` e Trivy como portões, Dependabot, CodeQL e actions por SHA (Etapa E.2)
 
 ---
