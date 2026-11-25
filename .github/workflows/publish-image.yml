@@ -42,7 +42,9 @@ jobs:
         with:
           node-version: '24'
 
-      # O GHCR exige o nome em minúsculas. A tag `sha-<commit>` é imutável (é o que um deploy referencia); a `main` é
+      # O GHCR exige o nome em minúsculas. A tag `sha-<commit>` diz de que commit a imagem saiu, mas NÃO é imutável: um
+      # `workflow_dispatch` no mesmo commit reconstrói (build não é bit a bit reproduzível) e a sobrescreve. Imutável
+      # é o digest, e é por ele que o deploy referencia a imagem. A `main` é
       # só um ponteiro para humanos. Sem `latest`: ele não diz o que está rodando nem permite rollback.
       - name: Nomes das imagens
         id: names
@@ -88,7 +90,8 @@ jobs:
           trivy image --format cyclonedx --output /out/sbom.cdx.json --no-progress "$IMAGE"
 
       # docker login/push direto, sem action de terceiro: cada action a menos é uma dependência a menos (E.2).
-      # O digest vem da saída do push (o que o registry de fato guardou)
+      # O digest vem da saída do push (o que o registry de fato guardou). O login FICA até os atestados: com
+      # `push-to-registry`, o actions/attest grava no GHCR usando a credencial do Docker (o logout é o último passo)
       - name: Publicar no GHCR
         id: push
         env:
@@ -103,7 +106,6 @@ jobs:
           migrate_digest=$(digest_of "${MIGRATE}:${TAG}")
           docker tag "${APP}:${TAG}" "${APP}:main"
           docker push "${APP}:main" > /dev/null
-          docker logout ghcr.io
           if [ -z "$app_digest" ] || [ -z "$migrate_digest" ]; then
             echo "::error::digest não encontrado na saída do push"
             exit 1
@@ -154,3 +156,9 @@ jobs:
             echo
             echo "Conferir a origem: \`gh attestation verify oci://${APP}@${APP_DIGEST} --repo ${GITHUB_REPOSITORY}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # Por último e SEMPRE (inclusive se algo falhou): a credencial do GHCR não fica no runner. Antes, o logout era
+      # no fim do push, e os atestados falhavam com "No credentials found for registry ghcr.io"
+      - name: Logout do GHCR
+        if: always()
+        run: docker logout ghcr.io
