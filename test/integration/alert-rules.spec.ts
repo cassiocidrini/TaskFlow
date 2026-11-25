@@ -8,9 +8,9 @@
  *   disparam, com que labels e com que texto). É ali que estão os limiares, os `for`, os filtros de grupo e as duas
  *   armadilhas encontradas: o contador que nasce em 1 e a janela de `rate()` curta demais para o Prometheus 3.
  *
- * Na suíte de integração (e não na unitária) porque precisa de Docker.
+ * Na suíte de integração (e não na unitária) porque precisa de Docker. Que a imagem do teste é a do compose, quem
+ * confere é o unitário `test-images.spec.ts` (junto com a do Postgres e a do Kafka).
  */
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { GenericContainer, Wait } from 'testcontainers';
 import { PROMETHEUS_TEST_IMAGE } from '../support/prometheus-image';
@@ -46,11 +46,6 @@ async function promtool(...args: string[]): Promise<string> {
 }
 
 describe('Regras de alerta do Prometheus (promtool)', () => {
-  it('a imagem do teste é a mesma do compose', () => {
-    const compose = readFileSync(join(ROOT, 'docker-compose.yml'), 'utf8');
-    expect(compose).toContain(`image: ${PROMETHEUS_TEST_IMAGE}`);
-  });
-
   it('check rules: todas as regras são válidas', async () => {
     const output = await promtool('check', 'rules', 'alerts.yml');
     expect(output).toMatch(/SUCCESS: \d+ rules found/);
