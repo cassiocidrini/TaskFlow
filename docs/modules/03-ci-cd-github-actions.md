@@ -155,7 +155,7 @@ jobs:
 
 [`api-contract.yml`](../../.github/workflows/api-contract.yml) roda o **oasdiff** entre o `docs/api/openapi.json` da base
 do PR e o do PR, e falha numa mudança incompatível, a menos que o PR tenha a label `breaking-change`. É um workflow
-**separado** porque reage a `labeled`/`unlabeled`: no `ci.yml`, pôr uma label dispararia de novo os quatro jobs. O
+**separado** porque reage a `labeled`/`unlabeled`: no `ci.yml`, pôr uma label dispararia de novo todos os jobs. O
 valor da label entra no shell como **booleano calculado pelo GitHub** (`contains(...)`), nunca como texto do PR: nada
 que o autor do PR escreve vira comando (*script injection* em Actions). Validado com o `actionlint`.
 
@@ -561,7 +561,10 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - **Alerta moderado do `glob` sem correção possível:** chega por `auto-instrumentations-node → resource-detector-gcp
   → gcp-metadata → gaxios → rimraf@5 → glob@10`, e o aviso não tem versão corrigida dentro do que o `rimraf@5` aceita
   (o security update do Dependabot falhou por isso). Abaixo do portão (HIGH); sai quando a cadeia atualizar, ou
-  desligando os detectores de nuvem que não usamos.
+  desligando os detectores de nuvem que não usamos. O mesmo vale para o `minimatch` (correção só no 11, quem usa exige
+  o 9). **Risco aceito e registrado** (25/11/2026): os alertas #25 e #26 foram fechados como `tolerable_risk`, com o
+  motivo no próprio alerta. Não chamamos `glob` (nem com `AbortSignal`), e nenhuma entrada de usuário chega ao
+  `minimatch`. Fechar o alerta também para as tentativas de security update, que falhavam a cada rodada.
 - **`overrides` do `effect`:** dívida com prazo; sai quando o Prisma atualizar a dependência.
 - **O `HEALTHCHECK` da imagem é o da API:** um worker (relay, consumers) roda com `--no-healthcheck`. No Kubernetes,
   o `HEALTHCHECK` é ignorado e as probes ficam no manifesto (Módulo 02).

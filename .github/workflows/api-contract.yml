@@ -4,7 +4,7 @@ name: Contrato da API
 # oasdiff. O snapshot já ser o contrato do código é garantido pelo job "quality" do ci.yml (`openapi:check`).
 #
 # Workflow separado porque precisa rodar de novo quando a label `breaking-change` é posta ou tirada (`labeled`,
-# `unlabeled`): no ci.yml, isso dispararia também os quatro jobs pesados.
+# `unlabeled`): no ci.yml, isso dispararia de novo todos os jobs do CI.
 on:
   pull_request:
     branches: [main, master]
