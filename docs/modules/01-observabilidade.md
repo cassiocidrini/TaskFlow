@@ -662,5 +662,4 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 
 ---
 
-**Próximo:** [Módulo 03 — CI/CD com GitHub Actions](03-ci-cd-github-actions.md) ·
-O Módulo 02 (Kubernetes) está planejado para um ambiente Linux dedicado.
+**Próximo:** [Módulo 02 — Orquestração com Kubernetes](02-kubernetes.md)

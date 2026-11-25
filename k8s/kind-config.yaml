@@ -1,0 +1,25 @@
+# Cluster Kubernetes local do TaskFlow (Módulo 02), criado pelo kind: cada nó é um container Docker rodando o
+# Kubernetes oficial (kubelet, containerd e, no control-plane, API server, etcd, scheduler e controllers).
+#
+#   kind create cluster --config k8s/kind-config.yaml    cria (~1 min) e aponta o kubectl para ele
+#   kind delete cluster --name taskflow                  apaga tudo (o cluster é descartável: recriar é barato)
+#
+# Três nós, e não um: com dois workers, dá para ver o scheduler distribuir as réplicas, um pod "mudar de máquina"
+# quando o nó dele some, e regras de afinidade fazendo diferença. Num cluster de um nó só, nada disso aparece.
+#
+# A imagem do nó fixa a versão do Kubernetes (1.37.0) por tag E digest, a mesma regra do Dockerfile (E.1/E.2): sem
+# o digest, o cluster de amanhã poderia ser outro. O kubectl instalado (1.37.2) está dentro da diferença aceita
+# entre cliente e cluster (uma versão minor para cima ou para baixo).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: taskflow
+nodes:
+  # O cérebro: API server (por onde passa todo comando do kubectl), etcd (o banco do estado desejado) e os
+  # controllers que reconciliam o real com o desejado. Não recebe os pods da aplicação (tem um "taint" para isso)
+  - role: control-plane
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  # Onde os pods do TaskFlow rodam
+  - role: worker
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  - role: worker
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5

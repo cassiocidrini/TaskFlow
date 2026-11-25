@@ -11,7 +11,7 @@ problemas reais encontrados (e como foram resolvidos) e onde o resultado vive no
 | # | Módulo | Status |
 |:-:|---|:-:|
 | 01 | [Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana)](01-observabilidade.md) | ✅ revisado |
-| 02 | Orquestração com Kubernetes | 🔜 planejado para um ambiente Linux dedicado |
+| 02 | [Orquestração com Kubernetes](02-kubernetes.md) | 🚧 em construção (2.1 de 2.6) |
 | 03 | [CI/CD com GitHub Actions](03-ci-cd-github-actions.md) | ✅ revisado |
 | 04 | [Modelagem NoSQL com DynamoDB](04-modelagem-nosql-dynamodb.md) | ✅ revisado |
 | 05 | [Event Sourcing e CQRS](05-event-sourcing-cqrs.md) | ✅ revisado |

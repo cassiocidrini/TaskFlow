@@ -28,7 +28,7 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
    (`EventBus` em memória; a outbox do Módulo 13.2 cobre só o Kafka); relay sem DLQ por decisão (mensagem
    ruim trava a fila; runbook no Módulo 13); redrive manual e por grupo inteiro;
    throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; probes `/health` sem consumidor
-   (sem manifesto Kubernetes; o `HEALTHCHECK` da imagem só chama o *live*); imagem publicada no GHCR, mas sem deploy (Módulo 02). Ao corrigir uma, tire-a daqui no MESMO PR.
+   (o manifesto Kubernetes ainda sem probes; o `HEALTHCHECK` da imagem só chama o *live*); a API no cluster local ainda sem configuração nem banco (Módulo 02 em construção). Ao corrigir uma, tire-a daqui no MESMO PR.
 
 ## Swagger — como está montado
 
@@ -63,7 +63,7 @@ assim (banco real via Testcontainers, `eventually()` para consistência eventual
 npx tsc --noEmit && npm run lint && npm run test:unit
 npm run build                                     # aplica o plugin do Swagger (nest-cli.json)
 node .claude/skills/taskflow-docs/scripts/probe-openapi.js            # 18 rotas (inclui /health/live, /health/ready e /me/features), 6 tags, sem tag fantasma
-node .claude/skills/taskflow-docs/scripts/find-undocumented.js src test terraform scripts load labs   # esperado: 0
+node .claude/skills/taskflow-docs/scripts/find-undocumented.js src test terraform scripts load labs k8s   # esperado: 0
 npm run test:e2e        # se tocou em controller/pipe/guard (Docker ligado; roda com --runInBand)
 npm run test:streaming  # se tocou em outbox, relay ou contrato de integração (sobe Kafka + Postgres)
 ```
