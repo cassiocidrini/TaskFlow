@@ -59,7 +59,9 @@ export function startTelemetry({
     // Sem `service.name`, o Jaeger lista o serviço como `unknown_service:node`
     resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: serviceName }),
     traceExporter,
-    metricReader: metricExporter,
+    // Lista (`metricReaders`): o campo singular `metricReader` foi removido no OTel 3 (sdk-node 0.300). Sem ele, o
+    // processo sobe normalmente e só as métricas deixam de sair; o telemetry-export.spec.ts prova que saem
+    metricReaders: [metricExporter],
     // Spans automáticos de HTTP, Express e PostgreSQL, sem alterar o código da aplicação.
     // Probes (/health/*) ficam fora: sem span e sem métrica HTTP, para não distorcer latência e req/s.
     instrumentations: [

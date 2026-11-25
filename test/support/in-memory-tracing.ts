@@ -6,17 +6,20 @@
  * deixa o span ativo para o código chamado; sem o propagador, `inject`/`extract` são no-op. Faltando uma delas, o
  * teste passaria sem propagar nada.
  *
+ * `@opentelemetry/sdk-trace` (OTel 3): substituiu o `sdk-trace-base`, removido na migração 2 → 3 (o
+ * `BasicTracerProvider` virou `TracerProvider`, e o `SimpleSpanProcessor` recebe `{ exporter }`).
+ *
  * Global de verdade (é como a API do OTel funciona): use em `beforeAll` e chame `stop()` no `afterAll`.
  */
 import { context, propagation, trace } from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import {
-  BasicTracerProvider,
+  TracerProvider,
   InMemorySpanExporter,
   SimpleSpanProcessor,
   type ReadableSpan,
-} from '@opentelemetry/sdk-trace-base';
+} from '@opentelemetry/sdk-trace';
 
 export interface InMemoryTracing {
   /** Spans já ENCERRADOS, na ordem em que terminaram. */
@@ -29,8 +32,8 @@ export interface InMemoryTracing {
 
 export function startInMemoryTracing(): InMemoryTracing {
   const exporter = new InMemorySpanExporter();
-  const provider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(exporter)],
+  const provider = new TracerProvider({
+    spanProcessors: [new SimpleSpanProcessor({ exporter })],
   });
   trace.setGlobalTracerProvider(provider);
   propagation.setGlobalPropagator(new W3CTraceContextPropagator());
