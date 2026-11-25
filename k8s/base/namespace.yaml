@@ -1,0 +1,8 @@
+# O espaço do TaskFlow dentro do cluster (Módulo 02). Namespace separa nomes, permissões (RBAC), cotas e regras de
+# rede: tudo do TaskFlow fica aqui, e nada cai no `default` por esquecimento.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: taskflow
+  labels:
+    app.kubernetes.io/part-of: taskflow

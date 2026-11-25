@@ -592,5 +592,5 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 
 ---
 
-**Anterior:** [Módulo 01 — Observabilidade](01-observabilidade.md) ·
+**Anterior:** [Módulo 02 — Orquestração com Kubernetes](02-kubernetes.md) ·
 **Próximo:** [Módulo 04 — Modelagem NoSQL com DynamoDB](04-modelagem-nosql-dynamodb.md)

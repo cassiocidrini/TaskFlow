@@ -1,0 +1,40 @@
+# A API do TaskFlow como Deployment (Módulo 02).
+#
+# Etapa 2.1: a versão MÍNIMA, de propósito. Sem configuração (DATABASE_URL, JWT_SECRET) e sem banco no cluster, o
+# processo recusa subir (validação do ambiente, fail-fast do Módulo 01) e o pod entra em CrashLoopBackOff. O
+# objetivo da etapa é investigar isso com o kubectl. Entram nas próximas etapas: a configuração e o Postgres (2.2),
+# probes, recursos, securityContext e a estratégia de rolling update (2.3).
+#
+# Deployment, e não Pod direto: um Pod sozinho não é recriado se morrer nem se o nó cair. O Deployment declara
+# "quero N réplicas desta versão"; ele cria um ReplicaSet (que mantém as N cópias vivas) e, numa troca de versão,
+# cria um ReplicaSet novo e esvazia o antigo aos poucos.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-api
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-api
+    app.kubernetes.io/part-of: taskflow
+spec:
+  # Duas réplicas para ver o scheduler espalhar os pods pelos dois workers
+  replicas: 2
+  # Como o Deployment reconhece os pods que são dele: pelos labels. Precisa bater com o template abaixo
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: taskflow-api
+  # O molde de cada pod
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: taskflow-api
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      containers:
+        - name: api
+          # Por DIGEST, nunca por tag (Módulo 03, E.3): é exatamente a imagem que o smoke e o Trivy testaram, com
+          # proveniência atestada (commit aa4d4a0). Uma tag pode passar a apontar para outra imagem; o digest não
+          image: ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e083495cc2f09778ba0b111b2c7fd2ec24da241abaaf2c387d91398397
+          ports:
+            - name: http
+              containerPort: 3000
