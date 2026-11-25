@@ -1,0 +1,156 @@
+name: Publicar imagem
+
+# CD, primeira metade (Etapa E.3, Módulo 03): a cada merge na `main`, a imagem de produção vai para o GHCR, testada
+# e atestada. O deploy (Kubernetes) é o Módulo 02.
+#
+# A imagem publicada É a imagem testada: constrói UMA vez, roda o smoke e o Trivy NESSA imagem e publica o mesmo
+# digest. Construir de novo para publicar seria publicar algo que ninguém testou.
+#
+# Workflow separado do ci.yml porque é o único com permissão de ESCRITA (publicar pacote, assinar atestado): o CI dos
+# PRs continua só com leitura, e código de PR nunca roda com um token que publica.
+on:
+  push:
+    branches: [main]
+  # Rodar de novo sem commit novo (ex.: o primeiro run falhou por configuração do pacote)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Publicações em fila, nunca canceladas no meio: um push cancelado pela metade deixaria tags apontando para imagens
+# diferentes (a `main` nova com a `sha-` antiga)
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publicar imagem no GHCR
+    # Só a `main` publica, inclusive no disparo manual
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Publicar no GHCR com o GITHUB_TOKEN (sem segredo cadastrado)
+      packages: write
+      # Atestados: o OIDC do GitHub emite o certificado de curta duração (Sigstore) que assina, e a API guarda
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      # O GHCR exige o nome em minúsculas. A tag `sha-<commit>` é imutável (é o que um deploy referencia); a `main` é
+      # só um ponteiro para humanos. Sem `latest`: ele não diz o que está rodando nem permite rollback.
+      - name: Nomes das imagens
+        id: names
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          {
+            echo "app=ghcr.io/${owner}/taskflow"
+            echo "migrate=ghcr.io/${owner}/taskflow-migrate"
+            echo "tag=sha-${GITHUB_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Labels OCI: `source` liga o pacote ao repositório no GHCR; `revision` diz de que commit a imagem saiu
+      - name: Build (uma vez só)
+        env:
+          APP: ${{ steps.names.outputs.app }}
+          MIGRATE: ${{ steps.names.outputs.migrate }}
+          TAG: ${{ steps.names.outputs.tag }}
+        run: |
+          labels=(
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}"
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}"
+            --label "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            --label "org.opencontainers.image.title=taskflow"
+          )
+          docker build "${labels[@]}" -t "${APP}:${TAG}" .
+          docker build "${labels[@]}" --target migrate -t "${MIGRATE}:${TAG}" .
+
+      - name: Smoke NAS imagens que serão publicadas
+        env:
+          IMAGE: ${{ steps.names.outputs.app }}:${{ steps.names.outputs.tag }}
+          MIGRATE_IMAGE: ${{ steps.names.outputs.migrate }}:${{ steps.names.outputs.tag }}
+        run: node scripts/docker/image-smoke.mjs
+
+      # O mesmo portão do ci.yml (HIGH/CRITICAL com correção) e, da mesma varredura de pacotes, o SBOM (CycloneDX)
+      # que vai ser atestado
+      - name: Trivy (portão) e SBOM
+        env:
+          IMAGE: ${{ steps.names.outputs.app }}:${{ steps.names.outputs.tag }}
+          TRIVY: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+        run: |
+          trivy() { docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP:/out" "$TRIVY" "$@"; }
+          trivy image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress "$IMAGE"
+          trivy image --format cyclonedx --output /out/sbom.cdx.json --no-progress "$IMAGE"
+
+      # docker login/push direto, sem action de terceiro: cada action a menos é uma dependência a menos (E.2).
+      # O digest vem da saída do push (o que o registry de fato guardou)
+      - name: Publicar no GHCR
+        id: push
+        env:
+          APP: ${{ steps.names.outputs.app }}
+          MIGRATE: ${{ steps.names.outputs.migrate }}
+          TAG: ${{ steps.names.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          digest_of() { docker push "$1" | tee /dev/stderr | grep -oE 'digest: sha256:[0-9a-f]{64}' | cut -d' ' -f2; }
+          app_digest=$(digest_of "${APP}:${TAG}")
+          migrate_digest=$(digest_of "${MIGRATE}:${TAG}")
+          docker tag "${APP}:${TAG}" "${APP}:main"
+          docker push "${APP}:main" > /dev/null
+          docker logout ghcr.io
+          if [ -z "$app_digest" ] || [ -z "$migrate_digest" ]; then
+            echo "::error::digest não encontrado na saída do push"
+            exit 1
+          fi
+          {
+            echo "app_digest=${app_digest}"
+            echo "migrate_digest=${migrate_digest}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Proveniência (SLSA): de qual commit e de qual workflow a imagem saiu, assinada (Sigstore) e presa ao DIGEST.
+      # create-storage-record: false porque o recurso só existe para repositórios de organização
+      - name: Atestar proveniência (taskflow)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.names.outputs.app }}
+          subject-digest: ${{ steps.push.outputs.app_digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Atestar proveniência (taskflow-migrate)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.names.outputs.migrate }}
+          subject-digest: ${{ steps.push.outputs.migrate_digest }}
+          push-to-registry: true
+          create-storage-record: false
+      - name: Atestar SBOM (taskflow)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.names.outputs.app }}
+          subject-digest: ${{ steps.push.outputs.app_digest }}
+          sbom-path: ${{ runner.temp }}/sbom.cdx.json
+          push-to-registry: true
+
+      - name: Resumo
+        env:
+          APP: ${{ steps.names.outputs.app }}
+          MIGRATE: ${{ steps.names.outputs.migrate }}
+          TAG: ${{ steps.names.outputs.tag }}
+          APP_DIGEST: ${{ steps.push.outputs.app_digest }}
+          MIGRATE_DIGEST: ${{ steps.push.outputs.migrate_digest }}
+        run: |
+          {
+            echo "## Imagens publicadas"
+            echo "| Imagem | Para o deploy (digest) |"
+            echo "|---|---|"
+            echo "| \`${APP}:${TAG}\` | \`${APP}@${APP_DIGEST}\` |"
+            echo "| \`${MIGRATE}:${TAG}\` | \`${MIGRATE}@${MIGRATE_DIGEST}\` |"
+            echo
+            echo "Conferir a origem: \`gh attestation verify oci://${APP}@${APP_DIGEST} --repo ${GITHUB_REPOSITORY}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

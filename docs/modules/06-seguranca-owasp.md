@@ -40,7 +40,7 @@ em aplicações web. Este módulo usa a numeração da edição **2021**, a mesm
 | A05 | Security Misconfiguration | ✅ | Helmet, CORS explícito, *fail-fast* de configuração, Swagger desligado em produção |
 | A06 | Vulnerable Components | ✅ | `npm audit` (produção) e Trivy (imagem) bloqueiam HIGH/CRITICAL no CI; Dependabot semanal + *security updates*; CodeQL no nosso código ([Módulo 03](03-ci-cd-github-actions.md#-cadeia-de-suprimentos-etapa-e2)) |
 | A07 | Identification & Auth Failures | 🟡 | Mesma mensagem **e mesmo tempo** para erro de login (anti timing attack), throttle; sem refresh token ([Limitações](#-limitações-e-próximos-passos)) |
-| A08 | Software & Data Integrity | 🟡 | CI com `permissions: contents: read`; actions por SHA e ferramentas por digest; imagem base por digest. Falta: política de scripts de instalação (`allowScripts`) e imagem assinada |
+| A08 | Software & Data Integrity | 🟡 | CI com `permissions: contents: read`; actions por SHA e ferramentas por digest; imagem base por digest; a imagem publicada tem proveniência e SBOM atestados (Sigstore, Módulo 03 E.3). Falta: política de scripts de instalação (`allowScripts`) e verificar o atestado no deploy |
 | A09 | Logging & Monitoring Failures | 🟡 | Traces e métricas (Módulo 01); eventos de segurança (login falho, 403, 429) **não** são logados |
 | A10 | SSRF | ➖ | Não se aplica: a API não faz requisições a URLs fornecidas pelo usuário |
 
@@ -327,7 +327,7 @@ Outras decisões de configuração:
 
 - **Sem refresh token nem revogação:** um token roubado vale até expirar (1 h).
 - **Eventos de segurança não logados (A09):** login falho, 404 de autorização e 429 deveriam gerar log estruturado com IP e `correlationId`.
-- **Integridade (A08):** os scripts de instalação das dependências rodam sem política (`allowScripts`), e a imagem não é assinada nem tem SBOM publicado.
+- **Integridade (A08):** os scripts de instalação das dependências rodam sem política (`allowScripts`); o deploy ainda não exige a verificação do atestado da imagem (no Kubernetes, um *admission controller* que recuse imagem sem proveniência).
 - **Rate limit em memória:** não é compartilhado entre réplicas (em produção, *storage* em Redis).
 
 ---

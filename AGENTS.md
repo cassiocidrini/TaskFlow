@@ -210,6 +210,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 - ❌ `PROCESSED_EVENTS_RETENTION_DAYS` menor ou igual à retenção do tópico (o schema recusa; se a retenção do tópico mudar, mude o mínimo junto).
 - ❌ Idempotência com reserva separada do efeito ("reservar → executar → marcar") ou num cache externo: é dual-write. A chave vai na transação do efeito (ADR-0009). Chave global (não por usuário) vaza a resposta de outro usuário.
 - ❌ Rollout sem critério de avanço escrito antes (ADR-0011) ou comparando "antes × depois" em vez de variante × controle na mesma janela; alerta de regressão só com limite relativo (dispara por ruído em latência baixa); flag sem data para sair.
+- ❌ Deploy ou rollback por tag (`:main`, `:latest`): sempre pelo digest (`@sha256:`) que o workflow "Publicar imagem" mostra. Não reconstrua a imagem para publicar (o `publish-image.yml` publica o digest que o smoke e o Trivy testaram), e não dê `packages: write` a workflow que roda em PR.
 - ❌ Atualizar o OpenTelemetry sem o `telemetry-export.spec.ts` verde e sem comparar os nomes e as labels das métricas (`/metrics` dos 4 processos) antes e depois: telemetria quebra calada, e um `/metrics` sem métricas responde 200. Pacotes do OTel sobem juntos (estáveis 3.x com experimentais 0.30x); `PrometheusExporter` sempre com `host` explícito (o padrão é `localhost`).
 - ❌ Trocar a imagem do Postgres, Kafka ou Prometheus só no compose (ou só no teste): as constantes de `test/support/*-image.ts` e a do smoke andam junto, e o `test-images.spec.ts` reprova o desalinhamento. Major de imagem (Node, Postgres) é PR planejado, não aceite do Dependabot (ele está no `ignore`).
 - ❌ Action nova por tag (`@v4`): fixe por SHA com o comentário da versão (`@<sha> # v7.0.1`); imagem de ferramenta em `run:` por tag + digest, e na lista do Módulo 03 (o Dependabot não a vê). Dependência nova tem que passar no `npm audit --omit=dev --audit-level=high`; `overrides` só com a condição de remoção escrita ao lado (Módulo 03, E.2).
@@ -268,7 +269,7 @@ Command `(target: TaskCommandTarget, valor)` → handler de uma linha com `runne
 
 ## 🚧 Ainda NÃO implementado (não assuma que existe)
 
-metadata dos eventos no `EventBus`/projeções · trace pelo SQS/Lambda (o `traceparent` para no consumer) · provedor de push real e registro de dispositivos · agregador de logs (Loki) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes; o `HEALTHCHECK` da imagem existe) · roteamento de alertas (Alertmanager) · publicação da imagem em registry (CD) · rate limit distribuído (Redis).
+metadata dos eventos no `EventBus`/projeções · trace pelo SQS/Lambda (o `traceparent` para no consumer) · provedor de push real e registro de dispositivos · agregador de logs (Loki) · projeções fora do `EventBus` em memória (dual-write no read model) / replay de projeções · probes consumidos por orquestrador (manifesto Kubernetes; o `HEALTHCHECK` da imagem existe) · roteamento de alertas (Alertmanager) · deploy da imagem (o CD publica no GHCR; o deploy é o Módulo 02) · rate limit distribuído (Redis).
 
 ---
 
