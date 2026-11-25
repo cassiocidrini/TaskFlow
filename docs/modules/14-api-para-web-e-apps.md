@@ -1,6 +1,6 @@
 # Módulo 14 — Uma API para web e apps
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 25/11/2026
 >
 > **Status:** ✅ concluído (14.1 a 14.8). Comece por "A política em uma página", logo abaixo do objetivo: ela liga cada
 > decisão à etapa e ao ADR que a sustentam.
@@ -179,6 +179,16 @@ label só os releases conhecidos (limitações).
 O log e o span recebem o valor **já validado** pelo middleware, nunca o header cru: uma "versão" com quebra de linha
 não entra no log (*log injection*, OWASP A09).
 
+### Em qual span gravar: o do request, não o ativo
+
+Dentro de um middleware Express, o span **ativo** é o que o `instrumentation-express` abre para o próprio middleware
+(`middleware - clientInfoMiddleware`). O primeiro teste ao vivo mostrou os atributos do cliente lá, e não no `GET /`.
+O `correlation.id` do Módulo 01 sempre esteve no mesmo lugar (documentado como peculiaridade). A correção vale para os
+dois: [`currentRequestSpan()`](../../src/common/telemetry/request-span.ts) pega o span do request no `rpcMetadata` que o
+`instrumentation-http` guarda no contexto, o mesmo que o `RouteTelemetryGuard` usa para a rota (problema 1).
+
+---
+
 ### Middleware, e não interceptor nem guard
 
 A ordem de execução no Nest decide:
@@ -283,8 +293,8 @@ PR: a mudança de contrato aparece no diff, num arquivo que quem revisa lê. Tr�
 remover um campo da resposta (quebra). O **oasdiff** compara o contrato da base do PR com o do PR e lista as mudanças
 incompatíveis; o workflow [`api-contract.yml`](../../.github/workflows/api-contract.yml) falha se houver alguma, a menos
 que o PR tenha a label **`breaking-change`** (a decisão fica explícita e registrada no PR). Workflow separado porque
-precisa rodar de novo quando a label muda, sem disparar os 4 jobs pesados do CI. Localmente: `npm run openapi:diff`,
-com a mesma imagem fixada (`tufin/oasdiff:v1.37.0`).
+precisa rodar de novo quando a label muda, sem disparar os jobs do CI. Localmente: `npm run openapi:diff`, com a
+mesma imagem, fixada por tag e digest (`tufin/oasdiff:v1.37.0@sha256:…`, Módulo 03, E.2).
 
 **A assimetria que define o que é incompatível.** A API **recebe** dados do app e **devolve** dados para ele, e as
 regras se invertem (o mesmo raciocínio do leitor tolerante do Módulo 13: seja exigente no que envia, tolerante no que
@@ -418,30 +428,6 @@ opcionais. A prova, com o oasdiff, simulando a remoção do `assigneeId` da list
 (compatível: os consumers são leitores tolerantes e ignoram o que não conhecem) e mantém o `dueDate`, derivado do
 `due`. Tirar o `dueDate` do tópico é mudança incompatível de um contrato que outros serviços leem (`eventVersion` 2),
 e fica fora do escopo.
-
-### Rollout da `task-list-with-stats` (14.7)
-
-```bash
-npm run feature-flag -- --key task-list-with-stats --description "Números do projeto na listagem"
-npm run feature-flag -- --key task-list-with-stats --enable --rollout 50
-# gere tráfego de vários usuários (DISABLE_THROTTLE=true para cadastrar rápido) e compare as variantes:
-curl -s localhost:9464/metrics | grep taskflow_task_list_requests_total
-# Prometheus: histogram_quantile(0.95, sum by (le, variant) (rate(taskflow_task_list_duration_bucket{page="first"}[5m])))
-npm run feature-flag -- --key task-list-with-stats --kill      # with-stats para de crescer; o tráfego vai para o control
-```
-
-Grafana → dashboard da API → linha **Rollout**; alertas em `http://localhost:9090/alerts` (`TaskListStats*`).
-
-### Feature flags (14.6)
-
-```bash
-npm run feature-flag -- --key tela-nova --description "Tela nova"                       # nasce desligada
-npm run feature-flag -- --key tela-nova --enable --allow <seu-userId>                     # só você
-npm run feature-flag -- --key tela-nova --rollout 10 --platforms ios,android --min-app-version 2.15.0 --dry-run
-curl -s localhost:3000/me/features -H "Authorization: Bearer $TOKEN" -H 'X-Platform: ios' -H 'X-App-Version: 2.15.0'
-npm run feature-flag -- --key tela-nova --kill --by "seu-nome (motivo)"                    # em até 5 s, para todos
-npm run feature-flag -- --show
-```
 
 ### Idempotency-Key (14.5): repetir uma requisição sem duplicar o efeito
 
@@ -577,17 +563,9 @@ controle, a série de erro DELE não existe, a subtração sai vazia e o alerta 
 `or vector(0)` resolve (mutação: sem ele, o teste falha). No Grafana, a linha "Rollout" do dashboard da API mostra p95
 e taxa de erro lado a lado.
 
-### Em qual span gravar: o do request, não o ativo
-
-Dentro de um middleware Express, o span **ativo** é o que o `instrumentation-express` abre para o próprio middleware
-(`middleware - clientInfoMiddleware`). O primeiro teste ao vivo mostrou os atributos do cliente lá, e não no `GET /`.
-O `correlation.id` do Módulo 01 sempre esteve no mesmo lugar (documentado como peculiaridade). A correção vale para os
-dois: [`currentRequestSpan()`](../../src/common/telemetry/request-span.ts) pega o span do request no `rpcMetadata` que o
-`instrumentation-http` guarda no contexto, o mesmo que o `RouteTelemetryGuard` usa para a rota (problema 1).
-
----
-
 ## 📋 Como reproduzir
+
+### Identificação do cliente (14.1)
 
 ```bash
 npm run infra:up:obs     # Postgres, Jaeger, Prometheus e Grafana
@@ -610,72 +588,6 @@ curl -s localhost:9464/metrics | grep taskflow_app_requests_total
 - **Grafana** (`http://localhost:3001`): dashboard da API → linha **Clientes**, requisições por plataforma e por versão.
 - **Swagger** (`/docs`): `X-Platform` e `X-App-Version` aparecem em todas as rotas, como parâmetros globais.
 
-### Contrato da API (14.3)
-
-```bash
-npm run openapi:check                 # build + confere docs/api/openapi.json (o CI roda o mesmo)
-npm run openapi:generate              # depois de mudar a API: regera o snapshot (revise o diff e commite)
-npm run openapi:diff                  # mudanças incompatíveis contra a origin/main (Docker)
-npm run openapi:diff -- --base x.json # contra outro arquivo (experimentos)
-```
-
-Para ver o `check` falhar: mude o `maxLength` de um DTO e rode `npm run openapi:check`; ele aponta a linha. Para ver
-uma mudança incompatível: gere uma base com `jq` (ex.: `jq '.components.schemas.CreateTaskDto.required -= ["title"]'
-docs/api/openapi.json > /tmp/base.json`) e rode `npm run openapi:diff -- --base /tmp/base.json`.
-
-### Idempotency-Key (14.5)
-
-```bash
-K=$(uuidgen)
-for i in 1 2; do
-  curl -s -D - -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" \
-    -H 'Content-Type: application/json' -H "Idempotency-Key: $K" -d '{"title":"Transferência"}' \
-    | grep -iE '^(HTTP|idempotent)|taskId'
-done      # 2x 201 com o MESMO taskId; a 2ª com Idempotent-Replayed: true
-curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -H "Idempotency-Key: $K" -d '{"title":"Outra coisa"}'   # 422
-curl -s localhost:9464/metrics | grep taskflow_idempotency_requests_total
-```
-
-### Prazo: fim do contract (14.4c)
-
-```bash
-npx prisma migrate deploy        # aplica o DROP (com lock_timeout e a checagem anti-perda)
-psql ... -c '\d tasks_read'      # só due_at e due_timezone
-npm run test:integration -- drop-due-date   # a checagem abortando e o DROP acontecendo, num schema descartável
-```
-
-### Prazo: contract (14.4b)
-
-```bash
-npm run app-version -- --platform android --min 2.14.0 --by "contract do dueDate"   # a pré-condição
-curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -H 'X-Platform: android' -H 'X-App-Version: 2.13.0' -d '{"title":"x","dueDate":"2026-12-31T23:59:59Z"}'   # 426
-curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"title":"x","dueDate":"2026-12-31T23:59:59Z"}'                                                      # 400
-npm run openapi:diff     # 0 incompatíveis; o changelog do oasdiff mostra as 3 remoções como informativas
-```
-
-### Prazo: expand (14.4a)
-
-```bash
-TOKEN=...; P=<projectId>
-# App antigo: dueDate → 201 com Deprecation, Sunset e Link
-curl -s -D - -o /dev/null -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -H 'X-Platform: android' -H 'X-App-Version: 2.13.0' \
-  -d '{"title":"Formato antigo","dueDate":"2026-12-31T23:59:59Z"}' | grep -iE 'deprecation|sunset|link'
-# App novo: due → sem headers de depreciação
-curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"title":"Formato novo","due":{"at":"2026-12-31T23:59:59-03:00","timezone":"America/Sao_Paulo"}}'
-# A listagem devolve os dois; quem ainda usa o antigo, por versão do app:
-curl -s localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" | jq '.items[] | {title, dueDate, due}'
-curl -s localhost:9464/metrics | grep taskflow_deprecated_field_usage_total
-```
-
-- O `TaskCreated` antigo continua v1 no banco (`SELECT payload, metadata FROM events WHERE event_type='TaskCreated'`),
-  e o histórico (`GET .../history`) o devolve já como v2.
-- `npm run openapi:diff`: nenhuma mudança incompatível (a fase expand inteira é compatível).
-
 ### Versão mínima (14.2)
 
 ```bash
@@ -693,6 +605,90 @@ npm run app-version -- --platform android --min none --recommended none         
 - A mudança vale na API em até 30 s (o TTL do cache), sem reiniciar.
 - Mínima acima da recomendada é recusada com a explicação; versão fora do formato também.
 - Auditoria: `SELECT * FROM app_version_policy_changes ORDER BY id DESC;`
+
+### Contrato da API (14.3)
+
+```bash
+npm run openapi:check                 # build + confere docs/api/openapi.json (o CI roda o mesmo)
+npm run openapi:generate              # depois de mudar a API: regera o snapshot (revise o diff e commite)
+npm run openapi:diff                  # mudanças incompatíveis contra a origin/main (Docker)
+npm run openapi:diff -- --base x.json # contra outro arquivo (experimentos)
+```
+
+Para ver o `check` falhar: mude o `maxLength` de um DTO e rode `npm run openapi:check`; ele aponta a linha. Para ver
+uma mudança incompatível: gere uma base com `jq` (ex.: `jq '.components.schemas.CreateTaskDto.required -= ["title"]'
+docs/api/openapi.json > /tmp/base.json`) e rode `npm run openapi:diff -- --base /tmp/base.json`.
+
+### Prazo (14.4): o estado depois do expand/contract
+
+Os comandos de cada fase (o `dueDate` aceito com `Deprecation`/`Sunset` no expand, o diff com as remoções
+informativas no contract) só valiam **durante** aquelas fases; o que cada uma mostrou está em "Resultados". Hoje:
+
+```bash
+TOKEN=...; P=<projectId>
+# O formato atual: due { at com fuso, timezone IANA } → 201; a API devolve o at em UTC + o fuso
+curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"title":"Com prazo","due":{"at":"2026-12-31T23:59:59-03:00","timezone":"America/Sao_Paulo"}}'
+# O formato antigo saiu da API (14.4b): 400 "property dueDate should not exist"
+curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"title":"x","dueDate":"2026-12-31T23:59:59Z"}'
+# Um app ABAIXO da versão mínima recebe 426 antes da validação (com uma política ativa, ver 14.2)
+psql ... -c '\d tasks_read'                                  # só due_at e due_timezone (14.4c)
+npm run test:integration -- task-event-upcaster drop-due-date  # v1 lido como v2; a migração do DROP abortando e passando
+```
+
+- O `TaskCreated` v1 continua gravado no banco como v1 (`SELECT payload, metadata FROM events WHERE
+  event_type='TaskCreated'`), e o histórico (`GET .../history`) o devolve já como v2: o *upcaster* é para sempre.
+- Para declarar o próximo campo depreciado, veja a 14.8.
+
+### Idempotency-Key (14.5)
+
+```bash
+K=$(uuidgen)
+for i in 1 2; do
+  curl -s -D - -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' -H "Idempotency-Key: $K" -d '{"title":"Transferência"}' \
+    | grep -iE '^(HTTP|idempotent)|taskId'
+done      # 2x 201 com o MESMO taskId; a 2ª com Idempotent-Replayed: true
+curl -s -X POST localhost:3000/projects/$P/tasks -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: $K" -d '{"title":"Outra coisa"}'   # 422
+curl -s localhost:9464/metrics | grep taskflow_idempotency_requests_total
+```
+
+### Feature flags (14.6)
+
+```bash
+npm run feature-flag -- --key tela-nova --description "Tela nova"                       # nasce desligada
+npm run feature-flag -- --key tela-nova --enable --allow <seu-userId>                     # só você
+npm run feature-flag -- --key tela-nova --rollout 10 --platforms ios,android --min-app-version 2.15.0 --dry-run
+curl -s localhost:3000/me/features -H "Authorization: Bearer $TOKEN" -H 'X-Platform: ios' -H 'X-App-Version: 2.15.0'
+npm run feature-flag -- --key tela-nova --kill --by "seu-nome (motivo)"                    # em até 5 s, para todos
+npm run feature-flag -- --show
+```
+
+### Rollout da `task-list-with-stats` (14.7)
+
+```bash
+npm run feature-flag -- --key task-list-with-stats --description "Números do projeto na listagem"
+npm run feature-flag -- --key task-list-with-stats --enable --rollout 50
+# gere tráfego de vários usuários (DISABLE_THROTTLE=true para cadastrar rápido) e compare as variantes:
+curl -s localhost:9464/metrics | grep taskflow_task_list_requests_total
+# Prometheus: histogram_quantile(0.95, sum by (le, variant) (rate(taskflow_task_list_duration_bucket{page="first"}[5m])))
+npm run feature-flag -- --key task-list-with-stats --kill      # with-stats para de crescer; o tráfego vai para o control
+```
+
+Grafana → dashboard da API → linha **Rollout**; alertas em `http://localhost:9090/alerts` (`TaskListStats*`).
+
+### A política (14.8)
+
+```bash
+npm run test:unit -- --testPathPatterns deprecation-policy   # 89 dias de aviso falha; 90 e o dueDate (97) passam
+jq -r .info.description docs/api/openapi.json       # o parágrafo "Compatibilidade (ADR-0012)" que o app lê no Swagger
+```
+
+O próximo campo depreciado entra em `DEPRECATED_FIELDS` ([`deprecation.ts`](../../src/common/deprecation/deprecation.ts))
+com `Sunset` pelo menos 90 dias depois do `Deprecation`; com menos, o teste quebra o build. O sinal ao cliente é o do
+`DeprecationNotifier` (os headers `Deprecation`, `Sunset` e `Link` da 14.4a).
 
 ---
 
@@ -897,13 +893,9 @@ npm run app-version -- --platform android --min none --recommended none         
   O próximo passo seria aceitar como label só os releases conhecidos (lista configurável), e `other` para o resto.
 - **Sem número de build:** duas compilações da mesma versão de loja (um hotfix por *code push*, por exemplo) são
   indistinguíveis. Um `X-App-Build` resolveria, se aparecer o caso.
-- **Nenhum handler usa o `@AppClient()` ainda:** a versão mínima (14.2) lê o cliente no middleware; o decorator entra
-  na 14.4 (formato da resposta) e na 14.6 (flags por plataforma).
 - **Janela de até 30 s entre réplicas:** cada réplica tem o seu cache, então logo depois de uma mudança uma pode
   bloquear e outra não. Para invalidar na hora, seria preciso um aviso entre réplicas (`LISTEN/NOTIFY` no Postgres ou
   pub/sub), que não compensa para uma mudança mensal.
-- **O check do contrato não é obrigatório na proteção da `main`** até ser adicionado ao Ruleset do GitHub (decisão de
-  quem administra o repositório).
 - **O oasdiff vê o que o OpenAPI descreve:** uma mudança de comportamento que não aparece no contrato (um campo que
   continua `string` mas muda de formato, uma regra de negócio nova) passa. Para isso, testes de contrato do lado do
   consumidor (*consumer-driven contracts*, como o Pact) seriam o próximo passo.
