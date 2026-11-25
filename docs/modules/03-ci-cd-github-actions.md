@@ -392,7 +392,7 @@ de produção no GitHub Container Registry, testada e atestada. É a primeira me
 merge na main ─► "Publicar imagem" (push na main; também manual, só na main)
   1. docker build UMA vez: taskflow:sha-<commit> e o target migrate (taskflow-migrate), com labels OCI
   2. smoke (7 verificações) e Trivy NESSAS imagens, sem rebuild
-  3. push: ghcr.io/cassiocidrini/taskflow:sha-<commit> (imutável) e :main (ponteiro)
+  3. push: ghcr.io/cassiocidrini/taskflow:sha-<commit> (o commit) e :main (ponteiro); imutável é o digest
            ghcr.io/cassiocidrini/taskflow-migrate:sha-<commit>
   4. atestados assinados (Sigstore), presos ao digest: proveniência SLSA das duas imagens e o SBOM (CycloneDX) da API
 ```
@@ -401,7 +401,7 @@ merge na main ─► "Publicar imagem" (push na main; também manual, só na mai
 |---|---|
 | **A imagem publicada é a testada** | Constrói uma vez, testa e publica o mesmo digest. Construir de novo para publicar seria publicar algo que ninguém testou (uma dependência pode ter mudado entre os dois builds). O smoke aceita imagens prontas (`IMAGE` e `MIGRATE_IMAGE`) e, nesse caso, não as apaga |
 | **Workflow separado, só ele com escrita** | `packages: write`, `id-token: write` e `attestations: write` ficam só no job de publicação. O CI dos PRs continua só com leitura: código de PR nunca roda com um token que publica |
-| **`sha-<commit>` imutável, sem `latest`** | O `latest` não diz o que está rodando nem permite rollback. O deploy referencia o **digest** (o resumo do workflow mostra o `@sha256:` de cada imagem); a tag `main` é só para humanos |
+| **`sha-<commit>` e digest, sem `latest`** | O `latest` não diz o que está rodando nem permite rollback. A tag `sha-` diz o commit, mas **não é imutável**: um `workflow_dispatch` no mesmo commit reconstrói (build Docker não é bit a bit reproduzível: datas, label `created`) e a sobrescreve com outro digest. O deploy referencia o **digest** (o resumo do workflow mostra o `@sha256:` de cada imagem); a tag `main` é só para humanos |
 | **`docker login`/`push` direto** | Sem `docker/login-action` nem `build-push-action`: cada action a menos é uma dependência a menos (E.2). As únicas actions novas são as oficiais de atestado (`actions/attest`), fixadas por SHA |
 | **Digest da saída do `push`** | É o que o registry de fato guardou. O `docker inspect` muda de comportamento com o image store do Docker (clássico × containerd) |
 | **Proveniência e SBOM atestados** | Qualquer pessoa confere: esta imagem saiu deste commit, por este workflow, e contém isto. Fecha a "imagem não assinada" do A08 (Módulo 06). O SBOM vem do Trivy, que já estava no pipeline |
@@ -529,6 +529,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 | 16 | O hadolint novo acusou DL3066 em `USER node` | Uid por nome não pode ser conferido como não-root (Kubernetes `runAsNonRoot`) | `USER 1000:1000` (E.2) |
 | 17 | O npm 11.19 avisou de 10 pacotes com scripts de instalação "fora do `allowScripts`", e o manual dizia "bloqueados por padrão" | O `npm help install-scripts` contradiz o `npm help config`: o padrão é **aviso**, e os scripts rodam (o binário do Kafka foi gerado no container) | Nada quebrou; a política de scripts (`allowScripts` + `strict-allow-scripts`) ficou como próximo passo |
 | 18 | O PR do Dependabot do Postgres 16 → 18 passou verde em todos os checks | Os testes sobem o Postgres do Testcontainers (16.15); nada conferia a versão do compose, só um comentário | `test-images.spec.ts` para Postgres, Kafka, Prometheus e o smoke; major de imagem no `ignore` do Dependabot |
+| 19 | O primeiro run do "Publicar imagem" publicou as imagens, mas os atestados falharam: `No credentials found for registry ghcr.io` | O `docker logout` estava no fim do passo de push; com `push-to-registry`, o `actions/attest` grava no GHCR usando a credencial do Docker. O teste local (registry sem login) não cobria isso | Logout num passo próprio, o último, com `if: always()` (a credencial nunca fica no runner, nem em falha) |
 
 ---
 
@@ -557,6 +558,10 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
   (o vetor de worms como o Shai-Hulud, de 2025).
 - **`awslocal` descontinuado:** o LocalStack 2026.10 avisa que o `awslocal` (usado pelo `npm run aws:*`) não recebe
   mais atualizações, em favor do `lstk`. Funciona hoje; a troca fica para o Módulo 09.
+- **Alerta moderado do `glob` sem correção possível:** chega por `auto-instrumentations-node → resource-detector-gcp
+  → gcp-metadata → gaxios → rimraf@5 → glob@10`, e o aviso não tem versão corrigida dentro do que o `rimraf@5` aceita
+  (o security update do Dependabot falhou por isso). Abaixo do portão (HIGH); sai quando a cadeia atualizar, ou
+  desligando os detectores de nuvem que não usamos.
 - **`overrides` do `effect`:** dívida com prazo; sai quando o Prisma atualizar a dependência.
 - **O `HEALTHCHECK` da imagem é o da API:** um worker (relay, consumers) roda com `--no-healthcheck`. No Kubernetes,
   o `HEALTHCHECK` é ignorado e as probes ficam no manifesto (Módulo 02).
