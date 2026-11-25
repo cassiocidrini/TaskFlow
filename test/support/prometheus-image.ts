@@ -3,4 +3,4 @@
  * `docker-compose.yml`: a PromQL e o `promtool` mudam entre versões (o Prometheus 3 mudou a borda das janelas), e o
  * teste tem de valer para o Prometheus que avalia os alertas. O próprio teste confere a tag no compose.
  */
-export const PROMETHEUS_TEST_IMAGE = 'prom/prometheus:v3.15.0';
+export const PROMETHEUS_TEST_IMAGE = 'prom/prometheus:v3.16.0';

@@ -262,7 +262,7 @@ A suíte `test:streaming` prova o caminho que nenhum mock prova: evento gravado 
 roda ([Módulo 03](03-ci-cd-github-actions.md)).
 
 **Por que `GenericContainer`, e não o `KafkaContainer` do Testcontainers:** o módulo `@testcontainers/kafka` só sobe
-as imagens da Confluent (ele chama `/etc/confluent/docker/run`). O teste usa a imagem oficial `apache/kafka:4.3.2`,
+as imagens da Confluent (ele chama `/etc/confluent/docker/run`). O teste usa a imagem oficial `apache/kafka:4.4.0`,
 a mesma do compose, com um detalhe que faz funcionar: o cliente usa o endereço que o broker **anuncia**, e com porta
 aleatória o broker anunciaria a porta interna. Por isso o helper escolhe uma porta livre **antes** de subir e a
 mapeia de forma fixa: anunciado e mapeado são o mesmo `localhost:<porta>` (o problema dos "dois listeners" do

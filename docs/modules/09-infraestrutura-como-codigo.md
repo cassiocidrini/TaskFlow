@@ -219,6 +219,8 @@ docker exec taskflow-localstack awslocal iam list-roles
 - **Tudo num diretório só, sem variáveis:** nomes, região e endpoints estão fixos. O próximo passo é `variable`s + um `.tfvars` por ambiente (`dev`, `prod`), ou *workspaces*.
 - **Sem módulos:** o padrão SQS + policy poderia virar um `module` reutilizável.
 - **IaC fora do CI:** um job com `terraform fmt -check`, `validate` e `plan` em cada PR, com o plano publicado como comentário.
+- **`awslocal` descontinuado:** a partir do LocalStack 2026.10, o `awslocal` (usado pelos `npm run aws:*`) avisa que não
+  recebe mais atualizações, em favor do novo CLI `lstk`. Funciona; a migração dos scripts fica pendente (Módulo 03, E.2).
 - **Recursos sem uso:** `taskflow-sync-queue`, SNS, bucket e a role `lambda_sync` existem sem consumidor (o que é usado é o push do `push.tf`).
 - **Provider AWS 5.x:** o lock trava a 5.100, que não aceita o runtime `nodejs24.x`; a Lambda roda em `nodejs22.x`. Subir para a 6.x é um PR próprio (major com breaking changes).
 
