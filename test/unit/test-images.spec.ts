@@ -41,8 +41,11 @@ describe('imagens dos testes = imagens do compose', () => {
 
   it('o Postgres do cluster (k8s/base/postgres.yaml) é o do compose, fixado por digest', () => {
     const manifest = readFileSync(join(ROOT, 'k8s/base/postgres.yaml'), 'utf8');
-    const image = manifest.match(/^\s+image:\s*(\S+)/m)?.[1];
-    expect(image).toMatch(new RegExp(`^${composeImage('postgres')!.replace(/\./g, '\\.')}@sha256:[0-9a-f]{64}$`));
+    const [tag, digest] = (manifest.match(/^\s+image:\s*(\S+)/m)?.[1] ?? '').split('@');
+    // Tag por IGUALDADE de texto, e o digest por uma regex fixa: montar a regex com o nome da imagem exigiria escapar
+    // todos os metacaracteres (o CodeQL apontou o escape só do ponto como incompleto, js/incomplete-sanitization)
+    expect(tag).toBe(composeImage('postgres'));
+    expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   it('o smoke da imagem de produção usa o Postgres do compose', () => {

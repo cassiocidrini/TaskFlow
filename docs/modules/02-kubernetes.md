@@ -394,6 +394,7 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 | 4 | A mensagem de erro de boot manda conferir o `.env` | Escrita para o desenvolvimento local; num container não existe `.env` | **(2.2)** O texto passou a citar os dois lugares: o `.env` no desenvolvimento, o ConfigMap e o Secret num container |
 | 5 | O erro de boot saiu em **texto**, não em JSON | O logger JSON (pino) só assume depois de o Nest subir; um erro antes disso sai no formato padrão do Nest | Registrado (limitações): a linha mais importante de um `CrashLoopBackOff` chega a um agregador sem estrutura |
 | 6 | **(2.2)** O `curl` digitado na aba do `port-forward` não executou | O `port-forward` prende o terminal enquanto o túnel está aberto; o texto fica na fila e só roda quando o túnel fecha | O túnel numa aba própria, os testes em outra |
+| 7 | **(2.2)** O CodeQL reprovou o PR: *Incomplete string escaping* (High) no `test-images.spec.ts` | A primeira versão do teste montava uma regex com o nome da imagem e escapava **só o ponto**; uma regex tem outros metacaracteres, e o escape parcial é um padrão frágil (a entrada era o nosso compose, mas o CodeQL não tem como saber) | Sem regex montada com texto: tag comparada por **igualdade** e digest por uma regex fixa. As duas mutações (tag e digest errados) continuam reprovando. O portão de *code scanning* da E.2 pegando código nosso |
 
 ---
 
