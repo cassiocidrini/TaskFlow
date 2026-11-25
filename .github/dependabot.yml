@@ -28,9 +28,11 @@ updates:
       nestjs:
         patterns: ['@nestjs/*']
         update-types: [minor, patch]
+      # SEM filtro de update-types: os pacotes 0.x (sdk-node, exporters) e os estáveis (core, resources) só
+      # funcionam em pares (o sdk-node 0.301 exige o core 3.x). Com só minor e patch, o grupo trazia o 0.301 sem o
+      # core 3 e o npm recusava (ERESOLVE, na primeira rodada). Juntos, o PR é a migração inteira, e o CI decide
       opentelemetry:
         patterns: ['@opentelemetry/*']
-        update-types: [minor, patch]
       prisma:
         patterns: ['prisma', '@prisma/*']
         update-types: [minor, patch]

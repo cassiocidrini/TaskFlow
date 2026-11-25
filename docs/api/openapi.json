@@ -731,6 +731,107 @@
           "done"
         ],
         "type": "object"
+      },
+      "TerminusHealthCheckResult": {
+        "properties": {
+          "details": {
+            "additionalProperties": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/TerminusHealthIndicatorResult"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              ]
+            },
+            "example": {
+              "database": {
+                "responseTime": 12,
+                "status": "up"
+              }
+            },
+            "type": "object"
+          },
+          "error": {
+            "additionalProperties": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/TerminusHealthIndicatorResult"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              ]
+            },
+            "example": {},
+            "nullable": true,
+            "type": "object"
+          },
+          "info": {
+            "additionalProperties": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/TerminusHealthIndicatorResult"
+                },
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                }
+              ]
+            },
+            "example": {
+              "database": {
+                "responseTime": 12,
+                "status": "up"
+              }
+            },
+            "nullable": true,
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "error",
+              "ok",
+              "degraded",
+              "shutting_down"
+            ],
+            "example": "ok",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "details"
+        ],
+        "type": "object"
+      },
+      "TerminusHealthIndicatorResult": {
+        "properties": {
+          "cachedResponse": {
+            "description": "Whether this result was served from the cache",
+            "type": "boolean"
+          },
+          "responseTime": {
+            "description": "Time the health indicator took to respond, in ms",
+            "type": "number"
+          },
+          "status": {
+            "description": "The status of this health indicator",
+            "enum": [
+              "up",
+              "degraded",
+              "down"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -1090,104 +1191,31 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/TerminusHealthCheckResult"
+                    }
+                  ],
                   "properties": {
                     "details": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
                       "example": {
                         "database": {
                           "responseTime": 12,
                           "status": "up"
                         }
-                      },
-                      "type": "object"
+                      }
                     },
                     "error": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
-                      "example": {},
-                      "nullable": true,
-                      "type": "object"
-                    },
-                    "info": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
-                      "example": {
-                        "database": {
-                          "responseTime": 12,
-                          "status": "up"
-                        }
-                      },
-                      "nullable": true,
-                      "type": "object"
+                      "example": {}
                     },
                     "status": {
                       "enum": [
                         "ok",
                         "degraded"
                       ],
-                      "example": "ok",
-                      "type": "string"
+                      "example": "ok"
                     }
-                  },
-                  "type": "object"
+                  }
                 }
               }
             },
@@ -1200,29 +1228,13 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/TerminusHealthCheckResult"
+                    }
+                  ],
                   "properties": {
                     "details": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
                       "example": {
                         "database": {
                           "responseTime": 12,
@@ -1233,82 +1245,25 @@
                           "responseTime": 3005,
                           "status": "down"
                         }
-                      },
-                      "type": "object"
+                      }
                     },
                     "error": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
                       "example": {
                         "redis": {
                           "message": "Could not connect",
                           "responseTime": 3005,
                           "status": "down"
                         }
-                      },
-                      "nullable": true,
-                      "type": "object"
-                    },
-                    "info": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
-                      "example": {
-                        "database": {
-                          "responseTime": 12,
-                          "status": "up"
-                        }
-                      },
-                      "nullable": true,
-                      "type": "object"
+                      }
                     },
                     "status": {
                       "enum": [
                         "error",
                         "shutting_down"
                       ],
-                      "example": "error",
-                      "type": "string"
+                      "example": "error"
                     }
-                  },
-                  "type": "object"
+                  }
                 }
               }
             },
@@ -1367,104 +1322,31 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/TerminusHealthCheckResult"
+                    }
+                  ],
                   "properties": {
                     "details": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
                       "example": {
                         "database": {
                           "responseTime": 12,
                           "status": "up"
                         }
-                      },
-                      "type": "object"
+                      }
                     },
                     "error": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
-                      "example": {},
-                      "nullable": true,
-                      "type": "object"
-                    },
-                    "info": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
-                      "example": {
-                        "database": {
-                          "responseTime": 12,
-                          "status": "up"
-                        }
-                      },
-                      "nullable": true,
-                      "type": "object"
+                      "example": {}
                     },
                     "status": {
                       "enum": [
                         "ok",
                         "degraded"
                       ],
-                      "example": "ok",
-                      "type": "string"
+                      "example": "ok"
                     }
-                  },
-                  "type": "object"
+                  }
                 }
               }
             },
@@ -1477,29 +1359,13 @@
             "content": {
               "application/json": {
                 "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/TerminusHealthCheckResult"
+                    }
+                  ],
                   "properties": {
                     "details": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
                       "example": {
                         "database": {
                           "responseTime": 12,
@@ -1510,82 +1376,25 @@
                           "responseTime": 3005,
                           "status": "down"
                         }
-                      },
-                      "type": "object"
+                      }
                     },
                     "error": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
                       "example": {
                         "redis": {
                           "message": "Could not connect",
                           "responseTime": 3005,
                           "status": "down"
                         }
-                      },
-                      "nullable": true,
-                      "type": "object"
-                    },
-                    "info": {
-                      "additionalProperties": {
-                        "additionalProperties": true,
-                        "properties": {
-                          "responseTime": {
-                            "description": "Time the health indicator took to respond, in ms",
-                            "type": "number"
-                          },
-                          "status": {
-                            "enum": [
-                              "up",
-                              "degraded",
-                              "down"
-                            ],
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "status"
-                        ],
-                        "type": "object"
-                      },
-                      "example": {
-                        "database": {
-                          "responseTime": 12,
-                          "status": "up"
-                        }
-                      },
-                      "nullable": true,
-                      "type": "object"
+                      }
                     },
                     "status": {
                       "enum": [
                         "error",
                         "shutting_down"
                       ],
-                      "example": "error",
-                      "type": "string"
+                      "example": "error"
                     }
-                  },
-                  "type": "object"
+                  }
                 }
               }
             },

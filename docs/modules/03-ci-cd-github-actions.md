@@ -98,7 +98,7 @@ flowchart LR
 | Tempo total | Soma de tudo | O tempo do job **mais lento** |
 | Custo | 1 VM | Uma VM por job (cada uma repete `npm ci` + `prisma generate`) |
 
-**O 4º job, `streaming` (Módulo 13.3).** A suíte `test:streaming` sobe um **Kafka real** (`apache/kafka:4.3.2`, a
+**O 4º job, `streaming` (Módulo 13.3).** A suíte `test:streaming` sobe um **Kafka real** (`apache/kafka:4.4.0`, a
 mesma imagem do compose) além do Postgres, e prova o caminho outbox → relay → tópico. Ganhou job próprio, em vez de
 entrar no de integração, pelos mesmos motivos da tabela: só ela paga o custo do broker (~400 MB, ~10 s de boot), e
 um vermelho nela aponta direto para a mensageria. Com a 13.5, a suíte passou de ~19 s para ~54 s (~61 s com o `reports` da 13.6a, ~75 s com o redrive da 13.6c). Desde a 13.6d, o job de **integração** também testa as regras de alerta do Prometheus (`promtool test rules` num container): um alerta quebrado bloqueia o merge como um teste de código: o teste do DLT
@@ -198,7 +198,7 @@ no CI.
 ### O Dockerfile novo
 
 ```text
-base       node:24.22.2-alpine3.24@sha256:…  (tag exata E digest, escritos uma vez só)
+base       node:24.22.3-alpine3.24@sha256:…  (tag exata E digest, escritos uma vez só)
 deps       npm ci (todas as dependências; cache do npm montado pelo BuildKit)
 build      prisma generate + nest build (o plugin do Swagger só roda no nest build)
 prod-deps  npm ci --omit=dev --omit=optional + o client gerado do Prisma
@@ -345,6 +345,20 @@ Kafka, havia apenas um comentário. Duas correções:
   `docker-compose`, e no `@types/node`, que segue o major do runtime). Node 24 → 26 mexe no `.nvmrc`, no `engines`,
   no CI e na imagem juntos; Postgres 16 → 18 não abre o volume antigo. É decisão de projeto, num PR planejado.
 
+**A triagem.** O Ruleset exige a branch atualizada com a `main`, então mergear os PRs um por um seria ~12 ciclos de
+"rebase → CI → merge" (cada merge desatualiza os outros). O **atraso da primeira rodada** entrou num PR consolidado,
+validado uma vez; daqui em diante, o fluxo semanal é PR a PR. No consolidado:
+
+| Atualização | Validação além do CI |
+|---|---|
+| Node 24.22.3 (patch, digest conferido puxando a imagem) | Smoke da imagem 7/7, Trivy sem HIGH |
+| Compose: Prometheus 3.16, Grafana 13.3.1, Kafka 4.4.0, kafka-exporter 1.11, LocalStack 2026.10.8 (+ as constantes dos testes) | Compose recriado: 11 regras do Prometheus `ok`, Grafana `ok` sem erro no log, tópicos do Kafka preservados no volume, exporter com métricas de lag, Terraform com 14 recursos no LocalStack. **O CI não sobe nada disso**: sem esse passo, só o Kafka e o Prometheus estariam testados |
+| npm: grupos nestjs (o `core` alinhado à 12.6, pendência da E.2), prisma, aws-sdk, outras; autocannon 9 (remove o `uuid` vulnerável) | OpenAPI regerado: o `terminus` 12.2 passou a declarar o schema do `/health` como componente (−328/+137 linhas), e o oasdiff diz **compatível**. Autocannon 9: 100 respostas 200 e o resto 429, o rate limit de 100/min funcionando |
+
+**Fora do consolidado: o OpenTelemetry.** O grupo trouxe o `sdk-node` 0.301, que exige o `@opentelemetry/core` 3.x
+(estamos no 2.x): é a migração do SDK 2 → 3, um major, e o filtro "só minor e patch" deixou os pacotes 3.x de fora
+(`ERESOLVE`). O grupo `opentelemetry` agora aceita major, para a migração chegar inteira num PR.
+
 ### Imagens fora do Dependabot (revisão manual)
 
 O Dependabot lê `uses:`, Dockerfile e compose, mas não comandos dentro de `run:`. Revise a cada poucos meses:
@@ -489,8 +503,10 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - **Scripts de instalação sem política:** o npm 11.19 roda os scripts de `postinstall` de qualquer dependência (só
   avisa). Um `allowScripts` no `package.json` com `strict-allow-scripts` faria de um script novo um erro de build
   (o vetor de worms como o Shai-Hulud, de 2025).
-- **Versões do Nest desalinhadas:** o `audit fix` levou o `@nestjs/platform-express` à 12.6.0 com o `@nestjs/core`
-  na 12.1.2. As suítes passam; o grupo `nestjs` do Dependabot alinha na primeira rodada.
+- **Migração do OpenTelemetry 2 → 3 pendente:** o PR do grupo `opentelemetry` (com major) é a migração inteira; o
+  SDK, os exporters e a auto-instrumentação mudam juntos.
+- **`awslocal` descontinuado:** o LocalStack 2026.10 avisa que o `awslocal` (usado pelo `npm run aws:*`) não recebe
+  mais atualizações, em favor do `lstk`. Funciona hoje; a troca fica para o Módulo 09.
 - **`overrides` do `effect`:** dívida com prazo; sai quando o Prisma atualizar a dependência.
 - **O `HEALTHCHECK` da imagem é o da API:** um worker (relay, consumers) roda com `--no-healthcheck`. No Kubernetes,
   o `HEALTHCHECK` é ignorado e as probes ficam no manifesto (Módulo 02).

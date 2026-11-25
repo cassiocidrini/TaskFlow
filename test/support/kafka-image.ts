@@ -3,4 +3,4 @@
  * o teste prova o contrato com o broker que o desenvolvimento usa (mesma lógica do `postgres-image.ts`).
  * Atualizar a versão = trocar aqui E no compose, no mesmo PR.
  */
-export const KAFKA_TEST_IMAGE = 'apache/kafka:4.3.2';
+export const KAFKA_TEST_IMAGE = 'apache/kafka:4.4.0';

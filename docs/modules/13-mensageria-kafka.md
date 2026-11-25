@@ -794,7 +794,7 @@ redrive não estendem essa janela: o `notifications` ignora replay, e um evento 
 ### Lag, painel e alertas (13.6d)
 
 **Lag visto pelo broker, e não pelo consumer.** O consumer só sabe o próprio lag enquanto está vivo; morto, que é
-quando o lag mais importa, não exporta nada. O `kafka-exporter` (`danielqsj/kafka-exporter:v1.9.0`, profile
+quando o lag mais importa, não exporta nada. O `kafka-exporter` (`danielqsj/kafka-exporter:v1.11.0`, profile
 `streaming`) pergunta ao **broker** os offsets commitados de cada grupo e o fim de cada partição. Medido: com o `reports`
 parado e 150 tarefas criadas, o lag dele ficou em 150 no gráfico o tempo todo. A mesma lógica da
 `outbox_oldest_pending_age_seconds`, lida do banco e não do loop do relay. Antes de entrar, a versão foi testada contra
@@ -1036,7 +1036,7 @@ trabalhando com mensageria não paga ~300 MB de RAM nem os ~15 s de boot.
 
 | Configuração | Valor | Por quê |
 |---|---|---|
-| Imagem | `apache/kafka:4.3.2` | Imagem oficial; versão fixa, como todo o compose. Patch maduro da linha 4.3 em vez do `4.4.0`, recém-saído na época |
+| Imagem | `apache/kafka:4.4.0` | Imagem oficial; versão fixa, como todo o compose. Começou no `4.3.2` (patch maduro, com o `4.4.0` recém-saído, ADR-0001); subiu para o `4.4.0` na primeira rodada do Dependabot (Módulo 03, E.2), com a suíte de streaming verde |
 | `KAFKA_PROCESS_ROLES` | `broker,controller` | KRaft com 1 nó |
 | **Listeners** | `EXTERNAL://localhost:9092` (host) e `INTERNAL://kafka:29092` (containers) | Ver "Os dois listeners" abaixo |
 | `KAFKA_AUTO_CREATE_TOPICS_ENABLE` | `false` | Tópico é **contrato**: com autocriação, um nome digitado errado no produtor cria outro tópico e o consumidor espera no certo, em silêncio |
@@ -1367,7 +1367,7 @@ curl -s localhost:9308/metrics | grep kafka_consumergroup_lag      # lag pelo br
 - Testar as regras sem subir nada além do Docker:
 
 ```bash
-docker run --rm -v "$PWD/prometheus:/rules:ro" -w /rules --entrypoint promtool prom/prometheus:v3.15.0 \
+docker run --rm -v "$PWD/prometheus:/rules:ro" -w /rules --entrypoint promtool prom/prometheus:v3.16.0 \
   test rules alerts.test.yml
 ```
 
