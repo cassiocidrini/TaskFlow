@@ -83,8 +83,11 @@ export function validateEnv(config: Record<string, unknown>): Env {
   const result = envSchema.safeParse(config);
 
   if (!result.success) {
+    // Texto que serve aos dois lugares onde a app roda: no desenvolvimento, as variáveis vêm do .env; num container
+    // (Kubernetes, Módulo 02), do ConfigMap e do Secret, e um "confira seu .env" mandaria o plantão procurar um
+    // arquivo que não existe
     throw new Error(
-      `Variáveis de ambiente inválidas. Confira seu .env (modelo em .env.example):\n${z.prettifyError(result.error)}`,
+      `Variáveis de ambiente inválidas (no desenvolvimento, o .env; num container, o ConfigMap e o Secret; lista em .env.example):\n${z.prettifyError(result.error)}`,
     );
   }
 

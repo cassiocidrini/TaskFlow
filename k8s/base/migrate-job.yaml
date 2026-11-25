@@ -1,0 +1,43 @@
+# A migração do banco como Job (Módulo 02, etapa 2.2): roda `prisma migrate deploy` UMA vez, antes da API.
+#
+# Job, e não no boot da API nem num initContainer dela: com várias réplicas, cada uma tentaria migrar ao subir
+# (corrida), e a API precisaria de permissão de DDL no banco. É o desenho da imagem (target `migrate`, Módulo 03 E.1)
+# virando realidade. Um Job roda o processo até TERMINAR COM SUCESSO; um Deployment o mantém vivo para sempre.
+#
+# O nome leva o commit: o template de um Job é IMUTÁVEL (não se "atualiza" um Job que já rodou). Cada versão é um
+# Job novo, e o histórico diz qual migração rodou com qual versão. A ordem (banco pronto → Job completo → API) é
+# garantida à mão nesta etapa, com `kubectl wait`; automatizá-la é a 2.6.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: taskflow-migrate-aa4d4a0
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-migrate
+    app.kubernetes.io/part-of: taskflow
+spec:
+  # Até 3 novas tentativas (com espera crescente): cobre o banco ainda subindo. Uma migração com erro de SQL falha
+  # as 4 vezes, e o Job fica `Failed`, sem a API nova subir sobre um schema pela metade
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: taskflow-migrate
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      # Job exige Never ou OnFailure. Never: cada tentativa é um pod novo, e os logs das que falharam continuam lá
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          # A imagem de migração do MESMO commit da API (aa4d4a0), por digest, publicada pelo publish-image.yml
+          image: ghcr.io/cassiocidrini/taskflow-migrate@sha256:6ac28dc62e8d08378098f3b12625cbbf96b9700cdbb094cdb726254cd22445eb
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: taskflow-db
+                  key: password
+            # O Kubernetes expande $(VAR) com variáveis declaradas ANTES na lista: a senha existe num lugar só (o
+            # Secret) e a URL é montada aqui. A senha é gerada em hex, sem caracteres que precisariam de escape na URL
+            - name: DATABASE_URL
+              value: postgresql://taskflow:$(POSTGRES_PASSWORD)@postgres:5432/taskflow

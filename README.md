@@ -290,7 +290,7 @@ Escolhas conscientes de escopo, com o próximo passo de cada uma:
 - **Alertas sem roteamento:** 11 regras de alerta testadas no CI disparam no Prometheus, mas sem Alertmanager ninguém é avisado fora dele; os limiares são pontos de partida, não derivados de SLO.
 - **Prazo (expand/contract, Módulo 14.4):** o `dueDate` saiu da API e do banco; continua só no contrato público do tópico (outro ciclo de vida) e nos eventos v1, lidos pelo *upcaster*.
 - **Eventos antigos sem autor:** eventos gravados antes do envelope de metadados aparecem no histórico com `actorId: null`; o autor não é inferido. O metadata ainda não chega ao `EventBus` nem às projeções.
-- **Imagem Docker:** testada em todo PR e publicada no GHCR a cada merge (com proveniência e SBOM atestados), rodando no cluster local (kind) do Módulo 02, que está em construção: a API ainda sem configuração, banco nem probes no cluster.
+- **Imagem Docker:** testada em todo PR e publicada no GHCR a cada merge (com proveniência e SBOM atestados), rodando no cluster local (kind) do Módulo 02, que está em construção: a API sobe com o Postgres e a migração no cluster, mas ainda sem probes, Ingress nem deploy automatizado.
 - **Rate limit em memória:** não é compartilhado entre réplicas (em produção, usaria Redis).
 - **Terraform sem lock do state:** o backend S3 não tem `use_lockfile`; dois `apply` simultâneos poderiam corromper o state.
 - **Strategy de prioridade incompleto:** a estratégia é instanciada no handler (não injetada) e a `DeadlinePriorityStrategy` não é usada.
@@ -362,7 +362,7 @@ reproduzir, **problemas reais encontrados** e onde o resultado vive no código. 
 | Módulo | Tema | No projeto |
 |:-:|---|---|
 | [01](docs/modules/01-observabilidade.md) | Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana) | `tracing.ts`, `common/logging/`, `common/correlation/`, `docker-compose.yml` |
-| [02](docs/modules/02-kubernetes.md) | Orquestração com Kubernetes (🚧 2.1 de 2.6) | `k8s/` (cluster kind e manifestos), a imagem do GHCR por digest |
+| [02](docs/modules/02-kubernetes.md) | Orquestração com Kubernetes (🚧 2.2 de 2.6) | `k8s/` (cluster kind; API, Postgres em StatefulSet, ConfigMap, migração como Job), a imagem do GHCR por digest |
 | [03](docs/modules/03-ci-cd-github-actions.md) | CI/CD com GitHub Actions | `.github/workflows/ci.yml` |
 | [04](docs/modules/04-modelagem-nosql-dynamodb.md) | Modelagem NoSQL (DynamoDB, single-table, GSI) | `scripts/dynamo/` |
 | [05](docs/modules/05-event-sourcing-cqrs.md) | Event Sourcing, CQRS e arquitetura | `src/modules/tasks/`, `src/events/` |

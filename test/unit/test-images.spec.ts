@@ -10,6 +10,10 @@
  * continuaram no 16.15. Só o Prometheus tinha essa guarda (no teste de integração), e o PR dele foi o único dos
  * três a ficar vermelho. Agora a regra vale para as três imagens e para o smoke da imagem, num teste unitário
  * (sem Docker): o PR desalinhado falha no primeiro minuto do CI e diz o que alinhar.
+ *
+ * Desde o Módulo 02 (2.2), o Postgres tem uma QUARTA fonte: o StatefulSet do cluster (`k8s/base/postgres.yaml`), por
+ * tag e digest. O Dependabot não lê manifestos do Kubernetes, então só este teste impede o cluster de ficar numa
+ * versão e o resto do projeto em outra.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -33,6 +37,15 @@ describe('imagens dos testes = imagens do compose', () => {
     ['prometheus', PROMETHEUS_TEST_IMAGE, 'test/support/prometheus-image.ts'],
   ])('serviço %s: o teste usa %s (alinhe %s com o compose no mesmo PR)', (service, testImage) => {
     expect(composeImage(service)).toBe(testImage);
+  });
+
+  it('o Postgres do cluster (k8s/base/postgres.yaml) é o do compose, fixado por digest', () => {
+    const manifest = readFileSync(join(ROOT, 'k8s/base/postgres.yaml'), 'utf8');
+    const [tag, digest] = (manifest.match(/^\s+image:\s*(\S+)/m)?.[1] ?? '').split('@');
+    // Tag por IGUALDADE de texto, e o digest por uma regex fixa: montar a regex com o nome da imagem exigiria escapar
+    // todos os metacaracteres (o CodeQL apontou o escape só do ponto como incompleto, js/incomplete-sanitization)
+    expect(tag).toBe(composeImage('postgres'));
+    expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 
   it('o smoke da imagem de produção usa o Postgres do compose', () => {
