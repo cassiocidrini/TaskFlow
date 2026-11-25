@@ -1,6 +1,6 @@
 # Módulo 01 — Observabilidade (OpenTelemetry, Jaeger, Prometheus, Grafana)
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 10/11/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 25/11/2026
 >
 > **Onde vive no código:** [`src/tracing.ts`](../../src/tracing.ts) ·
 > [`src/common/telemetry/start-telemetry.ts`](../../src/common/telemetry/start-telemetry.ts) · [`src/env.ts`](../../src/env.ts) ·
@@ -161,6 +161,7 @@ biblioteca de log.
 ### 1. Dependências
 
 ```bash
+# OpenTelemetry JS SDK 3.x (estáveis 3.1, experimentais 0.301): os pacotes andam JUNTOS (ver "A migração 2 → 3")
 npm install @opentelemetry/sdk-node @opentelemetry/auto-instrumentations-node \
   @opentelemetry/exporter-trace-otlp-proto @opentelemetry/exporter-prometheus \
   @opentelemetry/sdk-metrics @opentelemetry/resources @opentelemetry/semantic-conventions
@@ -240,7 +241,8 @@ export function startTelemetry({ serviceName, metricsPort }: TelemetryOptions): 
   const sdk = new NodeSDK({
     resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: serviceName }),
     traceExporter: new OTLPTraceExporter({ url: `${otlpEndpoint}/v1/traces` }),
-    metricReader: new PrometheusExporter({ port: metricsPort, host: '0.0.0.0' }),
+    // Lista: o `metricReader` singular saiu no OTel 3. host explícito: o padrão do exporter virou `localhost`
+    metricReaders: [new PrometheusExporter({ port: metricsPort, host: '0.0.0.0' })],
     instrumentations: [
       getNodeAutoInstrumentations({
         '@opentelemetry/instrumentation-http': { ignoreIncomingRequestHook: (req) => isHealthCheck(req.url) },
@@ -500,6 +502,59 @@ tráfego que a drenagem existe para desviar, e nenhum balanceador o mandaria. O 
 
 ---
 
+## ⬆️ A migração do OpenTelemetry 2 → 3
+
+Em novembro de 2026, o Dependabot trouxe o grupo `@opentelemetry/*` com o `sdk-node` 0.301, que exige o
+`@opentelemetry/core` 3.x: era a migração do SDK 2 para o 3, um major (Módulo 03, E.2). Feita num PR próprio,
+guiada pelos changelogs (`CHANGELOG.md` e `experimental/CHANGELOG.md`) e pelo guia oficial `doc/3.x/migration-guide.md`.
+
+### O que mudou e o que nos atingiu
+
+| Mudança no OTel 3 | No TaskFlow |
+|---|---|
+| `NodeSDK`: o campo `metricReader` (singular) foi **removido**; use `metricReaders: [...]` | **Atingiu.** O `tsc` recusou o campo. Num projeto sem checagem de tipos (ou com um cast), o processo subiria normalmente e só as métricas deixariam de sair |
+| `PrometheusExporter` escuta em **`localhost` por padrão** (antes: todas as interfaces) e não lê mais `OTEL_EXPORTER_PROMETHEUS_HOST/PORT` | Protegidos pelo `host: '0.0.0.0'` explícito. Sem ele, o Prometheus deixaria de coletar dentro de um container |
+| `@opentelemetry/sdk-trace-base` **removido** → `@opentelemetry/sdk-trace`; `BasicTracerProvider` → `TracerProvider`; `new SimpleSpanProcessor({ exporter })` | O suporte dos testes ([`in-memory-tracing.ts`](../../test/support/in-memory-tracing.ts)) |
+| `@opentelemetry/api` mínima 1.10 | 1.9.1 → 1.10.0 |
+| Imports profundos (`/build/src/...`) bloqueados pelo `exports` | Nenhum no projeto |
+| `AsyncHooksContextManager`, Jaeger exporter/propagator, `envDetector` | Não usamos (`AsyncLocalStorageContextManager`, OTLP, W3C) |
+
+**A instalação:** atualizar em dois `npm install` (dependências, depois devDependencies) falhou com `ERESOLVE`: cada
+metade ficava presa à outra ainda no 2.x. Os pacotes do OTel só funcionam em par (estáveis 3.x com experimentais
+0.30x); a solução foi trocar todas as faixas no `package.json` e resolver de uma vez.
+
+### Telemetria quebra calada: o teste de exportação
+
+Telemetria quebrada não derruba a API nem reprova um teste: o painel fica vazio e os alertas ficam mudos. Os testes
+de tracing usam spans em memória, e os de métricas, um `MeterProvider` próprio: nenhum rodava o `startTelemetry`
+real. O [`telemetry-export.spec.ts`](../../test/integration/telemetry-export.spec.ts) roda, num processo filho
+(o SDK aplica patches globais), e prova as três saídas:
+
+| Prova | Mutação que a derruba |
+|---|---|
+| O span chega ao destino OTLP (`POST /v1/traces`, num servidor HTTP falso no lugar do Jaeger) | — |
+| O `/metrics` responde **com a métrica** criada no processo | `metricReader` singular: o `/metrics` responde **200 vazio** |
+| O `/metrics` responde pelo **IP da interface de rede**, e não só no loopback | `host: 'localhost'`: `fetch failed` pelo IP, loopback ainda ok |
+
+**O achado da mutação 1:** o `PrometheusExporter` sobe o servidor HTTP **no construtor**, mesmo sem estar ligado ao
+SDK. O `/metrics` responde 200, o Prometheus marca o target como `up`, e as métricas não existem. **Target verde,
+painel vazio.** Só um teste que confere o **conteúdo** pega.
+
+### Os nomes das métricas são um contrato
+
+Alertas e painéis dependem dos nomes e das labels das métricas como um app depende da API. Antes e depois da
+migração, os 4 processos (API, relay e os dois consumers) subiram com tráfego real, e o `/metrics` de cada um foi
+comparado: **os mesmos nomes (33, 21, 29 e 29 famílias) e as mesmas labels.** A única diferença é o `target_info`
+(metadados do processo), que ganhou `os_type`, `os_version` e `service_instance_id` (detectores de *resource*
+estabilizados no 3.1); nenhuma série usada por alerta ou painel mudou. Toda métrica citada em
+`prometheus/alerts.yml` e nos dashboards continua existindo (o `outbox_relay_failures_total` só nasce na primeira
+falha, antes e depois; o painel já usa `or vector(0)`).
+
+**Ao vivo:** os 5 targets do Prometheus `up`, e um trace de 39 spans atravessando os 4 serviços (`POST` da tarefa →
+`create` no relay → `process` nos dois consumers).
+
+---
+
 ## ⚠️ Problemas encontrados e soluções
 
 Problemas **reais**, na ordem em que apareceram:
@@ -529,6 +584,7 @@ Problemas **reais**, na ordem em que apareceram:
 | 21 | **(Módulo 13.3)** Uma 2ª réplica do relay no mesmo host subia normalmente, mas sem métricas | A porta de métricas já estava em uso, e o `PrometheusExporter` **não** falha nem avisa | Porta configurável (`RELAY_METRICS_PORT`). Em produção, cada réplica tem o seu IP e o padrão basta. E `up{job="taskflow-relay"}` acusa uma réplica sem coleta |
 | 22 | **(Módulo 13.6d)** O dashboard novo não aparecia no Grafana, e o da API estava com o título antigo | O bind mount do Docker aponta para a PASTA original (o inode), não para o caminho. A pasta `grafana/` foi recriada por um checkout de branch, e o container ficou preso à antiga, que não existia mais: 2.766 erros `failed to walk provisioned dashboards` no log, por um dia, sem nenhum sintoma visível (o Grafana seguia mostrando a cópia que tinha no banco) | `docker compose up -d --force-recreate grafana` (usuários e senha ficam no volume `grafana_data`). Lição: depois de trocar de branch com pastas montadas, recriar os containers; e um dashboard que "não muda" pede uma olhada no log do provisionamento |
 | 23 | **(Módulo 14.1)** O `correlation.id` ficava no span `middleware - correlationIdMiddleware`, e não no span do request | Dentro de um middleware Express, o span ATIVO é o que o `instrumentation-express` cria para o próprio middleware. Estava documentado como peculiaridade (a busca por tag achava o trace), e veio à tona quando os atributos do cliente caíram no mesmo lugar | [`currentRequestSpan()`](../../src/common/telemetry/request-span.ts): o span do request vem do `rpcMetadata` que o `instrumentation-http` guarda no contexto (o mesmo do `RouteTelemetryGuard`). Teste unitário que reproduz o Express (span do middleware ativo dentro do do request); com o helper devolvendo o span ativo, ele falha |
+| 24 | **(OTel 3)** O `metricReader` singular saiu do `NodeSDK`, e o exporter Prometheus passou a escutar em `localhost` | Breaking changes da migração 2 → 3; nenhum teste rodava o `startTelemetry` real, e um `/metrics` sem métricas responde 200 (target `up`) | `metricReaders: [...]`, `host: '0.0.0.0'` mantido, e o `telemetry-export.spec.ts` (span no OTLP, métrica no `/metrics`, acesso pelo IP de rede), com as duas mutações conferidas |
 
 ---
 
@@ -570,6 +626,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 | Trace terminando no INSERT da outbox; relay e consumer em traces soltos | Contexto W3C gravado na outbox e propagado no header do Kafka: request, relay e consumer num trace só | O trace mostra onde o tempo de um evento é gasto entre processos (medido: na outbox, não no Kafka; [Módulo 13](13-mensageria-kafka.md)) |
 | Dashboard mostrava, ninguém era avisado | 9 regras de alerta em `prometheus/alerts.yml` (API, outbox, consumers, Kafka), testadas com `promtool test rules` no CI | Alerta é código: PromQL errada quebra o build em vez de silenciar o alerta ([Módulo 13.6d](13-mensageria-kafka.md)) |
 | Métricas e alertas só da infraestrutura | Um rollout medido por variante: `taskflow_task_list_duration`/`_requests_total{variant}`, a linha "Rollout" no dashboard da API e 2 alertas do critério de avanço (11 regras no total) | Decidir se uma feature flag avança, ou se volta, com números ([Módulo 14.7](14-api-para-web-e-apps.md), ADR-0011) |
+| OpenTelemetry JS SDK 2.x, sem teste do `startTelemetry` real | SDK 3.x (estáveis 3.1, experimentais 0.301) e o `telemetry-export.spec.ts` provando span, métrica e acesso pela rede; os nomes das métricas comparados antes e depois | Telemetria quebra calada: atualização da biblioteca de observabilidade exige provar que a telemetria sai |
 | Um processo, `service.name` e porta fixos no `tracing.ts` | `startTelemetry({ serviceName, metricsPort })` chamado pela API (`taskflow`, 9464) e pelo relay da outbox (`taskflow-relay`, 9465); queries sem span pai fora dos traces | O relay do [Módulo 13.3](13-mensageria-kafka.md) é outro processo: precisa aparecer separado no Jaeger e no Prometheus, sem o ruído do polling |
 
 ---
@@ -600,6 +657,7 @@ A primeira versão funcionava, mas tinha atalhos que os blocos de correção seg
 - [x] Graceful shutdown: drenagem com readiness 503, HTTP antes do banco, OTel por último, watchdog
 - [x] Datasources e dashboard provisionados por arquivo, validados no CI
 - [x] `http_route` nas métricas e probes fora da telemetria
+- [x] OpenTelemetry 3, com a exportação (span, métrica e acesso pela rede) provada por teste
 - [ ] Alertas
 
 ---

@@ -357,7 +357,8 @@ validado uma vez; daqui em diante, o fluxo semanal é PR a PR. No consolidado:
 
 **Fora do consolidado: o OpenTelemetry.** O grupo trouxe o `sdk-node` 0.301, que exige o `@opentelemetry/core` 3.x
 (estamos no 2.x): é a migração do SDK 2 → 3, um major, e o filtro "só minor e patch" deixou os pacotes 3.x de fora
-(`ERESOLVE`). O grupo `opentelemetry` agora aceita major, para a migração chegar inteira num PR.
+(`ERESOLVE`). O grupo `opentelemetry` agora aceita major, para a migração chegar inteira num PR. A migração foi feita
+em seguida, num PR próprio ([Módulo 01](01-observabilidade.md), seção "A migração do OpenTelemetry 2 → 3").
 
 ### Imagens fora do Dependabot (revisão manual)
 
@@ -503,8 +504,6 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - **Scripts de instalação sem política:** o npm 11.19 roda os scripts de `postinstall` de qualquer dependência (só
   avisa). Um `allowScripts` no `package.json` com `strict-allow-scripts` faria de um script novo um erro de build
   (o vetor de worms como o Shai-Hulud, de 2025).
-- **Migração do OpenTelemetry 2 → 3 pendente:** o PR do grupo `opentelemetry` (com major) é a migração inteira; o
-  SDK, os exporters e a auto-instrumentação mudam juntos.
 - **`awslocal` descontinuado:** o LocalStack 2026.10 avisa que o `awslocal` (usado pelo `npm run aws:*`) não recebe
   mais atualizações, em favor do `lstk`. Funciona hoje; a troca fica para o Módulo 09.
 - **`overrides` do `effect`:** dívida com prazo; sai quando o Prisma atualizar a dependência.
