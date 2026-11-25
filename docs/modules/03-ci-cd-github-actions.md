@@ -321,6 +321,30 @@ Não é código, então fica com quem administra o repositório (*Settings*):
   higher*. O check do CodeQL sempre "passa" (a análise roda); o que bloqueia é o achado, e isso é regra de *code
   scanning*, não de *status check*.
 
+### A primeira rodada do Dependabot
+
+Ao entrar na `main`, o Dependabot não esperou a segunda-feira: abriu 13 PRs de uma vez (6 de imagens, 5 grupos do
+npm e 2 majors). Os vermelhos eram os portões funcionando:
+
+| PR | Falhou em | O que o portão pegou |
+|---|---|---|
+| Prometheus v3.15 → v3.16 | integração | O teste que exige a imagem do `promtool` igual à do compose: o Dependabot só trocou o compose |
+| Node 24 → 26 na imagem | job `image` | O `npm ci` quebra dentro da imagem com o Node 26 (sem o smoke da E.1, verde) |
+| Grupo `nestjs` | `openapi:check` | O `@nestjs/terminus` novo mudou o schema do `/health` no OpenAPI: o portão de contrato (14.3) pegou uma mudança de API vinda de **dependência** |
+| Grupo `opentelemetry` | `npm ci` (`ERESOLVE`) | O grupo subiu pacotes que precisam andar juntos e o resolvedor recusou a combinação |
+
+**O verde que preocupava:** o Postgres 16 → 18 passou em todos os checks, porque os testes sobem o próprio Postgres
+16.15 pelo Testcontainers. Só o Prometheus tinha a guarda "imagem do teste = imagem do compose"; para o Postgres e o
+Kafka, havia apenas um comentário. Duas correções:
+
+- **[`test-images.spec.ts`](../../test/unit/test-images.spec.ts)** (unitário, sem Docker): as imagens de Postgres,
+  Kafka e Prometheus dos testes, e a do Postgres do smoke, têm de ser as do compose. Um PR que mexa só no compose
+  falha no primeiro minuto do CI e diz o que alinhar. **Mutação:** o compose com o Postgres 18.6 e o Kafka 4.4.0
+  (os dois PRs do Dependabot) deixa 3 testes vermelhos.
+- **Major de imagem fora do Dependabot** (`ignore` de `version-update:semver-major` em `docker` e
+  `docker-compose`, e no `@types/node`, que segue o major do runtime). Node 24 → 26 mexe no `.nvmrc`, no `engines`,
+  no CI e na imagem juntos; Postgres 16 → 18 não abre o volume antigo. É decisão de projeto, num PR planejado.
+
 ### Imagens fora do Dependabot (revisão manual)
 
 O Dependabot lê `uses:`, Dockerfile e compose, mas não comandos dentro de `run:`. Revise a cada poucos meses:
@@ -359,8 +383,14 @@ Ruleset "main" · enforcement: active · bypass: ninguém · alvo: ~DEFAULT_BRAN
    • Testes de integração (Testcontainers)
    • Testes E2E (Testcontainers)
    • Testes de streaming (Kafka + Postgres, Testcontainers)
+   • Mudanças incompatíveis no contrato da API   (Módulo 14.3)
    • Imagem Docker (hadolint e smoke)            (Etapa E.1)
+   • CodeQL                                      (Etapa E.2; publicado pelo code scanning, não pelas Actions)
 ```
+
+> Conferido pela API em 24/11/2026: 7 checks. O `CodeQL` entrou como *status check* (o check run que o code
+> scanning publica reprova quando a análise acha alerta acima do limite de *Protection rules*, padrão *High or
+> higher*), e não como a regra *Require code scanning results*: os dois caminhos bloqueiam o mesmo achado.
 
 > ⚠️ **Achado em 10/11/2026:** ao incluir o 4º check, a tela de Branch Protection estava **vazia** e a API respondia
 > `Branch not protected`. A regra descrita nas versões anteriores deste módulo não existia (não dá para saber desde
@@ -374,7 +404,7 @@ Ruleset "main" · enforcement: active · bypass: ninguém · alvo: ~DEFAULT_BRAN
 |---|---|
 | Push direto na `main` | ❌ Bloqueado (só via PR) |
 | PR com qualquer job vermelho | ❌ Merge bloqueado |
-| PR com os 5 jobs verdes | ✅ Merge liberado |
+| PR com os 7 checks verdes | ✅ Merge liberado |
 
 > ⚠️ **Armadilha ao renomear jobs:** o check obrigatório é identificado pelo **nome** do job. Quando o job único
 > `Build & Test` virou três jobs, o check antigo **nunca mais reportaria**, e o PR ficaria travado em
@@ -433,6 +463,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 | 15 | `npm audit fix` deixou 3 HIGH e sugeriu voltar o Prisma para a 6.12 | O `@prisma/config` fixa `effect@3.20.0` exato; a correção é da 3.22.1 | `overrides` no `package.json`, com condição de remoção (E.2) |
 | 16 | O hadolint novo acusou DL3066 em `USER node` | Uid por nome não pode ser conferido como não-root (Kubernetes `runAsNonRoot`) | `USER 1000:1000` (E.2) |
 | 17 | O npm 11.19 avisou de 10 pacotes com scripts de instalação "fora do `allowScripts`", e o manual dizia "bloqueados por padrão" | O `npm help install-scripts` contradiz o `npm help config`: o padrão é **aviso**, e os scripts rodam (o binário do Kafka foi gerado no container) | Nada quebrou; a política de scripts (`allowScripts` + `strict-allow-scripts`) ficou como próximo passo |
+| 18 | O PR do Dependabot do Postgres 16 → 18 passou verde em todos os checks | Os testes sobem o Postgres do Testcontainers (16.15); nada conferia a versão do compose, só um comentário | `test-images.spec.ts` para Postgres, Kafka, Prometheus e o smoke; major de imagem no `ignore` do Dependabot |
 
 ---
 
@@ -446,6 +477,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 | Três jobs paralelos | PRs #5 e #6 | ✅ todos verdes, com 150 testes por PR |
 | Quatro jobs (+ `streaming`) | Módulo 13.3 | Localmente: suíte de streaming em ~7 s com as imagens em cache |
 | Imagem antes × depois | Etapa E.1 | **1.248 → 707 MB**; CVEs HIGH/CRITICAL (Trivy) **51 → 5** (0 CRITICAL, 0 no Alpine); uid 0 → 1000; Node 20 → 24 |
+| Primeira rodada do Dependabot | Etapa E.2 | 13 PRs; 4 vermelhos (cada um um portão funcionando) e 1 verde enganoso (Postgres 18), que virou o `test-images.spec.ts` |
 | Cadeia de suprimentos | Etapa E.2 | `npm audit` de produção **16 → 0**; imagem **5 → 0 HIGH** (Trivy 0.76.2); actions por SHA; 389 unitários · 95 integração · 79 E2E · 13 streaming e o smoke verdes depois do `audit fix` |
 | Cinco jobs (+ `image`) | Etapa E.1 | `npm run docker:smoke`: 7 verificações em ~1 min 13 s localmente; `docker stop` em 0,15 s com exit 0 |
 
@@ -477,7 +509,7 @@ git switch main; git pull; git fetch --prune; git branch -D feat/<assunto>
 - [x] Jobs paralelos: qualidade, integração, E2E, streaming (Kafka real, Módulo 13.3) e imagem (Etapa E.1)
 - [x] Testes com PostgreSQL real no CI (Testcontainers)
 - [x] `permissions` mínimas e cancelamento de runs obsoletos
-- [x] Ruleset na `main`: PR obrigatório, 5 checks, sem bypass, sem force push (verificado pela API do GitHub)
+- [x] Ruleset na `main`: PR obrigatório, 7 checks, sem bypass, sem force push (verificado pela API do GitHub)
 - [x] Badge do CI no README
 - [x] Contrato da API conferido no CI e mudanças incompatíveis bloqueadas sem label (Módulo 14.3)
 - [x] Imagem de produção em Node 24, não-root, com `HEALTHCHECK`, migração separada, e construída e executada no CI (Etapa E.1)

@@ -7,6 +7,11 @@
 # Os alertas de SEGURANÇA não esperam a semana: os "Dependabot security updates" (configuração do repositório)
 # abrem um PR assim que uma CVE é publicada.
 #
+# MAJOR de imagem não vem automático: Node 24 → 26 ou Postgres 16 → 18 é decisão de projeto (o `.nvmrc`, o
+# `engines` e o CI andam juntos; o volume do Postgres não abre na versão nova), e não um PR de segunda-feira. Na
+# primeira rodada, o PR do Postgres 18 passou VERDE porque os testes continuavam no 16: o `test-images.spec.ts`
+# agora reprova esse desalinhamento, e o `ignore` abaixo evita que ele chegue como rotina.
+#
 # Fora do Dependabot (ele não lê `run:` de workflow): hadolint, Trivy e oasdiff, fixados por tag + digest no CI.
 # Revisão manual; lista no Módulo 03.
 version: 2
@@ -36,6 +41,11 @@ updates:
       outras:
         patterns: ['*']
         update-types: [minor, patch]
+    ignore:
+      # Os tipos do Node seguem o major do runtime (24, o do `.nvmrc` e do CI): os do 26 descreveriam APIs que
+      # o processo não tem. Sobem junto com a troca de major do Node
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
 
   # Actions fixadas por SHA: o Dependabot atualiza o SHA E o comentário da versão (`# v7.0.1`)
   - package-ecosystem: github-actions
@@ -57,9 +67,13 @@ updates:
       day: monday
     commit-message:
       prefix: 'build(deps)'
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
 
-  # Postgres, Kafka, Jaeger, Prometheus, Grafana e LocalStack do ambiente local. O Testcontainers usa as mesmas
-  # versões (test/support/postgres-image.ts e o Kafka do compose): ao aceitar uma atualização daqui, alinhe lá
+  # Postgres, Kafka, Jaeger, Prometheus, Grafana e LocalStack do ambiente local. Postgres, Kafka e Prometheus têm
+  # uma SEGUNDA fonte de versão, nos testes (test/support/*-image.ts e o smoke da imagem): o PR do Dependabot fica
+  # vermelho no test-images.spec.ts até alinhar lá, no próprio PR
   - package-ecosystem: docker-compose
     directory: /
     schedule:
@@ -67,3 +81,6 @@ updates:
       day: monday
     commit-message:
       prefix: 'chore(deps)'
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
