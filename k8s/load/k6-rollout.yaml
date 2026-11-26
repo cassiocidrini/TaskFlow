@@ -1,0 +1,88 @@
+# Teste de carga DURANTE uma troca de versão (Módulo 02, etapa 2.3): mede quantas requisições um rollout derruba.
+# Não faz parte da aplicação (fica fora de k8s/base): é uma ferramenta de medição, aplicada só quando se quer medir.
+#
+#   kubectl apply -f k8s/load/k6-rollout.yaml                       inicia a carga (90 s)
+#   kubectl -n taskflow rollout restart deployment/taskflow-api     troca todos os pods no meio dela
+#   kubectl -n taskflow logs -f job/k6-rollout                      o resultado: http_req_failed
+#   kubectl -n taskflow delete -f k8s/load/k6-rollout.yaml          para rodar de novo (o template do Job é imutável)
+#
+# DENTRO do cluster, e não pelo `kubectl port-forward`: o port-forward se prende a UM pod e cai quando ele morre,
+# então mediria o túnel, não a aplicação. Aqui o k6 passa pelo Service, como um cliente de verdade.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k6-rollout
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: k6-rollout
+    app.kubernetes.io/part-of: taskflow
+data:
+  rollout.js: |
+    // Carga constante contra o Service da API enquanto um rollout acontece.
+    //
+    // Alvo `/health/live`: não passa pelo throttler (com uma origem só, as outras rotas dariam 429 em segundos) e
+    // não toca o banco. Logo, uma falha aqui é de CONEXÃO (recusada, resetada, sem resposta), justamente o que um
+    // rollout mal feito causa. O k6 reaproveita conexões (keep-alive), como um proxy de verdade faria.
+    import http from 'k6/http';
+    import { sleep } from 'k6';
+
+    export const options = {
+      vus: 10,
+      duration: '90s',
+      // Meta da 2.3: ZERO falhas. Se houver alguma, o k6 sai com código != 0 e o Job fica Failed
+      thresholds: { http_req_failed: ['rate==0'] },
+    };
+
+    export default function () {
+      const res = http.get('http://taskflow-api/health/live', { timeout: '5s' });
+      if (res.status !== 200) {
+        // Cada falha com horário: dá para alinhar com o momento em que cada pod subiu ou foi encerrado
+        console.warn(`${new Date().toISOString()} status=${res.status} erro=${res.error_code} ${res.error}`);
+      }
+      sleep(0.05);
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-rollout
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: k6-rollout
+    app.kubernetes.io/part-of: taskflow
+spec:
+  # Uma medição é uma medição: se falhar, não tenta de novo (outra tentativa mediria outro momento)
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k6-rollout
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        # A imagem do k6 já roda sem root (uid 12345). Numérico aqui porque o kubelet só consegue CONFERIR o
+        # runAsNonRoot com um uid numérico
+        runAsNonRoot: true
+        runAsUser: 12345
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: k6
+          # Por tag E digest, como toda imagem de ferramenta no projeto
+          image: grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276
+          args: ['run', '/scripts/rollout.js']
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: k6-rollout

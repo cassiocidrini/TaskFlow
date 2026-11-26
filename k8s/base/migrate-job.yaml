@@ -27,6 +27,15 @@ spec:
     spec:
       # Job exige Never ou OnFailure. Never: cada tentativa é um pod novo, e os logs das que falharam continuam lá
       restartPolicy: Never
+      # Mesmo endurecimento da API (2.3; o porquê de cada campo está em api.yaml). A imagem de migração também roda
+      # como 1000:1000
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: migrate
           # A imagem de migração do MESMO commit da API (aa4d4a0), por digest, publicada pelo publish-image.yml
@@ -41,3 +50,17 @@ spec:
             # Secret) e a URL é montada aqui. A senha é gerada em hex, sem caracteres que precisariam de escape na URL
             - name: DATABASE_URL
               value: postgresql://taskflow:$(POSTGRES_PASSWORD)@postgres:5432/taskflow
+          # Um processo curto (o Prisma CLI aplicando SQL): reserva pouco, e o limit de memória impede que um bug no
+          # CLI pese no nó. Sem limit de CPU, pelo mesmo motivo da API
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+            # O Prisma CLI não precisa gravar no disco da imagem para aplicar migrações
+            readOnlyRootFilesystem: true
