@@ -1,8 +1,20 @@
 # O espaço do TaskFlow dentro do cluster (Módulo 02). Namespace separa nomes, permissões (RBAC), cotas e regras de
 # rede: tudo do TaskFlow fica aqui, e nada cai no `default` por esquecimento.
+#
+# Pod Security Admission (2.3): o próprio API server avalia cada pod contra os perfis padrão do Kubernetes, ANTES de
+# ele existir. Três modos, cada um com um perfil:
+#   enforce: baseline    RECUSA o pod (privileged, hostNetwork, hostPath...): o mínimo inegociável
+#   warn: restricted     AVISA no `kubectl apply` o que não atende ao perfil mais rígido (sem root, sem
+#                        capabilities, seccomp...), sem recusar
+#   audit: restricted    registra o mesmo no log de auditoria do API server
+# Por que não `enforce: restricted`: o Postgres oficial começa como root e seria recusado. O aviso deixa a dívida
+# visível a cada apply, e subir para enforce é uma linha quando ela for paga.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: taskflow
   labels:
     app.kubernetes.io/part-of: taskflow
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

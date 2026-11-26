@@ -1,13 +1,15 @@
 # Módulo 02 — Orquestração com Kubernetes
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 25/11/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 26/11/2026
 >
-> **Status:** 🚧 em construção, etapa **2.2 de 2.6** (a API rodando no cluster, com o Postgres num StatefulSet, a
-> configuração em ConfigMap e Secret, e a migração como Job). Cada etapa acrescenta a sua parte a este documento; o mapa completo está em "Roteiro do módulo".
+> **Status:** 🚧 em construção, etapa **2.3 de 2.6** (a API troca de versão sob carga sem perder requisição, medido:
+> 32 falhas → 0; com probes, recursos medidos e `securityContext`). Cada etapa acrescenta a sua parte a este documento; o mapa completo está em "Roteiro do módulo".
 >
 > **Onde vive no código:** [`k8s/kind-config.yaml`](../../k8s/kind-config.yaml) (o cluster) ·
 > [`k8s/base/`](../../k8s/base/api.yaml) (API e Service) · [`postgres.yaml`](../../k8s/base/postgres.yaml) ·
-> [`config.yaml`](../../k8s/base/config.yaml) · [`migrate-job.yaml`](../../k8s/base/migrate-job.yaml) · a imagem que o cluster roda vem do workflow
+> [`config.yaml`](../../k8s/base/config.yaml) · [`migrate-job.yaml`](../../k8s/base/migrate-job.yaml) ·
+> [`k8s/load/k6-rollout.yaml`](../../k8s/load/k6-rollout.yaml) (a carga durante o rollout) ·
+> [`k8s-api-manifest.spec.ts`](../../test/unit/k8s-api-manifest.spec.ts) · a imagem que o cluster roda vem do workflow
 > [`publish-image.yml`](../../.github/workflows/publish-image.yml) ([Módulo 03](03-ci-cd-github-actions.md), E.3)
 
 ---
@@ -44,14 +46,14 @@ trabalha continuamente para que o real fique igual ao declarado.
 |---|---|:-:|
 | **2.1** | Cluster local com **kind** (1 control-plane + 2 workers, versão fixada por digest), `kubectl`, e o primeiro Deployment da API, que falha de propósito: o diagnóstico de um `CrashLoopBackOff` e a reconciliação observada | ✅ |
 | **2.2** | Postgres no cluster (StatefulSet + volume persistente), ConfigMap e Secret (fora do Git), a **migração como Job**, e a API respondendo por um Service | ✅ |
-| 2.3 | A API de verdade: probes, recursos, `securityContext`, **rolling update sob carga sem erro** e rollback | 🔜 |
+| **2.3** | A API de verdade: probes, recursos medidos, `securityContext` e Pod Security, **rolling update sob carga sem erro** (medido antes e depois) e rollback | ✅ |
 | 2.4 | Kafka, relay e consumers no cluster | 🔜 |
 | 2.5 | Ingress, escala automática (HPA) e NetworkPolicy | 🔜 |
 | 2.6 | Ambientes com Kustomize (dev × prod) e a segunda metade do CD (GitOps) | 🔜 |
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 2.2)
+## 🏗️ Arquitetura (estado atual: 2.3)
 
 ```text
 sua máquina
@@ -66,8 +68,8 @@ sua máquina
             ├─ taskflow-worker   ──┐
             └─ taskflow-worker2  ──┴─ kubelet + containerd · kube-proxy · kindnet (rede dos pods, 10.244.0.0/16)
 
-namespace taskflow
-  ConfigMap taskflow-api (NODE_ENV, LOG_LEVEL, OTEL_SDK_DISABLED)        ← Git
+namespace taskflow   (Pod Security: enforce baseline · warn/audit restricted)
+  ConfigMap taskflow-api (NODE_ENV, LOG_LEVEL, OTEL_SDK_DISABLED, SHUTDOWN_DRAIN_MS=5000, SHUTDOWN_TIMEOUT_MS=20000)  ← Git
   Secret taskflow-db (password) · Secret taskflow-api (jwt-secret)       ← kubectl create, NUNCA no Git
        │
        ├─► Service postgres (headless) ─► StatefulSet postgres ─► postgres-0 ─► PVC data-postgres-0 (1 GiB) ─► PV (local-path)
@@ -77,6 +79,12 @@ namespace taskflow
                                                   └─► Deployment taskflow-api ─► ReplicaSet ─► 2 pods (um por worker)
                                                         imagem ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e0… (aa4d4a0)
                                                         DATABASE_URL = postgresql://taskflow:$(POSTGRES_PASSWORD)@postgres:5432/taskflow
+                                                        startup/liveness: /health/live · readiness: /health/ready
+                                                        rolling update maxSurge 1 / maxUnavailable 0 · grace 30 s
+                                                        uid 1000, disco somente leitura, sem capabilities, seccomp
+                                                        requests 100m / 192Mi · limit 384Mi (sem limit de CPU)
+
+  Job k6-rollout (k8s/load, só para medir) ─► GET http://taskflow-api/health/live, ~195 req/s, durante o rollout
 ```
 
 ---
@@ -264,6 +272,114 @@ antigo (`7c6999f7c`, que ficou com `0`, guardado: é para ele que um rollback vo
 a troca até o fim, e é o comando que um pipeline usa para saber se o deploy deu certo. Sem probes (2.3), "pronto"
 ainda é "processo rodando".
 
+### Por que um rollout derruba requisições (2.3)
+
+A linha de base da 2.3, medida com um k6 **dentro do cluster** durante um `kubectl rollout restart`, deu 32 falhas
+em 16.655 requisições e ~4 s com o Service sem nenhum pod respondendo. Mesmo assim, o rollout terminou em
+`successfully rolled out`. Os eventos explicam a sequência:
+
+1. O pod novo é marcado **Ready no segundo em que o container inicia**, porque sem *readiness probe* "pronto" significa
+   "processo rodando". O Nest ainda estava no boot, sem ouvir a porta 3000.
+2. O Deployment usa esse "pronto" para decidir quando pode derrubar um pod velho. Com os novos "prontos" na hora,
+   ele apagou os dois velhos em ~1,5 s. O padrão `maxUnavailable: 25%` (0 com 2 réplicas) não protegeu nada, porque
+   ele conta pods *prontos*, e o "pronto" era falso.
+3. O pod velho também fechou a porta na hora (`SHUTDOWN_DRAIN_MS` no padrão 0), enquanto o kube-proxy ainda mandava
+   conexões para ele.
+
+Resultado: `connection refused` no pod novo, que ainda não ouvia a porta; `request timeout` nas conexões presas ao
+velho. **O Kubernetes só sabe o que o manifesto conta para ele.** São dois lados do problema, e cada um tem a sua
+peça:
+
+| Lado | O que dá errado | A peça que resolve |
+|---|---|---|
+| Pod **novo** | Recebe tráfego antes de responder | **readinessProbe**: só entra no Service quando `/health/ready` responde 200 |
+| Pod **velho** | Fecha enquanto ainda recebe tráfego | **Drenagem**: continua atendendo por 5 s depois do SIGTERM, com readiness 503 e `Connection: close` ([Módulo 01](01-observabilidade.md)) |
+| O Deployment | Derruba capacidade antes de ter substituto | `maxSurge: 1` + `maxUnavailable: 0`: sobe 1 novo, espera ele ficar pronto, e só então derruba 1 velho |
+
+**Por que a drenagem é necessária, se a readiness existe:** quando um pod é apagado, o kubelet manda o SIGTERM e o
+controller de EndpointSlice tira o pod do Service **ao mesmo tempo**, e cada kube-proxy aplica a remoção nas regras do
+seu nó um instante depois. A readiness não ajuda aqui: o pod já está saindo. A medição isolou cada peça: com
+readiness e **sem** drenagem, foram 11 falhas, em duas rajadas, uma por pod velho; com as duas, 0. A janela existe
+até no kind (3 nós na mesma máquina). Num cluster grande, ou com um balanceador de nuvem na frente, ela é maior.
+
+**Drenagem na app × `preStop`:** quem não tem drenagem no código usa `lifecycle.preStop: sleep: { seconds: 5 }` (nativo
+desde o 1.30), e o kubelet espera antes de mandar o SIGTERM. Aqui ela já existia na aplicação (Módulo 01), com o bônus
+do readiness 503 e do `Connection: close` para quem mantém conexão aberta. Usar as duas somaria as esperas.
+
+### Três probes, três perguntas (2.3)
+
+| Probe | Pergunta | Se falhar | Rota e ritmo |
+|---|---|---|---|
+| **startup** | "Já terminou de subir?" | Enquanto não passa, as outras não rodam; esgotou, reinicia | `/health/live`, a cada 2 s, até 30 vezes (60 s) |
+| **liveness** | "O processo travou?" | O kubelet **reinicia** o container | `/health/live`, a cada 10 s, 3 falhas |
+| **readiness** | "Posso receber tráfego?" | Sai do Service (EndpointSlice), **sem** reiniciar | `/health/ready`, a cada 5 s, 2 falhas |
+
+- **Liveness nunca consulta dependência.** Com a liveness no `/health/ready`, um Postgres fora do ar faria o
+  kubelet reiniciar **todas** as réplicas juntas (*restart storm*): reiniciar a API não conserta o banco, e o boot
+  simultâneo ainda pesaria nele na volta. O `k8s-api-manifest.spec.ts` trava essa regra.
+- **A startup existe para a liveness poder ser rápida.** Sem ela, a liveness teria que tolerar o pior boot (disco
+  frio, imagem grande) e demoraria para detectar um travamento real.
+- **A readiness consulta o banco, e isso é uma escolha com custo:** banco fora significa todas as réplicas fora do
+  Service, e o cliente recebe `connection refused` em vez de um 503 com mensagem. Para uma API que sem banco não
+  responde nada útil, é aceitável. Uma API com cache ou rotas sem banco deixaria o banco fora da readiness.
+
+### Recursos: medir antes de declarar (2.3)
+
+> A decisão, com as alternativas recusadas e quando revisitá-la: [ADR-0013](../adr/0013-recursos-medidos-sem-limit-de-cpu.md).
+
+O **request** é o que o scheduler **reserva** no nó: decide onde o pod cabe e garante a parte dele quando há disputa.
+O **limit** é o teto. Os números vieram do cgroup do container (`memory.current`, `memory.peak`, `cpu.stat`), lido
+com `kubectl exec` antes e depois de 90 s de carga:
+
+| Medida (por pod) | Valor | Decisão |
+|---|---|---|
+| Memória, pico do boot | 183 MiB | `requests.memory: 192Mi` (reservar menos deixaria o nó superlotar no boot) |
+| Memória, sob carga | ~110 MiB | `limits.memory: 384Mi` (2× o pico: rotas com bcrypt e banco custam mais que o `/health/live` medido) |
+| CPU, ~97 req/s | ~0,04 núcleo | `requests.cpu: 100m`, **sem** `limits.cpu` |
+
+- **Memória tem limit, CPU não.** Memória não é comprimível: sem limit, um vazamento esgota o nó e o kernel mata
+  processos dos vizinhos. Com limit, quem morre é o próprio pod (`OOMKilled` no `describe`), e o kubelet o
+  reinicia. CPU é comprimível: falta de CPU vira lentidão, não morte. O limit de CPU aplica *throttling* por janela de
+  100 ms mesmo com o nó ocioso, o que aparece como latência de cauda (p99) sem causa visível. O request já garante a
+  parte justa de cada pod.
+- **O Node lê o limit.** O Node 20+ dimensiona o heap pelo limit de memória do cgroup, não pela memória do nó.
+- **No kind, os requests não protegem nada.** Cada nó diz ter 16 CPUs e 32 GiB (`allocatable`), mas os três são
+  containers na **mesma** máquina: o cluster acha que tem 3× o hardware real. Num cluster de verdade, são a base da
+  decisão do scheduler e do HPA (2.5).
+- **Postgres:** 26 MiB medidos com o banco vazio, mas ele cresce até o `shared_buffers` (128 MB) mais o `work_mem` de
+  cada consulta. `request` 256Mi e `limit` 512Mi, com folga larga, porque um OOMKill no banco derruba todas as conexões
+  de uma vez.
+
+### `securityContext` e Pod Security Admission (2.3)
+
+| Campo | O que impede |
+|---|---|
+| `runAsNonRoot: true` + `runAsUser: 1000` | O kubelet recusa iniciar o container como root. O `USER 1000:1000` numérico da imagem (Módulo 03, E.1) foi feito para isto: com `USER node`, o kubelet não teria como conferir |
+| `readOnlyRootFilesystem: true` | Quem invadir não grava binário nem altera o código. A API e o Prisma CLI (o Job de migração) rodaram sem gravar em disco; se precisassem, um `emptyDir` só no diretório necessário |
+| `allowPrivilegeEscalation: false` | Um processo filho não ganha mais privilégio que o pai (setuid, sudo) |
+| `capabilities: drop: ['ALL']` | Nenhuma capability do Linux; a porta 3000 não é privilegiada |
+| `seccompProfile: RuntimeDefault` | Bloqueia syscalls que um servidor Node nunca usa |
+| `automountServiceAccountToken: false` | A API não fala com a API do Kubernetes; uma invasão não ganha uma credencial do cluster |
+
+O **Pod Security Admission** é o API server avaliando cada pod contra os perfis padrão **antes** de ele existir, por
+labels no namespace. Aqui: `enforce: baseline` (recusa o que é claramente perigoso: `privileged`, `hostNetwork`,
+`hostPath`) e `warn`/`audit: restricted` (o perfil mais rígido, só avisando). No `apply`, o aviso veio **só** para o
+Postgres, listando as 4 regras que ele não cumpre; a API, o Job e o k6 passaram calados. Subir para `enforce:
+restricted` é uma linha, depois de endurecer o Postgres.
+
+### Rollback: o deploy quebrado não derruba nada (2.3)
+
+Um `JWT_SECRET` curto demais (`kubectl set env`) simulou uma versão ruim. O schema recusa o boot e o pod novo entra em
+`CrashLoopBackOff`, com a espera entre tentativas dobrando (10 s, 20 s, 40 s, 80 s). Com `maxUnavailable: 0`, os dois
+pods velhos **nunca saíram**, e o k6 registrou 0 falhas em 17.650 requisições. Aos 120 s (`progressDeadlineSeconds`),
+o `rollout status` saiu com `exceeded its progress deadline`: é o erro que faz um pipeline de CD falhar e avisar
+alguém. O deploy ruim custa tempo, não disponibilidade.
+
+`kubectl rollout undo` volta à revision anterior **reativando o ReplicaSet antigo**, sem reconstruir nada: os pods
+velhos continuaram os mesmos, com a mesma idade, e só o pod quebrado foi removido. Mas o `undo` é imperativo: o
+próprio kubectl avisa que a anotação `last-applied-configuration` não acompanha. Num fluxo GitOps (2.6), o rollback é
+um `git revert`, e o cluster segue o Git.
+
 
 ---
 
@@ -379,6 +495,70 @@ kubectl get pods,pvc -n taskflow -l app.kubernetes.io/name=postgres
 kubectl exec -n taskflow postgres-0 -- psql -U taskflow -d taskflow -c 'SELECT email FROM "User";'   # ...os dados, não
 ```
 
+### 9. Medir um rollout sob carga (2.3)
+
+A carga roda **dentro** do cluster: o `port-forward` se prende a um pod e cai com ele, então mediria o túnel, não a
+aplicação. Use três terminais:
+
+```bash
+# Terminal 1: 90 s de carga em /health/live (sem throttler, sem banco: uma falha só pode ser de conexão)
+kubectl -n taskflow delete job k6-rollout --ignore-not-found     # o template de um Job é imutável
+kubectl apply -f k8s/load/k6-rollout.yaml
+kubectl -n taskflow wait --for=condition=Ready pod -l app.kubernetes.io/name=k6-rollout --timeout=180s
+kubectl -n taskflow logs -f job/k6-rollout                       # no fim: http_req_failed (meta: 0)
+
+# Terminal 2: a troca, pod a pod
+kubectl -n taskflow get pods -l app.kubernetes.io/name=taskflow-api -w
+
+# Terminal 3, ~15 s depois de a carga começar: uma "versão nova" sem publicar nada (muda só uma anotação)
+kubectl -n taskflow rollout restart deployment/taskflow-api
+kubectl -n taskflow rollout status deployment/taskflow-api
+```
+
+O consumo, para dimensionar os `resources` (rode antes e depois de uma carga sem rollout, e compare):
+
+```bash
+for p in $(kubectl -n taskflow get pods -l app.kubernetes.io/name=taskflow-api -o name); do
+  echo "== $p"
+  kubectl -n taskflow exec $p -- cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak
+  kubectl -n taskflow exec $p -- grep usage_usec /sys/fs/cgroup/cpu.stat   # contador: vale a diferença
+done
+```
+
+### 10. Aplicar a 2.3, na ordem (2.3)
+
+```bash
+kubectl diff -f k8s/base/namespace.yaml -f k8s/base/config.yaml -f k8s/base/postgres.yaml -f k8s/base/api.yaml
+kubectl apply -f k8s/base/namespace.yaml                          # a regra de segurança antes dos pods novos
+kubectl apply -f k8s/base/config.yaml -f k8s/base/postgres.yaml   # Warning: o Postgres viola o "restricted"
+kubectl -n taskflow rollout status statefulset/postgres
+kubectl -n taskflow delete job taskflow-migrate-aa4d4a0           # Job imutável: recriar (as migrações são idempotentes)
+kubectl apply -f k8s/base/migrate-job.yaml
+kubectl -n taskflow wait --for=condition=complete job/taskflow-migrate-aa4d4a0 --timeout=120s
+kubectl apply -f k8s/base/api.yaml
+kubectl -n taskflow rollout status deployment/taskflow-api
+kubectl -n taskflow exec deploy/taskflow-api -- id                # uid=1000
+kubectl -n taskflow exec deploy/taskflow-api -- touch /app/x      # Read-only file system (o erro é o resultado certo)
+```
+
+Depois, repita o passo 9: a meta é `http_req_failed` 0.
+
+### 11. Isolar a drenagem, e o rollback (2.3)
+
+```bash
+# Drenagem desligada só no cluster (drift proposital). O ConfigMap muda, mas os pods NÃO: env é lido no start
+kubectl -n taskflow patch configmap taskflow-api --type merge -p '{"data":{"SHUTDOWN_DRAIN_MS":"0"}}'
+kubectl -n taskflow exec deploy/taskflow-api -- printenv SHUTDOWN_DRAIN_MS        # ainda 5000
+kubectl -n taskflow rollout restart deployment/taskflow-api                       # agora 0; repita o passo 9
+kubectl apply -f k8s/base/config.yaml && kubectl -n taskflow rollout restart deployment/taskflow-api   # volta ao Git
+
+# Uma versão quebrada, com a carga do passo 9 rodando
+kubectl -n taskflow set env deployment/taskflow-api JWT_SECRET=curto              # o schema recusa o boot
+kubectl -n taskflow rollout status deployment/taskflow-api                        # 120 s → exceeded its progress deadline
+kubectl -n taskflow rollout history deployment/taskflow-api
+kubectl -n taskflow rollout undo deployment/taskflow-api
+```
+
 Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Secrets precisam ser criados de novo
 (não estão no Git).
 
@@ -388,13 +568,18 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 
 | # | Problema | Causa | Solução |
 |---:|---|---|---|
-| 1 | Por ~2 s, o pod que ia morrer apareceu como `READY 1/1` | Sem *readiness probe*, "processo rodando" é tratado como "pronto". Com um Service na frente, chegaria tráfego a um pod que nem subiu | Esperado na 2.1 (o manifesto mínimo); as probes entram na 2.3 |
+| 1 | Por ~2 s, o pod que ia morrer apareceu como `READY 1/1` | Sem *readiness probe*, "processo rodando" é tratado como "pronto". Com um Service na frente, chegaria tráfego a um pod que nem subiu | Esperado na 2.1 (o manifesto mínimo). **(2.3)** Medido e resolvido: ver problema 8 |
 | 2 | `kubectl describe pod -l …` não trouxe a seção `Events` | No `kubectl` 1.37, o `describe` com seletor de label veio sem os eventos | `kubectl get events -n <ns> --sort-by=.lastTimestamp`: o histórico do namespace inteiro, em ordem. Eventos **expiram** (1 h por padrão): num incidente, colete cedo |
 | 3 | `kubectl logs --previous` respondeu `unable to retrieve container logs` | Com o pod parado em `Error`/`CrashLoopBackOff`, o container "atual" **já é** a tentativa que morreu, e o anterior a ela o kubelet já descartou | Pod parado: `kubectl logs` **sem** `--previous`. O `--previous` é para o pod que reiniciou e está `Running` |
 | 4 | A mensagem de erro de boot manda conferir o `.env` | Escrita para o desenvolvimento local; num container não existe `.env` | **(2.2)** O texto passou a citar os dois lugares: o `.env` no desenvolvimento, o ConfigMap e o Secret num container |
 | 5 | O erro de boot saiu em **texto**, não em JSON | O logger JSON (pino) só assume depois de o Nest subir; um erro antes disso sai no formato padrão do Nest | Registrado (limitações): a linha mais importante de um `CrashLoopBackOff` chega a um agregador sem estrutura |
 | 6 | **(2.2)** O `curl` digitado na aba do `port-forward` não executou | O `port-forward` prende o terminal enquanto o túnel está aberto; o texto fica na fila e só roda quando o túnel fecha | O túnel numa aba própria, os testes em outra |
 | 7 | **(2.2)** O CodeQL reprovou o PR: *Incomplete string escaping* (High) no `test-images.spec.ts` | A primeira versão do teste montava uma regex com o nome da imagem e escapava **só o ponto**; uma regex tem outros metacaracteres, e o escape parcial é um padrão frágil (a entrada era o nosso compose, mas o CodeQL não tem como saber) | Sem regex montada com texto: tag comparada por **igualdade** e digest por uma regex fixa. As duas mutações (tag e digest errados) continuam reprovando. O portão de *code scanning* da E.2 pegando código nosso |
+| 8 | **(2.3)** Um `rollout restart` derrubou 32 de 16.655 requisições, com ~4 s sem nenhum pod respondendo, e o rollout disse `successfully rolled out` | Sem readiness, o pod novo virou Ready no segundo em que o container iniciou, e o Deployment apagou os dois velhos em ~1,5 s; os velhos também fecharam a porta na hora (drenagem 0) | Readiness, startup e liveness; `maxSurge 1`/`maxUnavailable 0`; drenagem de 5 s. Medido de novo: **0** de 17.610 |
+| 9 | **(2.3)** Com readiness e sem drenagem, ainda 11 falhas | O SIGTERM e a saída do Service acontecem em paralelo; o kube-proxy aplica a remoção um instante depois | `SHUTDOWN_DRAIN_MS=5000` no ConfigMap. A peça isolada com um experimento: drenagem 0 → 11 falhas, 5000 → 0 |
+| 10 | **(2.3)** Mudar o ConfigMap não mudou os pods (`printenv` ainda mostrava o valor antigo) | O `envFrom` é lido **uma vez**, quando o container inicia | `kubectl rollout restart` depois de mudar o ConfigMap. Automatizar (hash do conteúdo no nome do ConfigMap, com o `configMapGenerator` do Kustomize) é a 2.6 |
+| 11 | **(2.3)** O `rollout undo` avisou que a `last-applied-configuration` não acompanha | O `undo` muda o objeto direto, sem passar pelo `apply`; o próximo `apply` calcula o diff a partir de uma anotação que não reflete o cluster | Rollback imperativo é para emergência. O estado se resolve no Git; em GitOps (2.6), o rollback é um `git revert` |
+| 12 | **(2.3)** `rollout history` com `CHANGE-CAUSE` vazio em todas as revisions | O campo vem da anotação `kubernetes.io/change-cause`, que ninguém preencheu | Aceito: o "porquê" de cada versão fica no Git (commit e digest). O pipeline da 2.6 pode preencher a anotação |
 
 ---
 
@@ -427,6 +612,21 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 | `postgres-0` apagado | Voltou com o mesmo nome em 8 s, sem *initdb*, no mesmo PVC (10 min × 8 s); o cadastro continuava lá; a API reconectou sozinha (`database: up`), sem reiniciar |
 | `test-images.spec.ts` | Confere também o Postgres do manifesto (tag do compose + digest). **Mutação:** `postgres:18.6` no manifesto → o teste falha dizendo a versão esperada |
 
+
+**2.3 — troca de versão sem perder requisição**
+
+| Experimento | Resultado |
+|---|---|
+| Linha de base: `rollout restart` sob ~185 req/s, sem probes nem drenagem | **32 falhas** em 16.655 (22 `connection refused` em ~1 s, depois 10 `request timeout`); ~4 s sem nenhuma requisição concluída; os 2 pods velhos apagados em ~1,5 s; `successfully rolled out` |
+| Grupo de controle: carga sem rollout | 0 falhas em 17.590: as falhas vinham do rollout, não da carga |
+| Consumo (cgroup) | Pico de 183 MiB no boot; ~110 MiB sob carga; ~0,04 núcleo por pod (diferença de `usage_usec` em ~95 s); Postgres 26 MiB (pico 34 MiB) |
+| `apply` da 2.3 | `Warning` do Pod Security só no Postgres (4 regras do `restricted`); Job de migração com disco somente leitura: `No pending migrations to apply`; API `uid=1000`, `touch` recusado (`Read-only file system`) |
+| 2.3 completa: `rollout restart` sob carga | **0 falhas** em 17.610; pod novo `0/1` por ~2 s antes de `1/1`; só então um velho em `Terminating`; o velho termina `Completed` (exit 0) 5 s depois: a drenagem |
+| Só a drenagem desligada (`SHUTDOWN_DRAIN_MS=0`) | **11 falhas** em 17.339, em duas rajadas (uma por pod velho, ~3 s de intervalo); `Terminating` → `Completed` em ~1 s |
+| Versão quebrada (`JWT_SECRET` curto) sob carga | Pod novo em `CrashLoopBackOff` (esperas 10/20/40/80 s); os 2 velhos `1/1` o tempo todo; **0 falhas** em 17.650; `exceeded its progress deadline` aos 120 s |
+| `rollout undo` | O ReplicaSet anterior reativado: os mesmos 2 pods (4 min de idade, 0 reinícios), o quebrado removido |
+| `k8s-api-manifest.spec.ts` | 5 testes. **Mutações:** grace 15 s (abaixo do watchdog de 20 s), liveness em `/health/ready` e `LOG_PRETTY=true` no ConfigMap, todas reprovando |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -436,18 +636,27 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 | A imagem publicada no GHCR, sem ninguém para rodá-la | **(2.1)** Um cluster local reproduzível (arquivo versionado, versão fixada) rodando a imagem por digest | O fim do pipeline precisa de um orquestrador: réplicas, troca de versão, tráfego só para o que está pronto |
 | A API em `CrashLoopBackOff`, sem configuração nem banco | **(2.2)** Postgres num StatefulSet com volume, ConfigMap no Git e Secrets fora dele, migração como Job, e a API atrás de um Service | O deploy completo de um serviço com estado: a ordem banco → migração → API, e cada tipo de objeto no seu papel |
 | A versão do Postgres em três lugares (compose, testes, smoke) | **(2.2)** Quatro, com o manifesto, e o `test-images.spec.ts` vigiando os quatro | O Dependabot não lê manifestos do Kubernetes: sem o teste, o cluster ficaria numa versão e o resto em outra |
+| Pod "pronto" = container iniciado; rollout derrubando 32 de 16.655 requisições | **(2.3)** Três probes, `maxUnavailable: 0`, drenagem de 5 s: 0 falhas, medido; versão quebrada sem derrubar nada | O `/health/ready` e o graceful shutdown do Módulo 01 ganharam quem os consuma, e cada peça foi provada isolada |
+| Sem `resources` nem `securityContext` | **(2.3)** Recursos a partir do cgroup medido; não-root, disco somente leitura, sem capabilities; Pod Security no namespace | O scheduler só decide bem com requests reais; o perfil `restricted` é verificado pelo API server, não pela boa vontade |
 | Módulo planejado "para um ambiente Linux dedicado" | Feito no Linux de desenvolvimento, com kind | O kind roda o Kubernetes oficial em containers: não precisa de máquina dedicada |
 
 ---
 
 ## 🚧 Limitações e próximos passos
 
-- **Sem probes, recursos nem `securityContext`:** o pod é considerado pronto assim que o processo inicia, sem limite
-  de CPU/memória, e sem exigir o não-root que a imagem já oferece (2.3).
 - **Secrets criados à mão:** num cluster novo, alguém precisa rodar o `kubectl create secret` (e guardar os valores
   fora). O caminho de produção é o External Secrets Operator lendo de um cofre, ou Sealed Secrets/SOPS no Git.
 - **Postgres sem backup, sem réplica e como root:** um pod, um disco local, `RECLAIM POLICY: Delete`, e a imagem
   oficial rodando com o usuário padrão. Em produção, um banco gerenciado (ou um operador como o CloudNativePG).
+  Por isso o namespace fica em `enforce: baseline`, com o `restricted` só avisando: endurecer o Postgres (uid 999,
+  `fsGroup` no volume) libera o `enforce: restricted`.
+- **Mudar o ConfigMap exige `rollout restart`:** os pods leem o ambiente só no start (2.6: hash no nome).
+- **Recursos medidos com o caminho mais barato:** o `/health/live` não toca o banco nem o bcrypt. O dimensionamento
+  real vem das métricas de produção (ou de um VPA em modo recomendação), não de um teste local.
+- **Readiness depende do banco:** com o Postgres fora, todas as réplicas saem do Service ao mesmo tempo, e o cliente
+  recebe `connection refused` em vez de um 503 com mensagem (decisão consciente; ver "Três probes").
+- **Sem PodDisruptionBudget nem espalhamento garantido:** o scheduler distribuiu as réplicas pelos dois workers, mas
+  nada o obriga (`topologySpreadConstraints`), e um `kubectl drain` de nó pode tirar as duas de uma vez (2.5).
 - **A ordem banco → migração → API é manual** (`kubectl wait`); automatizá-la é a 2.6.
 - **Telemetria desligada no cluster** (`OTEL_SDK_DISABLED`): ainda não há coletor lá dentro.
 - **Acesso só por `port-forward`:** um túnel de depuração, que fixa um pod e não balanceia; o acesso de verdade é o
@@ -471,7 +680,12 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 - [x] ConfigMap no Git e Secrets fora dele; a `DATABASE_URL` montada a partir do Secret (2.2)
 - [x] Migração como Job, com nome por commit e a ordem garantida por `kubectl wait` (2.2)
 - [x] A API respondendo por um Service, com o primeiro rolling update (2.2)
-- [ ] Probes, recursos, `securityContext` e rolling update sem erro (2.3)
+- [x] Linha de base medida com carga dentro do cluster: 32 falhas num rollout sem probes (2.3)
+- [x] Startup, liveness e readiness, cada uma na rota certa, travadas por teste (2.3)
+- [x] Rolling update sem erro (0 falhas, medido) e a drenagem provada isolada (11 → 0) (2.3)
+- [x] Recursos a partir do consumo medido no cgroup; sem limit de CPU, por decisão (2.3)
+- [x] Não-root, disco somente leitura, sem capabilities, seccomp; Pod Security no namespace (2.3)
+- [x] Versão quebrada sem derrubar nada, `progressDeadlineSeconds` e `rollout undo` (2.3)
 - [ ] Workers no cluster (2.4)
 - [ ] Ingress, HPA e NetworkPolicy (2.5)
 - [ ] Ambientes com Kustomize e GitOps (2.6)
@@ -500,6 +714,26 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
   histórico de qual migração rodou com qual versão.
 - **"O que acontece com os dados se o pod do banco morrer? E se apagarem o PVC?"** O pod volta e monta o mesmo disco;
   apagar o PVC (com `Delete`) apaga o disco. Por isso `Retain` e backup.
+
+### Perguntas de entrevista (2.3)
+
+- **"Como você garante deploy sem downtime no Kubernetes?"** Três peças, cada uma para um lado: readiness (o pod novo
+  só recebe tráfego quando responde), `maxUnavailable: 0` com `maxSurge` (nunca abaixo da capacidade) e drenagem no
+  encerramento (o velho continua atendendo enquanto a remoção se propaga). E medir: aqui, 32 falhas → 0.
+- **"Se tem readiness, para que drenagem?"** No encerramento, o SIGTERM e a saída do Service acontecem em paralelo, e
+  cada kube-proxy aplica a remoção um pouco depois. Medido: sem drenagem, 11 falhas; com, 0.
+- **"Liveness × readiness × startup?"** Liveness reinicia (processo travado); readiness tira do tráfego (não pode
+  atender agora); startup protege o boot. Liveness nunca olha dependência, senão um banco fora vira *restart storm*.
+- **"Por que você não põe limit de CPU?"** CPU é comprimível; o limit causa *throttling* por janela de 100 ms mesmo
+  com o nó ocioso, e isso vira p99 alto. Memória não é comprimível, então tem limit (OOMKill previsível).
+- **"Como você escolheu requests e limits?"** Medindo: `memory.peak` e `cpu.stat` do cgroup sob carga. O request
+  cobre o pico do boot; o limit tem folga para as rotas caras. Em produção, a partir das métricas (ou do VPA).
+- **"O deploy subiu uma versão quebrada. O que acontece?"** Com `maxUnavailable: 0`, nada sai do ar: o pod novo nunca
+  fica pronto, os velhos continuam, o `progressDeadlineSeconds` marca o rollout como falho e o pipeline avisa. O
+  rollback (`rollout undo`, ou `git revert` em GitOps) reativa o ReplicaSet anterior.
+- **"Que `securityContext` você usa?"** Não-root conferível (uid numérico), disco somente leitura, sem capabilities,
+  sem escalada de privilégio, seccomp `RuntimeDefault` e sem token da ServiceAccount; com o Pod Security Admission
+  no namespace para o API server recusar o que fugir disso.
 
 ---
 

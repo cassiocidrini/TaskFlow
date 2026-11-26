@@ -27,8 +27,9 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
    README e `docs/modules/`): Strategy com `new` e `DeadlinePriorityStrategy` sem uso; dual-write nas projeções
    (`EventBus` em memória; a outbox do Módulo 13.2 cobre só o Kafka); relay sem DLQ por decisão (mensagem
    ruim trava a fila; runbook no Módulo 13); redrive manual e por grupo inteiro;
-   throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; probes `/health` sem consumidor
-   (o manifesto Kubernetes ainda sem probes; o `HEALTHCHECK` da imagem só chama o *live*); a API no cluster local sem probes nem deploy automatizado, e os Secrets criados à mão (Módulo 02 em construção). Ao corrigir uma, tire-a daqui no MESMO PR.
+   throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; a API no cluster local sem
+   deploy automatizado (digest trocado à mão), os Secrets criados à mão e o Postgres do cluster como root, com o
+   namespace em `enforce: baseline` (Módulo 02 em construção). Ao corrigir uma, tire-a daqui no MESMO PR.
 
 ## Swagger — como está montado
 

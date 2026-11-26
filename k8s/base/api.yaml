@@ -2,7 +2,10 @@
 #
 # 2.1: sem configuração nem banco, o processo recusava subir (CrashLoopBackOff, diagnosticado com o kubectl).
 # 2.2: a configuração (ConfigMap `taskflow-api` + Secrets `taskflow-db` e `taskflow-api`), o Postgres no cluster e o
-# Service. Ainda de fora, e são a 2.3: probes, recursos, securityContext e a estratégia de rolling update.
+# Service.
+# 2.3: troca de versão sem derrubar requisição (probes, estratégia, encerramento), recursos medidos e
+# securityContext. Medido com k8s/load/k6-rollout.yaml: sem isto, um `rollout restart` derrubou 32 de 16.655
+# requisições e deixou o Service ~4 s sem nenhum pod respondendo, com o rollout dizendo "successfully rolled out".
 #
 # Deployment, e não Pod direto: um Pod sozinho não é recriado se morrer nem se o nó cair. O Deployment declara
 # "quero N réplicas desta versão"; ele cria um ReplicaSet (que mantém as N cópias vivas) e, numa troca de versão,
@@ -22,6 +25,17 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: taskflow-api
+  # Rolling update que nunca fica abaixo de 2 pods PRONTOS: sobe 1 novo (surge), espera ele passar na readiness, só
+  # então derruba 1 velho. O "pronto" vem da readinessProbe; sem ela, pronto = container iniciado, e foi assim que a
+  # linha de base matou os dois pods velhos com os novos ainda no boot
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  # Um rollout que não avança em 2 min é marcado como FALHO (`ProgressDeadlineExceeded`): o `rollout status` sai com
+  # erro, e o CI/operador sabe que precisa agir (ou fazer `rollout undo`). Os pods velhos continuam atendendo
+  progressDeadlineSeconds: 120
   # O molde de cada pod
   template:
     metadata:
@@ -29,6 +43,24 @@ spec:
         app.kubernetes.io/name: taskflow-api
         app.kubernetes.io/part-of: taskflow
     spec:
+      # A API não fala com a API do Kubernetes: sem o token da ServiceAccount montado no pod, uma invasão da app não
+      # ganha credencial do cluster de brinde
+      automountServiceAccountToken: false
+      # Orçamento do encerramento, em camadas (o test/unit/k8s-api-manifest.spec.ts confere a ordem):
+      #   5 s   drenagem: readiness 503 e a app ainda atendendo (SHUTDOWN_DRAIN_MS, no ConfigMap)
+      #   20 s  watchdog: a app se derruba sozinha, com log, se algum hook travar (SHUTDOWN_TIMEOUT_MS)
+      #   30 s  SIGKILL do kubelet: o último recurso, que não deveria acontecer nunca
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # O kubelet recusa iniciar o container se a imagem rodar como root. A imagem já declara `USER 1000:1000`
+        # (numérico de propósito, Módulo 03 E.1), e aqui a regra vira garantia do cluster, não só da imagem
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # Filtro de syscalls padrão do runtime: bloqueia as que um servidor Node nunca usa (montar disco, carregar
+        # módulo de kernel...)
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: api
           # Por DIGEST, nunca por tag (Módulo 03, E.3): é exatamente a imagem que o smoke e o Trivy testaram, com
@@ -56,6 +88,63 @@ spec:
                 secretKeyRef:
                   name: taskflow-api
                   key: jwt-secret
+          # Três perguntas diferentes, três probes (o porquê de cada rota está no health.controller.ts):
+          #
+          # startup: "já terminou de subir?". Enquanto não passa, as outras duas nem rodam: um boot lento (Prisma,
+          # Nest, disco frio) não é confundido com um processo travado. Até 30 × 2 s = 60 s para subir
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          # liveness: "o processo travou?". Falhou 3 vezes seguidas = o kubelet REINICIA o container. Não consulta o
+          # banco de propósito: com o Postgres fora, todas as réplicas seriam reiniciadas juntas sem resolver nada
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # readiness: "posso receber tráfego?". Falhou = sai do Service (do EndpointSlice), mas continua vivo. É
+          # ela que segura o rolling update até o pod novo de fato responder, e que responde 503 na drenagem
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          # Medido na 2.3 (cgroup do container, ~97 req/s por pod): pico de 183 MiB no boot, 110 MiB sob carga,
+          # ~0,04 núcleo. O request é o que o scheduler RESERVA no nó (decide onde o pod cabe); o limit é o teto.
+          resources:
+            requests:
+              # Folga sobre os 0,04 medidos: o alvo da carga (/health/live) é o caminho mais barato da API, e rotas
+              # com bcrypt ou banco custam bem mais
+              cpu: 100m
+              # Cobre o pico do boot (183 MiB): reservar menos deixaria o scheduler pôr no nó mais do que ele aguenta
+              memory: 192Mi
+            limits:
+              # Memória não é comprimível: passou do limit, o kernel mata o processo (OOMKilled) e o kubelet reinicia
+              # o container. Melhor isso, previsível e com motivo no `describe`, do que um vazamento esgotar o nó e
+              # derrubar os vizinhos. 2× o pico medido. O Node 20+ lê o limit do cgroup e dimensiona o heap por ele
+              memory: 384Mi
+              # SEM limit de CPU, por decisão: CPU é comprimível (falta dela = lentidão, não morte), e o limit
+              # aplica throttling por janela de 100 ms mesmo com o nó ocioso, o que vira latência de cauda (p99)
+              # sem motivo aparente. O request já garante a parte justa de cada pod quando há disputa. A decisão e
+              # quando revisitá-la: docs/adr/0013-recursos-medidos-sem-limit-de-cpu.md
+          securityContext:
+            # Um processo não ganha mais privilégio do que o pai (bloqueia setuid, sudo e afins)
+            allowPrivilegeEscalation: false
+            # Nenhuma capability do Linux: a porta 3000 não é privilegiada, e a app não mexe em rede nem em arquivos
+            # de outros usuários
+            capabilities:
+              drop: ['ALL']
+            # Disco da imagem somente leitura: quem invadir não consegue gravar binário nem alterar o código. A app
+            # não grava em disco (logs no stdout, estado no Postgres); se um dia precisar, um `emptyDir` montado só
+            # no diretório necessário
+            readOnlyRootFilesystem: true
 ---
 # O endereço ESTÁVEL da API dentro do cluster: o IP de um pod muda a cada recriação (visto na 2.1), o do Service não.
 # ClusterIP: um IP virtual, alcançável só de dentro do cluster, que o kube-proxy de cada nó distribui entre os pods

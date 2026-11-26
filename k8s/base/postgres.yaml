@@ -78,6 +78,18 @@ spec:
               command: ['pg_isready', '-U', 'taskflow', '-d', 'taskflow']
             periodSeconds: 5
             timeoutSeconds: 3
+          # Medido na 2.3: 26 MiB (pico 34 MiB), com o banco quase vazio. O Postgres cresce até o shared_buffers
+          # (128 MB por padrão) mais o work_mem de cada consulta, e o request reserva esse patamar. Para um banco, um
+          # OOMKill derruba TODAS as conexões de uma vez, então o limit fica com folga larga
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          # Sem securityContext ainda: a imagem oficial começa como root (prepara o diretório de dados e troca para
+          # o usuário `postgres`). Por isso o namespace avisa (`warn: restricted`) neste pod. Endurecer exige
+          # runAsUser 999 e permissão no volume (fsGroup), e fica registrado como limitação no Módulo 02
   # Um PersistentVolumeClaim POR réplica (data-postgres-0), criado pelo StatefulSet. O StorageClass padrão do kind
   # (`standard`, local-path) cria o volume quando o pod é agendado, numa pasta do nó. Apagar o pod NÃO apaga o PVC:
   # o substituto monta o mesmo disco

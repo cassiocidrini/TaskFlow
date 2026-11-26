@@ -21,3 +21,10 @@ data:
   LOG_LEVEL: info
   # Ainda não há coletor (Jaeger) dentro do cluster: com o SDK ligado, o exporter tentaria localhost:4318 a cada lote
   OTEL_SDK_DISABLED: 'true'
+  # Graceful shutdown (2.3). No SIGTERM, o kubelet manda o sinal e o EndpointSlice tira o pod do Service AO MESMO
+  # TEMPO, e o kube-proxy de cada nó leva um instante para aplicar a remoção. Por 5 s a réplica continua atendendo
+  # (readiness 503, `Connection: close`), e só então fecha o HTTP. Sem isso (padrão 0), o pod fecha a porta enquanto
+  # ainda recebe tráfego. Alternativa para apps sem drenagem própria: `lifecycle.preStop.sleep` no manifesto
+  SHUTDOWN_DRAIN_MS: '5000'
+  # Watchdog: se um hook travar, a app sai sozinha, com log, antes do SIGKILL dos 30 s (terminationGracePeriodSeconds)
+  SHUTDOWN_TIMEOUT_MS: '20000'
