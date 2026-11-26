@@ -82,7 +82,7 @@ Controller ─▶ CommandBus ─▶ Handler (1 linha) ─▶ TaskCommandRunner.r
 | Caminho | Responsabilidade | Regra |
 |---|---|---|
 | `config/env.schema.ts` | Schema `zod` de TODAS as variáveis de ambiente | Variável nova entra aqui; ler via `ConfigService<Env, true>` |
-| `app.setup.ts` | Helmet, CORS, `ValidationPipe`, Swagger | Usado pelo `main.ts` **e** pelo E2E — não duplicar config HTTP |
+| `app.setup.ts` | Helmet, CORS, `ValidationPipe`, Swagger, `trust proxy` (`TRUST_PROXY_HOPS`) | Usado pelo `main.ts` **e** pelo E2E — não duplicar config HTTP. `trust proxy` sempre por **número** de saltos (nunca `true`: o cliente forjaria o IP e escaparia do rate limit), 0 por padrão; ligar só onde a rede garante que só o proxy chega à API |
 | `events/event-store.service.ts` | `append`/`appendMany` com `expectedVersion`, `{ actorId }` e `{ toOutbox }`, `loadEvents` | Único ponto de escrita no Event Store; monta o envelope `metadata` (`eventId`, `actorId`, `correlationId`, `schemaVersion`); grava `events` + `outbox` numa transação, com o contexto W3C ativo em `outbox.trace_context`; pega o lock de escrita do agregado (`aggregate-lock.ts`) na mesma transação |
 | `events/outbox.ts` | `OutboxMapper`, `OutboxMessage`, `RecordedEvent` | Store genérico: quem traduz evento de domínio em contrato público é o módulo dono do agregado |
 | `events/event-metadata.ts` | Tipo do envelope + `toEventMetadata` (zod, leitura) | Evento legado tem `metadata = {}`: campos opcionais na leitura, nunca inventados |
