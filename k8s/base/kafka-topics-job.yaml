@@ -1,0 +1,71 @@
+# Os tópicos do TaskFlow (Módulo 02, etapa 2.4): o `kafka-init` do docker-compose.yml, como Job.
+#
+# Tópico é CONTRATO (Módulo 13): nome com versão (.v1), partições (a unidade de paralelismo e de ordem) e retenção.
+# A lista aqui e a do compose são conferidas pelo test/unit/k8s-workers-manifest.spec.ts: se só uma mudar, o cluster
+# e o desenvolvimento passam a ter contratos diferentes.
+#
+# Idempotente (`--if-not-exists`): rodar de novo não muda nada. Como todo Job, o template é imutável: para rodar de
+# novo (um tópico novo), `kubectl delete job kafka-topics` e `apply`. A ordem (Kafka pronto → tópicos → workers) é
+# garantida à mão com `kubectl wait`; automatizá-la é a 2.6.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topics
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: kafka-topics
+    app.kubernetes.io/part-of: taskflow
+spec:
+  # Cobre o broker que já abriu a porta (pronto para o Kubernetes) mas ainda está terminando o boot
+  backoffLimit: 4
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka-topics
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kafka-topics
+          # A imagem do broker, que traz as ferramentas de linha de comando (kafka-topics.sh)
+          image: apache/kafka:4.4.0@sha256:833b867a9585a141da455dc2b57431c65cbccb27f11c91f694444cca9f777e0f
+          command: ['/bin/bash', '-c']
+          args:
+            - |
+              set -e
+              BOOTSTRAP=kafka:9092
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server $BOOTSTRAP --create --if-not-exists \
+                --topic taskflow.task-events.v1 --partitions 3 --replication-factor 1 \
+                --config retention.ms=604800000 --config cleanup.policy=delete
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server $BOOTSTRAP --create --if-not-exists \
+                --topic taskflow.notifications-dlt.v1 --partitions 3 --replication-factor 1 \
+                --config retention.ms=2592000000 --config cleanup.policy=delete
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server $BOOTSTRAP --create --if-not-exists \
+                --topic taskflow.reports-dlt.v1 --partitions 3 --replication-factor 1 \
+                --config retention.ms=2592000000 --config cleanup.policy=delete
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server $BOOTSTRAP --create --if-not-exists \
+                --topic taskflow.smoke --partitions 1 --replication-factor 1 --config retention.ms=3600000
+              /opt/kafka/bin/kafka-topics.sh --bootstrap-server $BOOTSTRAP --describe --topic taskflow.task-events.v1
+          env:
+            # A CLI sobe uma JVM: heap pequeno, para caber no limit abaixo
+            - name: KAFKA_HEAP_OPTS
+              value: -Xmx128m
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+            # A CLI não grava no disco da imagem (testado com `docker run --read-only`)
+            readOnlyRootFilesystem: true

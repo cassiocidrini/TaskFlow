@@ -29,7 +29,8 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
    ruim trava a fila; runbook no Módulo 13); redrive manual e por grupo inteiro;
    throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; a API no cluster local sem
    deploy automatizado (digest trocado à mão), os Secrets criados à mão e o Postgres do cluster como root, com o
-   namespace em `enforce: baseline` (Módulo 02 em construção). Ao corrigir uma, tire-a daqui no MESMO PR.
+   namespace em `enforce: baseline`; no cluster, Kafka de um nó, push desligado (sem SQS) e workers sem probes nem
+   observabilidade (backlog e lag invisíveis lá dentro, ADR-0014) (Módulo 02 em construção). Ao corrigir uma, tire-a daqui no MESMO PR.
 
 ## Swagger — como está montado
 

@@ -1,0 +1,167 @@
+# Kafka do TaskFlow no cluster (Módulo 02, etapa 2.4): um StatefulSet de 1 nó em modo KRaft (broker E controller,
+# sem ZooKeeper), com volume persistente, e um Service headless. É o `kafka` do docker-compose.yml, no Kubernetes.
+#
+# StatefulSet pelo mesmo motivo do Postgres (2.2): o broker tem identidade (`kafka-0`, o endereço que ele anuncia) e
+# dados (o log das partições, que sobrevive ao pod: o replay do Módulo 13.6 depende disso).
+#
+# Kafka de verdade em Kubernetes costuma vir de um OPERADOR (Strimzi): CRDs como `Kafka` e `KafkaTopic`, e um
+# controller que cuida de réplicas, upgrade sem parada, certificados e tópicos. Aqui o StatefulSet é escrito à mão
+# para ver o que o operador automatiza. Em produção: 3 brokers, RF 3, min.insync.replicas 2, ou um serviço gerenciado
+# (MSK, Confluent Cloud).
+---
+# Headless: o DNS `kafka` resolve direto para o IP do pod, e `kafka-0.kafka` é o nome estável do broker. Os clientes
+# usam `kafka:9092` só para o PRIMEIRO contato (bootstrap); depois conectam no endereço que o broker anuncia
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: taskflow
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: kafka
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: kafka
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: taskflow
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      automountServiceAccountToken: false
+      # O kubelet manda SIGTERM e espera: o broker fecha os segmentos de log de forma limpa e o próximo boot não
+      # precisa recuperá-los. 30 s é o padrão do Kubernetes; um broker com muitas partições precisaria de mais
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # A imagem declara `USER appuser` (nome): o kubelet só confere o runAsNonRoot com o uid numérico, que é 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # O volume fica com o grupo 1000: o broker grava no disco sem depender da permissão que o provisionador deu
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kafka
+          # A MESMA versão do compose (o test-images.spec.ts confere), por tag e digest
+          image: apache/kafka:4.4.0@sha256:833b867a9585a141da455dc2b57431c65cbccb27f11c91f694444cca9f777e0f
+          ports:
+            - name: kafka
+              containerPort: 9092
+            - name: controller
+              containerPort: 9093
+          env:
+            # Downward API: o Kubernetes injeta o nome do próprio pod (`kafka-0`) numa variável
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: KAFKA_NODE_ID
+              value: '1'
+            - name: KAFKA_PROCESS_ROLES
+              value: broker,controller
+            # O controller é este mesmo processo: localhost. Pelo DNS do pod não daria: o registro DNS de um pod só
+            # existe depois de ele ficar pronto, e o broker não fica pronto sem achar o controller
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: 1@localhost:9093
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_LISTENERS
+              value: PLAINTEXT://:9092,CONTROLLER://:9093
+            # O endereço que o broker DEVOLVE ao cliente, e que o cliente usa daí em diante. Precisa ser alcançável
+            # de qualquer pod: o DNS estável do StatefulSet. O equivalente do "dois listeners" do compose
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: PLAINTEXT://$(POD_NAME).kafka.taskflow.svc.cluster.local:9092
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+            # Tópico é contrato: criado pelo Job `kafka-topics`, nunca por um produtor que digitou o nome errado
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: 'false'
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: '1'
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: '1'
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: '1'
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: '0'
+            # Heap fixo: o resto do limit de memória fica para o metaspace, as threads e os buffers fora do heap
+            - name: KAFKA_HEAP_OPTS
+              value: -Xms384m -Xmx384m
+            - name: KAFKA_LOG_DIRS
+              value: /var/lib/kafka/data/logs
+            # O id do cluster KRaft é gravado no volume na formatação; um id diferente num volume já formatado
+            # impede o boot. Fixo aqui, e não gerado a cada pod. Não é segredo: é um identificador
+            - name: CLUSTER_ID
+              value: js1Xg0POS-urvhl1kD5xmw
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/kafka/data
+            # Disco da imagem somente leitura. O entrypoint gera a configuração final (server.properties) em
+            # /opt/kafka/config a partir das variáveis acima, o broker grava log em /opt/kafka/logs, e a JVM usa
+            # /tmp: só esses três diretórios são graváveis, e vazios a cada pod
+            - name: config
+              mountPath: /opt/kafka/config
+            - name: logs
+              mountPath: /opt/kafka/logs
+            - name: tmp
+              mountPath: /tmp
+          # Pronto = a porta do broker aceita conexão. Não o `kafka-broker-api-versions.sh` do compose: cada execução
+          # sobe uma JVM DENTRO do container, que conta no limit de memória a cada 10 s. Um broker que abre a porta
+          # e ainda não atende é coberto pelas novas tentativas do Job de tópicos e dos clientes
+          readinessProbe:
+            tcpSocket:
+              port: kafka
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              # Medido na 2.4: 332 MiB ocioso, pico de 494 MiB depois de 81 eventos e dos grupos rebalanceando. O heap
+              # (384 MiB) vai sendo ocupado com o uso; o limit cobre ele inteiro mais o que fica fora (metaspace,
+              # threads, buffers) e uma JVM de diagnóstico (`kafka-consumer-groups.sh`) rodando no mesmo container
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: config
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: kafka
+          app.kubernetes.io/part-of: taskflow
+      spec:
+        accessModes: ['ReadWriteOnce']
+        resources:
+          requests:
+            storage: 2Gi
