@@ -12,8 +12,8 @@
  * (sem Docker): o PR desalinhado falha no primeiro minuto do CI e diz o que alinhar.
  *
  * Desde o Módulo 02 (2.2), o Postgres tem uma QUARTA fonte: o StatefulSet do cluster (`k8s/base/postgres.yaml`), por
- * tag e digest. O Dependabot não lê manifestos do Kubernetes, então só este teste impede o cluster de ficar numa
- * versão e o resto do projeto em outra.
+ * tag e digest; desde a 2.4, o Kafka também (o StatefulSet e o Job de tópicos). O Dependabot não lê manifestos do
+ * Kubernetes, então só este teste impede o cluster de ficar numa versão e o resto do projeto em outra.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -39,12 +39,16 @@ describe('imagens dos testes = imagens do compose', () => {
     expect(composeImage(service)).toBe(testImage);
   });
 
-  it('o Postgres do cluster (k8s/base/postgres.yaml) é o do compose, fixado por digest', () => {
-    const manifest = readFileSync(join(ROOT, 'k8s/base/postgres.yaml'), 'utf8');
+  it.each([
+    ['postgres', 'k8s/base/postgres.yaml'],
+    ['kafka', 'k8s/base/kafka.yaml'],
+    ['kafka', 'k8s/base/kafka-topics-job.yaml'],
+  ])('o %s do cluster (%s) é o do compose, fixado por digest', (service, file) => {
+    const manifest = readFileSync(join(ROOT, file), 'utf8');
     const [tag, digest] = (manifest.match(/^\s+image:\s*(\S+)/m)?.[1] ?? '').split('@');
     // Tag por IGUALDADE de texto, e o digest por uma regex fixa: montar a regex com o nome da imagem exigiria escapar
     // todos os metacaracteres (o CodeQL apontou o escape só do ponto como incompleto, js/incomplete-sanitization)
-    expect(tag).toBe(composeImage('postgres'));
+    expect(tag).toBe(composeImage(service));
     expect(digest).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 

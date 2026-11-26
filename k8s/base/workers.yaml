@@ -1,0 +1,209 @@
+# Os workers do TaskFlow no cluster (Módulo 02, etapa 2.4): o relay da outbox e os dois consumers do Kafka.
+#
+#   API ──grava──► outbox (Postgres) ◄──lê── relay ──publica──► Kafka ──► notifications (consumer group)
+#                                                                     └──► reports       (consumer group)
+#
+# A MESMA imagem da API, com outro `command` (`node dist/relay`...): o desenho da imagem única (Módulo 03, E.1). Um
+# Deployment por processo, porque cada um escala, cai e é atualizado sozinho. A API continua sem nenhuma variável
+# KAFKA_*: ela só grava na outbox, e é isso que a deixa aceitar escrita com o Kafka fora do ar.
+#
+# SEM probes, por decisão (ADR-0014): um worker não recebe tráfego (readiness não tem o que decidir); o processo que
+# morre já é reiniciado pelo kubelet; um consumer travado sai do grupo quando a sessão do Kafka expira; e o travamento
+# que importa (lote preso, conexão pendurada) aparece no RESULTADO (backlog da outbox, lag do consumer), não numa
+# rota que só prova que o event loop responde.
+#
+# Os três Deployments repetem o mesmo bloco de segurança e configuração. Tirar a repetição (Kustomize) é a 2.6.
+---
+# Configuração não sensível dos três processos. Os schemas do relay e dos consumers (src/config) a validam no boot, e o
+# test/unit/k8s-workers-manifest.spec.ts a valida no CI
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: taskflow-workers
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-workers
+    app.kubernetes.io/part-of: taskflow
+data:
+  NODE_ENV: production
+  LOG_LEVEL: info
+  OTEL_SDK_DISABLED: 'true'
+  # Só o bootstrap: o broker devolve o próprio endereço (kafka-0.kafka...) e o cliente segue por ele
+  KAFKA_BROKERS: kafka:9092
+  # Abaixo dos 30 s do terminationGracePeriodSeconds: o processo termina a mensagem (ou o lote) e sai sozinho, com
+  # log, antes do SIGKILL
+  SHUTDOWN_TIMEOUT_MS: '20000'
+---
+# O relay da outbox (Módulo 13.3). Duas réplicas SEM duplicar publicação: cada lote roda sob um advisory lock de
+# transação no Postgres (`pg_try_advisory_xact_lock`), e só uma réplica por vez publica. A outra é a reserva quente
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-relay
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-relay
+    app.kubernetes.io/part-of: taskflow
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: taskflow-relay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: taskflow-relay
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          # A imagem da API (commit aa4d4a0), por digest
+          image: ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e083495cc2f09778ba0b111b2c7fd2ec24da241abaaf2c387d91398397
+          command: ['node', 'dist/relay']
+          envFrom:
+            - configMapRef:
+                name: taskflow-workers
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: taskflow-db
+                  key: password
+            - name: DATABASE_URL
+              value: postgresql://taskflow:$(POSTGRES_PASSWORD)@postgres:5432/taskflow
+          # Medido na 2.4 (cgroup, com eventos fluindo): pico de 115-124 MiB nos três workers, contra 183 MiB da API,
+          # que tem servidor HTTP. O request cobre o pico; o limit é 2× ele. Sem limit de CPU (ADR-0013)
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+            readOnlyRootFilesystem: true
+---
+# Consumer group `notifications` (Módulo 13.4): grava a notificação do dono da tarefa. Sem `PUSH_QUEUE_URL`, não
+# enfileira o push no SQS (`DisabledPushQueue`): não há SQS no cluster. Duas réplicas para 3 partições: o grupo divide
+# as partições entre elas (2 + 1)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-notifications
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-notifications
+    app.kubernetes.io/part-of: taskflow
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: taskflow-notifications
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: taskflow-notifications
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      automountServiceAccountToken: false
+      # No SIGTERM, o consumer termina a mensagem em andamento, commita e avisa o grupo que está saindo (LeaveGroup):
+      # o rebalance é imediato, sem esperar os 30 s de sessão
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: notifications
+          image: ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e083495cc2f09778ba0b111b2c7fd2ec24da241abaaf2c387d91398397
+          command: ['node', 'dist/notifications-consumer']
+          envFrom:
+            - configMapRef:
+                name: taskflow-workers
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: taskflow-db
+                  key: password
+            - name: DATABASE_URL
+              value: postgresql://taskflow:$(POSTGRES_PASSWORD)@postgres:5432/taskflow
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+            readOnlyRootFilesystem: true
+---
+# Consumer group `reports` (Módulo 13.6a): mantém os números de cada projeto. Um grupo INDEPENDENTE do `notifications`:
+# lê o tópico inteiro, com o próprio offset. Uma réplica lê as 3 partições
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-reports
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-reports
+    app.kubernetes.io/part-of: taskflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: taskflow-reports
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: taskflow-reports
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: reports
+          image: ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e083495cc2f09778ba0b111b2c7fd2ec24da241abaaf2c387d91398397
+          command: ['node', 'dist/reports-consumer']
+          envFrom:
+            - configMapRef:
+                name: taskflow-workers
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: taskflow-db
+                  key: password
+            - name: DATABASE_URL
+              value: postgresql://taskflow:$(POSTGRES_PASSWORD)@postgres:5432/taskflow
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+            readOnlyRootFilesystem: true

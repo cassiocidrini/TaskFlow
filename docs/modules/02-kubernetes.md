@@ -2,14 +2,17 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 26/11/2026
 >
-> **Status:** 🚧 em construção, etapa **2.3 de 2.6** (a API troca de versão sob carga sem perder requisição, medido:
-> 32 falhas → 0; com probes, recursos medidos e `securityContext`). Cada etapa acrescenta a sua parte a este documento; o mapa completo está em "Roteiro do módulo".
+> **Status:** 🚧 em construção, etapa **2.4 de 2.6** (o fluxo de eventos inteiro no cluster: Kafka, relay e
+> consumers; com o Kafka fora do ar, a API seguiu aceitando escrita e nenhum evento se perdeu, medido: 21 → 21). Cada etapa acrescenta a sua parte a este documento; o mapa completo está em "Roteiro do módulo".
 >
 > **Onde vive no código:** [`k8s/kind-config.yaml`](../../k8s/kind-config.yaml) (o cluster) ·
 > [`k8s/base/`](../../k8s/base/api.yaml) (API e Service) · [`postgres.yaml`](../../k8s/base/postgres.yaml) ·
 > [`config.yaml`](../../k8s/base/config.yaml) · [`migrate-job.yaml`](../../k8s/base/migrate-job.yaml) ·
+> [`kafka.yaml`](../../k8s/base/kafka.yaml) · [`kafka-topics-job.yaml`](../../k8s/base/kafka-topics-job.yaml) ·
+> [`workers.yaml`](../../k8s/base/workers.yaml) (relay e consumers) ·
 > [`k8s/load/k6-rollout.yaml`](../../k8s/load/k6-rollout.yaml) (a carga durante o rollout) ·
-> [`k8s-api-manifest.spec.ts`](../../test/unit/k8s-api-manifest.spec.ts) · a imagem que o cluster roda vem do workflow
+> [`k8s-api-manifest.spec.ts`](../../test/unit/k8s-api-manifest.spec.ts) ·
+> [`k8s-workers-manifest.spec.ts`](../../test/unit/k8s-workers-manifest.spec.ts) · a imagem que o cluster roda vem do workflow
 > [`publish-image.yml`](../../.github/workflows/publish-image.yml) ([Módulo 03](03-ci-cd-github-actions.md), E.3)
 
 ---
@@ -47,13 +50,13 @@ trabalha continuamente para que o real fique igual ao declarado.
 | **2.1** | Cluster local com **kind** (1 control-plane + 2 workers, versão fixada por digest), `kubectl`, e o primeiro Deployment da API, que falha de propósito: o diagnóstico de um `CrashLoopBackOff` e a reconciliação observada | ✅ |
 | **2.2** | Postgres no cluster (StatefulSet + volume persistente), ConfigMap e Secret (fora do Git), a **migração como Job**, e a API respondendo por um Service | ✅ |
 | **2.3** | A API de verdade: probes, recursos medidos, `securityContext` e Pod Security, **rolling update sob carga sem erro** (medido antes e depois) e rollback | ✅ |
-| 2.4 | Kafka, relay e consumers no cluster | 🔜 |
+| **2.4** | Kafka (StatefulSet KRaft) e os tópicos como Job; relay e consumers como Deployments da mesma imagem, sem probes (ADR-0014); **o Kafka fora do ar sem perder evento**, partições × réplicas e rollout de consumer com eventos fluindo | ✅ |
 | 2.5 | Ingress, escala automática (HPA) e NetworkPolicy | 🔜 |
 | 2.6 | Ambientes com Kustomize (dev × prod) e a segunda metade do CD (GitOps) | 🔜 |
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 2.3)
+## 🏗️ Arquitetura (estado atual: 2.4)
 
 ```text
 sua máquina
@@ -83,6 +86,16 @@ namespace taskflow   (Pod Security: enforce baseline · warn/audit restricted)
                                                         rolling update maxSurge 1 / maxUnavailable 0 · grace 30 s
                                                         uid 1000, disco somente leitura, sem capabilities, seccomp
                                                         requests 100m / 192Mi · limit 384Mi (sem limit de CPU)
+                                                        sem nenhuma variável KAFKA_*: grava o evento na outbox, na mesma transação
+
+  ConfigMap taskflow-workers (NODE_ENV, LOG_LEVEL, OTEL_SDK_DISABLED, KAFKA_BROKERS=kafka:9092, SHUTDOWN_TIMEOUT_MS)  ← Git
+       ├─► Service kafka (headless) ─► StatefulSet kafka ─► kafka-0 (KRaft: broker + controller) ─► PVC data-kafka-0 (2 GiB)
+       │      anuncia kafka-0.kafka.taskflow.svc.cluster.local:9092 · readiness tcpSocket · uid 1000, disco somente leitura
+       ├─► Job kafka-topics ─► task-events.v1 (3 partições, 7 dias) · notifications-dlt.v1 · reports-dlt.v1 · smoke
+       └─► 3 Deployments, a MESMA imagem da API, outro command, sem probes (ADR-0014), requests 100m / 128Mi · limit 256Mi
+             taskflow-relay (2)          node dist/relay                   outbox ──► Kafka (advisory lock por lote)
+             taskflow-notifications (2)  node dist/notifications-consumer  group notifications: partições 2 + 1
+             taskflow-reports (1)        node dist/reports-consumer        group reports: as 3 partições
 
   Job k6-rollout (k8s/load, só para medir) ─► GET http://taskflow-api/health/live, ~195 req/s, durante o rollout
 ```
@@ -383,6 +396,76 @@ um `git revert`, e o cluster segue o Git.
 
 ---
 
+### Kafka no Kubernetes: o endereço anunciado (2.4)
+
+Um cliente Kafka usa o endereço da configuração (`KAFKA_BROKERS=kafka:9092`) **só no primeiro contato**, o
+*bootstrap*. O broker responde com os metadados do cluster, incluindo o endereço que **ele anuncia**
+(`advertised.listeners`), e daí em diante o cliente conecta nesse endereço. Se o anunciado não for alcançável de onde
+o cliente está, o primeiro contato funciona e todo o resto falha. É o "erro clássico de Kafka em Docker", que no
+compose foi resolvido com dois listeners.
+
+No Kubernetes, o StatefulSet dá a resposta: cada pod tem um DNS estável pelo Service headless,
+`kafka-0.kafka.taskflow.svc.cluster.local`. O nome do pod entra na variável pela *downward API* (`fieldRef:
+metadata.name`), e o broker anuncia `$(POD_NAME).kafka.taskflow.svc.cluster.local:9092`. Duas armadilhas evitadas:
+
+| Decisão | O que daria errado |
+|---|---|
+| Controller em `1@localhost:9093`, e não no DNS do pod | O registro DNS de um pod headless só existe depois de ele ficar **pronto**, e o broker não fica pronto sem achar o controller: um impasse no boot |
+| Readiness por `tcpSocket`, e não o `kafka-broker-api-versions.sh` do compose | O script sobe uma **JVM dentro do container** a cada 5 s, e ela conta no limit de memória do broker. O mesmo cuidado vale para diagnóstico: `env KAFKA_HEAP_OPTS=-Xmx64m` antes do `kafka-consumer-groups.sh` |
+| `CLUSTER_ID` fixo no manifesto | O id é gravado no volume na formatação; um id novo a cada pod faria o broker recusar o próprio disco |
+| `emptyDir` em `/opt/kafka/config`, `/opt/kafka/logs` e `/tmp` | O entrypoint da imagem **gera** o `server.properties` a partir das variáveis; com o disco da imagem somente leitura, só esses três diretórios precisam ser graváveis. O broker passou calado pelo Pod Security `restricted` |
+
+Kafka de verdade em Kubernetes costuma vir de um **operador** (Strimzi): recursos próprios (`Kafka`, `KafkaTopic`,
+via CRD) e um controller que cuida de réplicas, upgrade sem parada, certificados e tópicos, o mesmo padrão de
+reconciliação do Deployment, aplicado a um sistema com estado. Aqui o StatefulSet foi escrito à mão para ver o que
+o operador automatiza.
+
+### Os workers: uma imagem, três processos (2.4)
+
+O relay e os dois consumers rodam a **mesma imagem da API**, trocando só o `command` (`node dist/relay`,
+`node dist/notifications-consumer`, `node dist/reports-consumer`): o desenho da imagem única do
+[Módulo 03](03-ci-cd-github-actions.md) (E.1). Um Deployment por processo, porque cada um escala e é atualizado
+sozinho. O ConfigMap `taskflow-workers` tem só o que os schemas deles pedem: **sem `JWT_SECRET`**, que só a API usa
+(menor privilégio).
+
+- **Duas réplicas do relay não duplicam publicação.** Cada lote roda sob um advisory lock de transação no Postgres
+  (`pg_try_advisory_xact_lock`): uma réplica publica, a outra encontra o lock ocupado e tenta no próximo ciclo. É uma
+  reserva quente, sem eleição de líder.
+- **Partição é a unidade de paralelismo.** Dentro de um grupo, cada partição é de **um** consumer só (é assim que a
+  ordem por tarefa se mantém). Com 3 partições e 4 réplicas do `notifications`, o broker deu 1 + 1 + 1 + **0**: a
+  quarta ficou ociosa, gastando memória. Escalar consumer além das partições não aumenta vazão; aumentar partições
+  muda a distribuição das chaves (Módulo 13, ADR-0003).
+- **Sem probes** ([ADR-0014](../adr/0014-workers-sem-probes.md)): um worker não está atrás de Service (readiness não
+  tem o que decidir); o processo que morre já é reiniciado; o consumer travado sai do grupo quando a sessão do Kafka
+  expira; e o travamento que importa (lote preso) aparece no **resultado** (backlog da outbox, lag do consumer), não
+  numa rota que prova só que o event loop responde. O custo: `1/1 Running` diz apenas que o processo está de pé.
+
+### A promessa da outbox, com o broker fora do ar (2.4)
+
+A API não fala com o Kafka: grava o evento na tabela `outbox`, **na mesma transação** da tarefa
+([ADR-0002](../adr/0002-transactional-outbox-com-relay-por-polling.md)). Com o Kafka fora (`scale --replicas=0`):
+
+1. A API respondeu **20 × 201**. A escrita não depende do broker.
+2. A outbox acumulou **20 pendentes** (`published_at IS NULL`), e o `total` do projeto continuou em 1: o `reports`
+   ainda não tinha visto nada (consistência eventual).
+3. Os clientes não deram "conexão recusada", e sim **`Failed to resolve 'kafka:9092'`**: um Service headless sem pod
+   pronto não tem registro DNS. O consumer perdeu a sessão do grupo (`session timed out after 30021 ms`).
+4. O Kafka voltou **no mesmo PVC** (tópicos e offsets intactos), o relay registrou `Publicação restabelecida`, e a
+   outbox esvaziou. Os consumers levaram alguns segundos a mais: tentam de novo a cada ~5 s e precisam entrar no grupo
+   de novo.
+5. **21 tarefas, 21 efeitos** em cada consumer: nenhuma perda, nenhuma duplicação.
+
+### Entrega *at-least-once*, efeito *exactly-once* (2.4)
+
+Um `rollout restart` dos dois consumers caiu no meio de uma rajada de 30 tarefas (pods velhos encerrados às 03:43:40;
+eventos gravados de 03:43:33 a 03:43:42). No SIGTERM, o consumer termina a mensagem em andamento, commita e avisa o
+grupo que está saindo (*LeaveGroup*), e o rebalance é imediato. Uma mensagem processada e ainda não commitada seria
+**reentregue** a quem assumisse a partição: a entrega do Kafka é *at-least-once*. O que impede o efeito duplicado é a
+idempotência do consumer (`processed_events` no `notifications`, versão do agregado no `reports`, ADR-0005). A prova
+é contar: **81 eventos `TaskCreated`, 81 efeitos em cada consumer**.
+
+---
+
 ## 📋 Como reproduzir
 
 ### 1. Ferramentas: versão fixa e checksum conferido
@@ -559,6 +642,63 @@ kubectl -n taskflow rollout history deployment/taskflow-api
 kubectl -n taskflow rollout undo deployment/taskflow-api
 ```
 
+### 12. Kafka, tópicos e workers, nesta ordem (2.4)
+
+```bash
+kubectl apply -f k8s/base/kafka.yaml                              # sem Warning: o broker passa no "restricted"
+kubectl -n taskflow get pods -l app.kubernetes.io/name=kafka -w   # 1/1 em ~17 s
+kubectl -n taskflow logs kafka-0 | grep -E "===>|Kafka Server started|ERROR"
+kubectl apply -f k8s/base/kafka-topics-job.yaml
+kubectl -n taskflow wait --for=condition=complete job/kafka-topics --timeout=180s
+kubectl apply -f k8s/base/workers.yaml
+kubectl -n taskflow logs -l app.kubernetes.io/name=taskflow-notifications --prefix | grep conectado
+
+# O grupo visto pelo broker. A CLI sobe uma JVM no container do broker: heap pequeno só para ela
+kubectl -n taskflow exec kafka-0 -- env KAFKA_HEAP_OPTS=-Xmx64m \
+  /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group notifications
+```
+
+### 13. O Kafka fora do ar (2.4)
+
+Com o `port-forward` da API aberto numa aba própria, e as variáveis **no mesmo terminal** em que serão usadas:
+
+```bash
+API=localhost:8080; SUF=$(date +%s)
+for who in ana bia; do curl -s -X POST $API/auth/register -H 'Content-Type: application/json' \
+  -d "{\"name\":\"$who\",\"email\":\"$who-$SUF@example.com\",\"password\":\"Senha-forte-123\"}"; echo; done
+login() { curl -s -X POST $API/auth/login -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$1-$SUF@example.com\",\"password\":\"Senha-forte-123\"}" | jq -r .accessToken; }
+TOKEN_A=$(login ana); TOKEN_B=$(login bia)
+B_ID=$(curl -s $API/auth/me -H "Authorization: Bearer $TOKEN_B" | jq -r .userId)
+PROJ=$(curl -s -X POST $API/projects -H "Authorization: Bearer $TOKEN_A" -H 'Content-Type: application/json' \
+  -d '{"name":"Projeto K8s"}' | jq -r .id)
+task() { curl -s -o /dev/null -w '%{http_code} ' -X POST $API/projects/$PROJ/tasks -H "Authorization: Bearer $TOKEN_A" \
+  -H 'Content-Type: application/json' -d "{\"title\":\"$1\",\"assigneeId\":\"$B_ID\"}"; }
+count() { kubectl -n taskflow exec postgres-0 -- psql -U taskflow -d taskflow -At \
+  -c "SELECT count(*) FROM outbox WHERE published_at IS NULL;" \
+  -c "SELECT total FROM project_stats WHERE project_id='$PROJ';" \
+  -c "SELECT count(*) FROM notifications WHERE user_id='$B_ID';"; }
+
+task "Primeira"; echo; sleep 5; count                              # 0 pendentes, total 1, 1 notificação
+kubectl -n taskflow scale statefulset kafka --replicas=0           # drift proposital
+for i in $(seq 1 20); do task "Offline $i"; done; echo; count      # 20 × 201; 20 pendentes; total ainda 1
+kubectl apply -f k8s/base/kafka.yaml && kubectl -n taskflow rollout status statefulset/kafka
+sleep 30; count                                                    # 0 pendentes, 21, 21
+```
+
+### 14. Partições × réplicas, e o rollout de consumer com eventos fluindo (2.4)
+
+```bash
+kubectl -n taskflow scale deployment taskflow-notifications --replicas=4
+kubectl -n taskflow exec kafka-0 -- env KAFKA_HEAP_OPTS=-Xmx64m /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server localhost:9092 --describe --group notifications --members        # um membro com 0 partições
+kubectl apply -f k8s/base/workers.yaml                                                   # volta a 2
+
+for i in $(seq 1 30); do task "Rollout $i"; sleep 0.3; done; echo                        # num terminal...
+kubectl -n taskflow rollout restart deployment/taskflow-notifications deployment/taskflow-reports   # ...e no outro
+sleep 30; count                                                                          # efeitos = eventos
+```
+
 Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Secrets precisam ser criados de novo
 (não estão no Git).
 
@@ -580,6 +720,14 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 | 10 | **(2.3)** Mudar o ConfigMap não mudou os pods (`printenv` ainda mostrava o valor antigo) | O `envFrom` é lido **uma vez**, quando o container inicia | `kubectl rollout restart` depois de mudar o ConfigMap. Automatizar (hash do conteúdo no nome do ConfigMap, com o `configMapGenerator` do Kustomize) é a 2.6 |
 | 11 | **(2.3)** O `rollout undo` avisou que a `last-applied-configuration` não acompanha | O `undo` muda o objeto direto, sem passar pelo `apply`; o próximo `apply` calcula o diff a partir de uma anotação que não reflete o cluster | Rollback imperativo é para emergência. O estado se resolve no Git; em GitOps (2.6), o rollback é um `git revert` |
 | 12 | **(2.3)** `rollout history` com `CHANGE-CAUSE` vazio em todas as revisions | O campo vem da anotação `kubernetes.io/change-cause`, que ninguém preencheu | Aceito: o "porquê" de cada versão fica no Git (commit e digest). O pipeline da 2.6 pode preencher a anotação |
+| 13 | **(2.4)** `Failed to acquire idempotence PID ... Coordinator load in progress` no primeiro boot dos workers | O produtor idempotente pede um *producer id* ao coordenador de transações, e num broker recém-formatado o tópico interno `__transaction_state` ainda está sendo criado | Transitório: o cliente tenta de novo, e a linha seguinte é `conectado`. Ruído explicado |
+| 14 | **(2.4)** `WARNING: ... topics with a period ('.') or underscore ('_') could collide` a cada tópico criado | Nos nomes de métrica do Kafka, `.` e `_` viram o mesmo caractere; o aviso sai para qualquer tópico com um deles | Os nossos usam só ponto: não há colisão possível. Ruído explicado |
+| 15 | **(2.4)** Com o Kafka de volta e a outbox vazia, o `total` ainda era 1 depois de 10 s | Os consumers estavam no intervalo entre tentativas (~5 s, com `Failed to resolve`) e precisavam entrar no grupo de novo depois de perder a sessão | Esperar mais e medir pelo **broker** (`LAG` 0) e pelo banco. Consistência eventual: a confirmação da escrita vem muito antes do efeito |
+| 16 | **(2.4)** O `jq length` deu "2 notificações" | A rota é paginada e devolve um objeto (`{ items, nextCursor }`); `length` de objeto conta as **chaves** | `jq '.items \| length'`, e a contagem confiável pelo banco (a página tem limite) |
+| 17 | **(2.4)** `kubectl logs deploy/taskflow-relay` não mostrou erro com o Kafka fora | Com 2 réplicas, `deploy/…` escolhe **um** pod, e os erros estavam no outro | `kubectl logs -l app.kubernetes.io/name=taskflow-relay --prefix`: todos os pods, cada linha com o nome do seu |
+| 18 | **(2.4)** O loop de tarefas devolveu `000` em todas | As variáveis (`API`, `TOKEN_A`, `PROJ`) foram definidas noutro terminal; variável de shell não atravessa terminais. `000` é o `curl` sem resposta HTTP | Definir as variáveis no terminal que vai usá-las (o passo 13 junta tudo num bloco) |
+| 19 | **(2.4)** Contar `"duplicate"` nos logs não media nada | O resultado de cada mensagem vai para uma **métrica** (label `result`), não para o log; as métricas estão desligadas no cluster, e `logs -l` só lê os pods atuais | A prova válida é **efeitos = eventos** no banco. A falta de métricas no cluster é limitação registrada (ADR-0014) |
+| 20 | **(2.4)** O teste de tópicos passava com a retenção diferente no cluster | Ao unir as linhas `\`, sobrava o espaço antes da barra (dois espaços), e o `--config` deixava de casar: a retenção não era comparada nos dois lados | Unir com `\s*` dos dois lados da barra. Pego pelo **teste de mutação** (retenção e `cleanup.policy` mudadas só no cluster): sem ele, a guarda entraria sem proteger a retenção |
 
 ---
 
@@ -627,6 +775,22 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 | `rollout undo` | O ReplicaSet anterior reativado: os mesmos 2 pods (4 min de idade, 0 reinícios), o quebrado removido |
 | `k8s-api-manifest.spec.ts` | 5 testes. **Mutações:** grace 15 s (abaixo do watchdog de 20 s), liveness em `/health/ready` e `LOG_PRETTY=true` no ConfigMap, todas reprovando |
 
+
+**2.4 — Kafka, relay e consumers**
+
+| Experimento | Resultado |
+|---|---|
+| Kafka (`apply`) | Sem `Warning` do Pod Security (perfil `restricted`, disco somente leitura com 3 `emptyDir`); `1/1` em 17 s; `Kafka Server started` |
+| Job `kafka-topics` | 4 tópicos; `task-events.v1` com 3 partições, `Leader: 1`, retenção de 7 dias |
+| Workers (`apply`) | 5 pods `1/1` (2 relay, 2 notifications, 1 reports), sem `Warning`; logs `conectado`; broker com o `notifications` em 2 + 1 partições |
+| Ponta a ponta | Uma tarefa → `total: 1` no `reports` e a notificação da Bia, em menos de 3 s |
+| Kafka fora (`scale --replicas=0`) | 20 × `201`; 20 pendentes na outbox; `total` parado em 1; clientes com `Failed to resolve 'kafka:9092'`; consumer com `session timed out after 30021 ms` |
+| Kafka de volta (mesmo PVC) | Relay: `Publicação restabelecida após 1 falha(s)`; outbox com 0 pendentes; offsets 5 + 8 + 8 = 21 nos dois grupos, `LAG` 0; **21 tarefas, 21 efeitos** em cada consumer |
+| 4 réplicas, 3 partições | `--members`: 1 + 1 + 1 + **0** |
+| Rollout dos consumers no meio de 30 tarefas | Pods trocados às 03:43:40, eventos de 03:43:33 a 03:43:42; **81 eventos, 81 efeitos** em cada consumer |
+| Memória (`memory.peak`) | Kafka: 332 MiB ocioso, 494 MiB de pico → request 512Mi, limit 1Gi. Workers: 115–124 MiB → request 128Mi, limit 256Mi |
+| Testes | `k8s-workers-manifest.spec.ts` (4) e o `test-images.spec.ts` vigiando o Kafka do cluster. **Mutações:** partições, retenção e `cleanup.policy` só no cluster; `KAFKA_BROKERS` inválido; entrypoint inexistente; grace de 15 s; `apache/kafka:4.3.0`; todas reprovando |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -638,6 +802,8 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 | A versão do Postgres em três lugares (compose, testes, smoke) | **(2.2)** Quatro, com o manifesto, e o `test-images.spec.ts` vigiando os quatro | O Dependabot não lê manifestos do Kubernetes: sem o teste, o cluster ficaria numa versão e o resto em outra |
 | Pod "pronto" = container iniciado; rollout derrubando 32 de 16.655 requisições | **(2.3)** Três probes, `maxUnavailable: 0`, drenagem de 5 s: 0 falhas, medido; versão quebrada sem derrubar nada | O `/health/ready` e o graceful shutdown do Módulo 01 ganharam quem os consuma, e cada peça foi provada isolada |
 | Sem `resources` nem `securityContext` | **(2.3)** Recursos a partir do cgroup medido; não-root, disco somente leitura, sem capabilities; Pod Security no namespace | O scheduler só decide bem com requests reais; o perfil `restricted` é verificado pelo API server, não pela boa vontade |
+| O fluxo de eventos só no compose | **(2.4)** Kafka num StatefulSet, tópicos como Job, relay e consumers como Deployments da mesma imagem, sem probes (ADR-0014) | A outbox provada onde ela importa: broker fora, escrita aceita, nenhum evento perdido |
+| A versão do Kafka e os tópicos só no compose | **(2.4)** Também no cluster, com os testes vigiando a imagem (tag + digest) e o contrato dos tópicos (partições, retenção) | Tópico é contrato: dois lugares com a mesma definição precisam de quem os compare |
 | Módulo planejado "para um ambiente Linux dedicado" | Feito no Linux de desenvolvimento, com kind | O kind roda o Kubernetes oficial em containers: não precisa de máquina dedicada |
 
 ---
@@ -658,7 +824,17 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 - **Sem PodDisruptionBudget nem espalhamento garantido:** o scheduler distribuiu as réplicas pelos dois workers, mas
   nada o obriga (`topologySpreadConstraints`), e um `kubectl drain` de nó pode tirar as duas de uma vez (2.5).
 - **A ordem banco → migração → API é manual** (`kubectl wait`); automatizá-la é a 2.6.
-- **Telemetria desligada no cluster** (`OTEL_SDK_DISABLED`): ainda não há coletor lá dentro.
+- **Telemetria desligada no cluster** (`OTEL_SDK_DISABLED`): ainda não há coletor lá dentro. Com isso, ninguém vê
+  no cluster o backlog da outbox, o lag dos consumers nem as reentregas: os alertas `OutboxStalled` e
+  `ConsumerLagHigh` existem só no Prometheus do compose. É a lacuna aceita pelo ADR-0014 (workers sem probes).
+- **Kafka de um nó só:** sem réplica (RF 1), um broker fora para o fluxo de eventos inteiro (a outbox segura a
+  escrita, mas os efeitos param). Em produção, 3 brokers, RF 3, `min.insync.replicas` 2, num operador (Strimzi) ou
+  num serviço gerenciado (MSK, Confluent Cloud).
+- **Push desligado no cluster:** sem `PUSH_QUEUE_URL`, o `notifications` grava a notificação e não enfileira o push
+  (não há SQS no cluster; o fluxo com LocalStack é o do Módulo 13.7).
+- **A ordem Kafka → tópicos → workers é manual** (`kubectl wait`), como a do banco; automatizar é a 2.6.
+- **Os três Deployments dos workers repetem o mesmo bloco** (segurança, configuração, segredo); tirar a repetição
+  (Kustomize) é a 2.6.
 - **Acesso só por `port-forward`:** um túnel de depuração, que fixa um pod e não balanceia; o acesso de verdade é o
   Ingress (2.5).
 - **Erro de boot fora do JSON:** o que acontece antes de o pino assumir sai em texto.
@@ -686,7 +862,11 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 - [x] Recursos a partir do consumo medido no cgroup; sem limit de CPU, por decisão (2.3)
 - [x] Não-root, disco somente leitura, sem capabilities, seccomp; Pod Security no namespace (2.3)
 - [x] Versão quebrada sem derrubar nada, `progressDeadlineSeconds` e `rollout undo` (2.3)
-- [ ] Workers no cluster (2.4)
+- [x] Kafka num StatefulSet KRaft, com o endereço anunciado pelo DNS do pod, no perfil `restricted` (2.4)
+- [x] Tópicos como Job, com o contrato comparado ao do compose por teste (2.4)
+- [x] Relay e consumers como Deployments da mesma imagem; sem probes, com o porquê no ADR-0014 (2.4)
+- [x] Kafka fora do ar: escrita aceita, outbox acumulando e nenhum evento perdido (21 → 21) (2.4)
+- [x] Partições × réplicas e rollout de consumer sem efeito duplicado (81 → 81) (2.4)
 - [ ] Ingress, HPA e NetworkPolicy (2.5)
 - [ ] Ambientes com Kustomize e GitOps (2.6)
 
@@ -734,6 +914,24 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 - **"Que `securityContext` você usa?"** Não-root conferível (uid numérico), disco somente leitura, sem capabilities,
   sem escalada de privilégio, seccomp `RuntimeDefault` e sem token da ServiceAccount; com o Pod Security Admission
   no namespace para o API server recusar o que fugir disso.
+
+### Perguntas de entrevista (2.4)
+
+- **"O Kafka caiu. O que acontece com os eventos?"** Nada se perde: a API grava o evento na outbox, na mesma transação
+  da escrita, e continua respondendo (aqui, 20 × 201 com o broker fora). O relay publica quando o broker volta. O
+  custo é a consistência eventual: os efeitos (notificação, relatório) atrasam.
+- **"Como um cliente Kafka acha o broker dentro do Kubernetes?"** O bootstrap usa o Service (`kafka:9092`); o broker
+  devolve o endereço anunciado, que precisa ser alcançável de qualquer pod: o DNS estável do StatefulSet
+  (`kafka-0.kafka.<ns>.svc`), injetado pela downward API.
+- **"Se eu tenho 3 partições e 4 consumers?"** Um fica ocioso: dentro de um grupo, cada partição é de um consumer só,
+  e é isso que garante a ordem por chave. Partição é o teto do paralelismo.
+- **"Seu consumer é exactly-once?"** A entrega é at-least-once (um rebalance pode reentregar o que não foi commitado);
+  o **efeito** é exactly-once porque o consumer é idempotente. Prova: 81 eventos, 81 efeitos, com rollout no meio.
+- **"Como você faz health check de um worker Kafka?"** Pelo resultado, não por uma rota: lag do consumer medido no
+  broker e backlog da outbox. O processo que morre o kubelet reinicia; o consumer travado sai do grupo pela sessão.
+  Uma liveness que só prova que o event loop responde diria "vivo" com a fila parada (ADR-0014).
+- **"Por que não um Deployment para o Kafka?"** Identidade estável (o endereço anunciado) e um disco por broker que
+  sobrevive ao pod; em produção, um operador (Strimzi) ou um serviço gerenciado.
 
 ---
 
