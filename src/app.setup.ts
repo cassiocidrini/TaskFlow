@@ -1,6 +1,7 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, type OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
+import type { Express } from 'express';
 import helmet from 'helmet';
 import { APP_VERSION_HEADER, PLATFORM_HEADER } from './common/client/client-info';
 import { createClientInfoMiddleware } from './common/client/client-info.middleware';
@@ -23,6 +24,15 @@ import type { Env } from './config/env.schema';
  */
 export function configureApp(app: INestApplication): void {
   const config = app.get<ConfigService<Env, true>>(ConfigService);
+
+  // Atrás de um proxy (o Envoy do Gateway, no Kubernetes), o IP da conexão é o do PROXY, igual para todo cliente:
+  // o rate limit, que usa `req.ip` como chave, virava um balde só, e um robô no cadastro bloqueava todos os usuários
+  // (medido no Módulo 02, 2.5). O número de saltos confiáveis está no TRUST_PROXY_HOPS (env.schema.ts)
+  const trustProxyHops = config.get('TRUST_PROXY_HOPS', { infer: true });
+  if (trustProxyHops > 0) {
+    const express: Express = app.getHttpAdapter().getInstance();
+    express.set('trust proxy', trustProxyHops);
+  }
 
   // PRIMEIRO middleware: o correlationId precisa existir antes de qualquer outro (inclusive do log de acesso).
   // Os middlewares de módulo (o pino-http do nestjs-pino) só são montados no init/listen, então rodam depois deste.

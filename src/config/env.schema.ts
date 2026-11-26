@@ -31,6 +31,14 @@ export const envSchema = z.object({
     )
     .pipe(z.array(z.url()).min(1)),
 
+  // Quantos proxies confiáveis há entre o cliente e a app (o `trust proxy` do Express). Com N > 0, o IP do cliente
+  // (`req.ip`, a chave do rate limit) vem do X-Forwarded-For, contando N saltos a partir do fim: o último salto foi
+  // escrito pelo proxy, o resto pode ter vindo do cliente. Um NÚMERO, nunca "confia em tudo": com `true`, um cliente
+  // mandaria um X-Forwarded-For novo a cada requisição e nunca seria limitado. 0 (o padrão): sem proxy, o header é
+  // ignorado. No Kubernetes, 1 (o Envoy do Gateway, Módulo 02, 2.5), e só é seguro porque a NetworkPolicy deixa
+  // apenas o Envoy chegar à API: um pod falando direto com ela poderia forjar o header
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(0).max(5).default(0),
+
   OTEL_EXPORTER_OTLP_ENDPOINT: z.url().default('http://localhost:4318'),
 
   // Níveis do pino. `silent` existe para os testes E2E, onde o log de acesso de cada requisição só faz ruído.

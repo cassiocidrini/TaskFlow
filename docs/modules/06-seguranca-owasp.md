@@ -1,6 +1,6 @@
 # Módulo 06 — Segurança (OWASP Top 10)
 
-> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 24/11/2026
+> **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 26/11/2026
 >
 > **Onde vive no código:** [`src/app.setup.ts`](../../src/app.setup.ts) (Helmet, CORS, validação) ·
 > [`src/modules/auth/`](../../src/modules/auth/) · [`projects.service.ts`](../../src/modules/projects/projects.service.ts)
@@ -116,6 +116,29 @@ ThrottlerModule.forRootAsync({
 
 O guard é **sempre** registrado e decide em runtime se pula (`skipIf`). Assim, a estrutura da aplicação é a mesma
 em teste e em produção.
+
+#### "Por IP" atrás de um proxy: `TRUST_PROXY_HOPS`
+
+A chave do limite é o `req.ip`. Sem proxy, é o IP da conexão. Atrás de um proxy (o Envoy do Gateway no Kubernetes,
+[Módulo 02](02-kubernetes.md), 2.5), o IP da conexão é o **do proxy**, o mesmo para todo cliente, e o limite vira um
+balde só. Medido no cluster: um pod que nunca tinha chamado o cadastro recebeu `429` pelo Envoy, porque **outro**
+cliente tinha gastado o limite; o mesmo pod, direto na API, recebeu `400`. Um robô no cadastro bloquearia o cadastro de
+todos os usuários: a proteção virando o vetor de negação de serviço.
+
+```ts
+// app.setup.ts — o IP do cliente vem do X-Forwarded-For, contando N saltos confiáveis a partir do fim
+const trustProxyHops = config.get('TRUST_PROXY_HOPS', { infer: true }); // 0 por padrão; 1 no Kubernetes
+if (trustProxyHops > 0) {
+  const express: Express = app.getHttpAdapter().getInstance();
+  express.set('trust proxy', trustProxyHops);
+}
+```
+
+| Escolha | Por quê |
+|---|---|
+| Um **número** de saltos, e não `true` | Com `true`, o Express confia no header inteiro, inclusive no que o cliente escreveu: um `X-Forwarded-For` novo a cada requisição, e o limite nunca chega. Com `1`, só o último salto vale, e ele foi escrito pelo proxy |
+| **0 por padrão** | Sem proxy, o header é só texto escolhido pelo cliente |
+| Só seguro **com a rede fechada** | Se um pod falasse direto com a API, mandaria o header que quisesse. A NetworkPolicy do Módulo 02 (2.5) deixa só o Envoy chegar à API: confiar no header é uma decisão de **aplicação + rede**, nunca de uma só |
 
 ---
 
@@ -304,7 +327,9 @@ Outras decisões de configuração:
 | Intruso lista/cria/lê histórico em projeto alheio | 404, e **0 eventos gravados** | idem |
 | Tarefa do projeto A alterada pela URL do projeto B (mesmo dono) | 404 | idem |
 | `projectId` inválido · `limit=500` · campo extra no body | 400 | idem |
-| Configuração inválida (segredo curto, URL errada, porta inválida) | A app não sobe | [`env.schema.spec.ts`](../../test/unit/env.schema.spec.ts) |
+| Configuração inválida (segredo curto, URL errada, porta inválida, `TRUST_PROXY_HOPS` fora de 0–5) | A app não sobe | [`env.schema.spec.ts`](../../test/unit/env.schema.spec.ts) |
+| Atrás de proxy (`TRUST_PROXY_HOPS=1`): o 429 do cliente A não bloqueia o B; um IP forjado no começo do `X-Forwarded-For` não escapa do limite. **Mutações:** sem a correção e com `trust proxy: true`, cada uma reprova um teste | ✔ | [`trust-proxy.e2e-spec.ts`](../../test/e2e/trust-proxy.e2e-spec.ts) |
+| Sem proxy (`TRUST_PROXY_HOPS=0`): o `X-Forwarded-For` é ignorado, trocar o header não dá limite novo | ✔ | [`trust-proxy-off.e2e-spec.ts`](../../test/e2e/trust-proxy-off.e2e-spec.ts) |
 | A query de posse filtra por `id` **e** `ownerId` | ✔ | [`projects.service.spec.ts`](../../test/unit/projects.service.spec.ts) |
 
 ---
@@ -320,6 +345,8 @@ Outras decisões de configuração:
 | 5 | Teste com `JWT_SECRET = 'test-secret'` passou a falhar | O schema agora exige ≥ 32 caracteres | Segredo de teste com o tamanho mínimo (o teste estava errado, não a regra) |
 | 6 | **Timing attack** no login: e-mail inexistente respondia em ~1 ms, existente em ~60–100 ms | O `bcrypt.compare` só rodava se o usuário existisse, e um teste unitário **afirmava** isso ("não perde tempo comparando"): o teste protegia a vulnerabilidade | `compare` sempre, contra um hash fictício de mesmo custo; o teste passou a exigir o contrário |
 | 7 | `POST /auth/login` respondia `201 Created` | Padrão do NestJS para todo `POST`, mas o login não cria recurso | `@HttpCode(200)`, com Swagger e E2E ajustados |
+| 8 | Atrás do Envoy (Módulo 02, 2.5), um cliente recebia `429` pelo limite que **outro** gastou | Sem `trust proxy`, o `req.ip` era o do proxy para todos: um balde só | `TRUST_PROXY_HOPS` (1 no Kubernetes), com E2E dos dois lados e da falsificação, mais a NetworkPolicy fechando o acesso direto à API |
+| 9 | O E2E do caso `0` herdou o valor do caso `1` | As duas apps no mesmo arquivo: o Jest guarda o `AppModule` (e o `ConfigModule` já validado) em cache por arquivo; o `jest.resetModules()` duplicou as classes do `@nestjs/*` e quebrou a injeção | Um arquivo por configuração, com os auxiliares em `test/e2e/support/trust-proxy.ts` |
 
 ---
 
@@ -328,7 +355,12 @@ Outras decisões de configuração:
 - **Sem refresh token nem revogação:** um token roubado vale até expirar (1 h).
 - **Eventos de segurança não logados (A09):** login falho, 404 de autorização e 429 deveriam gerar log estruturado com IP e `correlationId`.
 - **Integridade (A08):** os scripts de instalação das dependências rodam sem política (`allowScripts`); o deploy ainda não exige a verificação do atestado da imagem (no Kubernetes, um *admission controller* que recuse imagem sem proveniência).
-- **Rate limit em memória:** não é compartilhado entre réplicas (em produção, *storage* em Redis).
+- **Rate limit em memória:** não é compartilhado entre réplicas (em produção, *storage* em Redis). O efeito foi medido
+  no cluster (Módulo 02, 2.5): com 2 réplicas, o cadastro aceitou **6** tentativas por minuto, 3 em cada, e não 3. O
+  limite real é o configurado **vezes o número de réplicas**, e com escala automática ele cresce junto com a escala.
+- **O IP real do cliente no balanceador:** atrás de um Service `LoadBalancer`, o tráfego pode chegar ao proxy com o
+  IP de origem trocado (SNAT). Preservar o IP do cliente exige `externalTrafficPolicy: Local` ou *proxy protocol* no
+  balanceador; no kind, todo tráfego da máquina local chega com o mesmo IP.
 
 ---
 

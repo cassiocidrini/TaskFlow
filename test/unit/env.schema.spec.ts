@@ -33,6 +33,8 @@ describe('validateEnv', () => {
         LOG_PRETTY: false,
         SHUTDOWN_DRAIN_MS: 0,
         SHUTDOWN_TIMEOUT_MS: 8000,
+        // Sem proxy confiável por padrão: o X-Forwarded-For de quem chama direto é só um header escolhido pelo cliente
+        TRUST_PROXY_HOPS: 0,
       });
     });
 
@@ -100,6 +102,11 @@ describe('validateEnv', () => {
 
     it('deve rejeitar DISABLE_THROTTLE com valor diferente de "true"/"false"', () => {
       expect(() => validateEnv({ ...minimalEnv, DISABLE_THROTTLE: 'yes' })).toThrow(/DISABLE_THROTTLE/);
+    });
+
+    // Um número de saltos, nunca "confia em tudo" (o `true` do Express): negativo, fracionário ou absurdo não sobe
+    it.each(['-1', '1.5', '6', 'true'])('deve rejeitar TRUST_PROXY_HOPS=%s', (hops) => {
+      expect(() => validateEnv({ ...minimalEnv, TRUST_PROXY_HOPS: hops })).toThrow(/TRUST_PROXY_HOPS/);
     });
 
     it('deve rejeitar LOG_LEVEL fora dos níveis do pino', () => {
