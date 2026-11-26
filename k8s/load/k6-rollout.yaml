@@ -34,8 +34,13 @@ data:
       thresholds: { http_req_failed: ['rate==0'] },
     };
 
+    // O alvo vem do Job: o Service da API (padrão, 2.3) ou o Envoy do Gateway, com o host da rota (2.5,
+    // k6-rollout-gateway.yaml). O mesmo script, para os dois números serem comparáveis
+    const TARGET = __ENV.TARGET || 'http://taskflow-api';
+    const params = { timeout: '5s', headers: __ENV.HOST_HEADER ? { Host: __ENV.HOST_HEADER } : {} };
+
     export default function () {
-      const res = http.get('http://taskflow-api/health/live', { timeout: '5s' });
+      const res = http.get(`${TARGET}/health/live`, params);
       if (res.status !== 200) {
         // Cada falha com horário: dá para alinhar com o momento em que cada pod subiu ou foi encerrado
         console.warn(`${new Date().toISOString()} status=${res.status} erro=${res.error_code} ${res.error}`);
@@ -58,6 +63,8 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: k6-rollout
+        # O papel que a NetworkPolicy da API libera (2.5)
+        app.kubernetes.io/component: load-test
         app.kubernetes.io/part-of: taskflow
     spec:
       restartPolicy: Never

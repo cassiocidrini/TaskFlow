@@ -2,15 +2,18 @@
 
 > **Projeto:** TaskFlow · **Trilha:** Do Pleno ao Excelente · **Última revisão:** 26/11/2026
 >
-> **Status:** 🚧 em construção, etapa **2.4 de 2.6** (o fluxo de eventos inteiro no cluster: Kafka, relay e
-> consumers; com o Kafka fora do ar, a API seguiu aceitando escrita e nenhum evento se perdeu, medido: 21 → 21). Cada etapa acrescenta a sua parte a este documento; o mapa completo está em "Roteiro do módulo".
+> **Status:** 🚧 em construção, etapa **2.5 de 2.6** (a entrada pela Gateway API, com IP de LoadBalancer; escala
+> automática de 2 a 5 réplicas sem perder requisição; manutenção de nó segurada pelo PDB; e a rede fechada por
+> NetworkPolicy, que também fecha a falsificação de IP medida contra o rate limit). Cada etapa acrescenta a sua parte a este documento; o mapa completo está em "Roteiro do módulo".
 >
 > **Onde vive no código:** [`k8s/kind-config.yaml`](../../k8s/kind-config.yaml) (o cluster) ·
 > [`k8s/base/`](../../k8s/base/api.yaml) (API e Service) · [`postgres.yaml`](../../k8s/base/postgres.yaml) ·
 > [`config.yaml`](../../k8s/base/config.yaml) · [`migrate-job.yaml`](../../k8s/base/migrate-job.yaml) ·
 > [`kafka.yaml`](../../k8s/base/kafka.yaml) · [`kafka-topics-job.yaml`](../../k8s/base/kafka-topics-job.yaml) ·
-> [`workers.yaml`](../../k8s/base/workers.yaml) (relay e consumers) ·
-> [`k8s/load/k6-rollout.yaml`](../../k8s/load/k6-rollout.yaml) (a carga durante o rollout) ·
+> [`workers.yaml`](../../k8s/base/workers.yaml) (relay e consumers) · [`gateway.yaml`](../../k8s/base/gateway.yaml) ·
+> [`autoscaling.yaml`](../../k8s/base/autoscaling.yaml) (HPA e PDB) ·
+> [`network-policies.yaml`](../../k8s/base/network-policies.yaml) ·
+> [`k8s/load/`](../../k8s/load/k6-rollout.yaml) (as cargas: rollout direto e pela borda, e a rampa do HPA) ·
 > [`k8s-api-manifest.spec.ts`](../../test/unit/k8s-api-manifest.spec.ts) ·
 > [`k8s-workers-manifest.spec.ts`](../../test/unit/k8s-workers-manifest.spec.ts) · a imagem que o cluster roda vem do workflow
 > [`publish-image.yml`](../../.github/workflows/publish-image.yml) ([Módulo 03](03-ci-cd-github-actions.md), E.3)
@@ -51,17 +54,18 @@ trabalha continuamente para que o real fique igual ao declarado.
 | **2.2** | Postgres no cluster (StatefulSet + volume persistente), ConfigMap e Secret (fora do Git), a **migração como Job**, e a API respondendo por um Service | ✅ |
 | **2.3** | A API de verdade: probes, recursos medidos, `securityContext` e Pod Security, **rolling update sob carga sem erro** (medido antes e depois) e rollback | ✅ |
 | **2.4** | Kafka (StatefulSet KRaft) e os tópicos como Job; relay e consumers como Deployments da mesma imagem, sem probes (ADR-0014); **o Kafka fora do ar sem perder evento**, partições × réplicas e rollout de consumer com eventos fluindo | ✅ |
-| 2.5 | Ingress, escala automática (HPA) e NetworkPolicy | 🔜 |
+| **2.5** | A entrada do cluster pela **Gateway API** (Envoy Gateway, com IP de LoadBalancer dado pelo cloud-provider-kind), escala automática (metrics-server + HPA), PodDisruptionBudget com espalhamento pelos nós, e NetworkPolicy; no caminho, a correção do IP do cliente atrás do proxy (`TRUST_PROXY_HOPS`, Módulo 06) | ✅ |
 | 2.6 | Ambientes com Kustomize (dev × prod) e a segunda metade do CD (GitOps) | 🔜 |
 
 ---
 
-## 🏗️ Arquitetura (estado atual: 2.4)
+## 🏗️ Arquitetura (estado atual: 2.5)
 
 ```text
 sua máquina
   ├─ kubectl ──HTTPS──► 127.0.0.1:<porta>  (a API do cluster, publicada pelo kind; credencial em ~/.kube/config)
-  ├─ kubectl port-forward svc/taskflow-api 8080:80 ──► (túnel pela API do cluster, para testar)
+  ├─ curl -H 'Host: taskflow.local' http://172.19.0.5 ──► o IP do LoadBalancer (a entrada de verdade, 2.5)
+  ├─ cloud-provider-kind --gateway-channel disabled --enable-default-ingress=false   (dá IP aos Services LoadBalancer)
   │
   └─ Docker
        ├─ compose: postgres, kafka, jaeger, prometheus, grafana, localstack   (ambiente de dev, sem relação com o cluster)
@@ -71,16 +75,26 @@ sua máquina
             ├─ taskflow-worker   ──┐
             └─ taskflow-worker2  ──┴─ kubelet + containerd · kube-proxy · kindnet (rede dos pods, 10.244.0.0/16)
 
+namespace envoy-gateway-system   (Envoy Gateway v1.10.0; CRDs da Gateway API v1.6.3, canal standard)
+  envoy-gateway (o controller) ─ lê Gateway/HTTPRoute ─► Deployment envoy-taskflow-taskflow-… (o Envoy)
+  Service envoy-taskflow-taskflow-… (LoadBalancer, EXTERNAL-IP 172.19.0.5) ─► Envoy ─► IPs dos pods prontos da API
+
+namespace kube-system: metrics-server v0.9.1 (CPU e memória de cada pod: o `kubectl top` e o HPA)
+
 namespace taskflow   (Pod Security: enforce baseline · warn/audit restricted)
-  ConfigMap taskflow-api (NODE_ENV, LOG_LEVEL, OTEL_SDK_DISABLED, SHUTDOWN_DRAIN_MS=5000, SHUTDOWN_TIMEOUT_MS=20000)  ← Git
+  GatewayClass envoy · Gateway taskflow (HTTP :80, só taskflow.local) · HTTPRoute taskflow-api (/ → Service da API)
+  NetworkPolicy: entrada negada por padrão; API ← Envoy e cargas; Postgres ← API, migração, workers; Kafka ← workers, Job
+  HPA taskflow-api (2 a 5 réplicas, CPU 70% do request) · PDB taskflow-api (maxUnavailable 1)
+  ConfigMap taskflow-api (NODE_ENV, LOG_LEVEL, OTEL_SDK_DISABLED, SHUTDOWN_DRAIN_MS=5000, SHUTDOWN_TIMEOUT_MS=20000,
+                         TRUST_PROXY_HOPS=1)  ← Git
   Secret taskflow-db (password) · Secret taskflow-api (jwt-secret)       ← kubectl create, NUNCA no Git
        │
        ├─► Service postgres (headless) ─► StatefulSet postgres ─► postgres-0 ─► PVC data-postgres-0 (1 GiB) ─► PV (local-path)
        │                                    readiness: pg_isready
-       ├─► Job taskflow-migrate-aa4d4a0 ─► prisma migrate deploy (20 migrações) ─► Complete     (1º, com kubectl wait)
+       ├─► Job taskflow-migrate-074de6f ─► prisma migrate deploy (20 migrações) ─► Complete     (1º, com kubectl wait)
        └─► Service taskflow-api (ClusterIP :80) ─► EndpointSlice (IPs dos pods prontos)
-                                                  └─► Deployment taskflow-api ─► ReplicaSet ─► 2 pods (um por worker)
-                                                        imagem ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e0… (aa4d4a0)
+                                                  └─► Deployment taskflow-api ─► ReplicaSet ─► 2 a 5 pods (HPA), espalhados pelos nós
+                                                        imagem ghcr.io/cassiocidrini/taskflow@sha256:1343e88c… (074de6f)
                                                         DATABASE_URL = postgresql://taskflow:$(POSTGRES_PASSWORD)@postgres:5432/taskflow
                                                         startup/liveness: /health/live · readiness: /health/ready
                                                         rolling update maxSurge 1 / maxUnavailable 0 · grace 30 s
@@ -272,7 +286,7 @@ do target `migrate` da imagem ([Módulo 03](03-ci-cd-github-actions.md), E.1) vi
 
 | Decisão | Por quê |
 |---|---|
-| **Nome com o commit** (`taskflow-migrate-aa4d4a0`) | O template de um Job é **imutável**: não se "atualiza" um Job que já rodou. Cada versão é um Job novo, e o histórico diz qual migração rodou com qual versão |
+| **Nome com o commit** (`taskflow-migrate-<commit>`, hoje `074de6f`) | O template de um Job é **imutável**: não se "atualiza" um Job que já rodou. Cada versão é um Job novo, e o histórico diz qual migração rodou com qual versão |
 | `backoffLimit: 3` | Cobre o banco ainda subindo. Uma migração com erro falha as 4 vezes, o Job fica `Failed`, e o `kubectl wait` do deploy estoura: a API nova não sobe sobre um schema pela metade |
 | `restartPolicy: Never` | Cada tentativa é um pod novo, e o log das que falharam continua lá |
 | Sem `ttlSecondsAfterFinished` | O pod `Completed` (`0/1`: não há nada rodando para estar pronto) fica para o log ser lido |
@@ -464,6 +478,122 @@ grupo que está saindo (*LeaveGroup*), e o rebalance é imediato. Uma mensagem p
 idempotência do consumer (`processed_events` no `notifications`, versão do agregado no `reports`, ADR-0005). A prova
 é contar: **81 eventos `TaskCreated`, 81 efeitos em cada consumer**.
 
+### A entrada: Gateway API, Envoy e um IP de LoadBalancer (2.5)
+
+O `Ingress` está congelado e o controller mais usado dele (ingress-nginx) foi aposentado; a sucessora oficial é a
+**Gateway API**, que separa **papéis** em objetos ([ADR-0015](../adr/0015-gateway-api-com-envoy-gateway.md)):
+
+| Objeto | Papel | Aqui |
+|---|---|---|
+| `GatewayClass` | Qual implementação atende (plataforma) | `envoy`: o controller do Envoy Gateway |
+| `Gateway` | A porta de entrada: porta, protocolo, hosts aceitos, quem pode pendurar rotas (plataforma) | `taskflow`: HTTP :80, só `taskflow.local`, rotas só do mesmo namespace |
+| `HTTPRoute` | Para onde vai cada requisição (aplicação) | `taskflow-api`: `/` → Service da API |
+
+Para cada Gateway, o Envoy Gateway cria um Deployment do **Envoy** e um Service **`type: LoadBalancer`** no namespace
+dele. Numa nuvem, o *cloud controller manager* criaria um balanceador e gravaria o IP no Service; no kind, quem faz isso
+é o **cloud-provider-kind**, um processo na sua máquina. É o terceiro tipo de Service do módulo, depois do ClusterIP e
+do headless. O Envoy não passa pelo IP virtual do Service da API: recebe a lista de pods **prontos** do controller e
+balanceia direto entre eles, então a readiness da 2.3 vale também na borda.
+
+A instalação ensinou duas coisas sobre **quem é dono de quê**:
+
+- **Field managers.** O cloud-provider-kind v0.12 também implementa a Gateway API, ligado por padrão: instalou os CRDs
+  dela, criou uma `GatewayClass` e se registrou como `IngressClass` padrão. O `kubectl apply --server-side` do Envoy
+  Gateway foi **recusado** (`Apply failed with conflicts ... "cloud-provider-kind"`): no *server-side apply*, cada
+  campo tem um dono, e o API server não deixa dois atores reescreverem o mesmo campo em silêncio. A resposta é a mesma
+  de dois controllers no mesmo objeto: **um dono só**. O cloud-provider-kind ficou só com o LoadBalancer
+  (`--gateway-channel disabled --enable-default-ingress=false`).
+- **Canais e uma política de admissão.** O `install.yaml` do Envoy Gateway traz os CRDs da Gateway API no canal
+  **experimental**, e com eles uma `ValidatingAdmissionPolicy` do próprio projeto (`safe-upgrades`, regra em CEL,
+  avaliada pelo API server sem webhook) que recusa experimental por cima de standard. Os CRDs ficaram os oficiais,
+  **v1.6.3 standard** (a versão dos testes de conformidade do Envoy Gateway 1.10): `Gateway` e `HTTPRoute` são estáveis,
+  e nada experimental é usado.
+
+### O IP do cliente atrás do proxy, e o rate limit por réplica (2.5)
+
+Com o Envoy na frente, o IP da conexão que chega à API é **o do Envoy**, o mesmo para todo cliente. Medido: um pod que
+nunca tinha chamado o cadastro recebeu **`429`** pelo Envoy, porque a sua máquina tinha gastado o limite; o mesmo pod,
+direto na API, recebeu `400`. A correção foi na aplicação, num PR próprio: `TRUST_PROXY_HOPS=1` faz o Express tirar o
+IP do último salto do `X-Forwarded-For`, o escrito pelo Envoy ([Módulo 06](06-seguranca-owasp.md), "Por IP atrás de
+um proxy"). Depois do deploy da imagem nova (`074de6f`, o primeiro deploy de código novo do módulo), o mesmo pod passou
+a receber `400`: balde próprio.
+
+A correção abriu uma brecha, também medida: com a API **acreditando** no header, um pod falando **direto** com ela
+mandou 10 IPs inventados e recebeu 10 × `400`, nunca `429`. Confiar no header só é seguro se a **rede** garantir que só
+o proxy chega à API: é a NetworkPolicy abaixo.
+
+E uma limitação já conhecida virou número: o rate limit é **em memória, por réplica**. Com 2 réplicas, o cadastro
+aceitou **6** tentativas por minuto (3 em cada), e não 3. Com o HPA, o limite real cresce junto com a escala.
+
+### NetworkPolicy: a rede deixa de ser plana (2.5)
+
+Sem política, qualquer pod abre conexão com qualquer outro. Medido antes: o relay abria a API, a API abria o Kafka, um
+consumer abria a API. As políticas (`network-policies.yaml`) **negam a entrada por padrão** e liberam por label de
+origem e porta:
+
+| Destino | Origens permitidas |
+|---|---|
+| API `:3000` | os pods do Envoy **deste** Gateway (namespace `envoy-gateway-system`) e as cargas de medição (`component: load-test`) |
+| Postgres `:5432` | API, migração, relay, consumers |
+| Kafka `:9092` | relay, consumers, o Job de tópicos |
+
+- **Políticas se somam** (união): a `default-deny-ingress` fecha tudo, cada outra abre um caminho, e nenhuma fecha o
+  que outra abriu.
+- **`namespaceSelector` e `podSelector` no mesmo item** significam "estes pods, naquele namespace". Em itens
+  separados, seria "qualquer pod daquele namespace **ou** pods com este label em qualquer namespace": um erro comum.
+- **Bloqueio aparece como timeout**, não como "conexão recusada": a política descarta o pacote em silêncio. Num
+  diagnóstico, timeout entre pods é a primeira pista de NetworkPolicy.
+- **Quem aplica é o CNI.** O do kind (kindnet) aplica, com o controller `kube-network-policies` (nftables). Um CNI sem
+  suporte **aceita** os objetos e os ignora: por isso o bloqueio foi provado, não só a criação.
+- As probes do kubelet passam: o tráfego do próprio nó para os seus pods é sempre permitido.
+
+### Escala automática: HPA e metrics-server (2.5)
+
+O **metrics-server** lê o consumo de cada container no kubelet (o mesmo cgroup lido à mão na 2.3) e o publica na API do
+Kubernetes: é o que faz o `kubectl top` e o HPA funcionarem. No kind, precisa de `--kubelet-insecure-tls` (o
+certificado do kubelet é autoassinado e não traz o IP do nó); num cluster de produção, nunca.
+
+O **HPA** compara a CPU média com o alvo, **em porcentagem do request** (100m, ADR-0013): 70% = 70m por pod. Sem
+request, não há com o que comparar. O `behavior` é assimétrico de propósito:
+
+| | Política | Por quê |
+|---|---|---|
+| **Subir** | Sem janela; até dobrar a cada 30 s | Subir tarde custa erro e latência para o usuário |
+| **Descer** | Só depois de 2 min abaixo do alvo; 1 pod por minuto | Descer tarde custa só pod ocioso; sem a janela, carga oscilando faz o HPA subir e descer sem parar (*flapping*), e cada subida paga o boot de um pod |
+
+Medido com uma rampa até 1.200 req/s (`k6-hpa.yaml`, taxa de chegada imposta): **2 → 4** numa única decisão (CPU em
+149%), **→ 5** (o teto), e de volta a 2, um pod por minuto, depois da janela; **0 falhas em 271.499 requisições**.
+
+**O campo `replicas` só pode ter um dono.** Com o HPA, o Deployment deixa de declarar `replicas`: senão, cada `kubectl
+apply` devolveria a API ao número do arquivo no meio de um pico. Mas remover o campo de um objeto já aplicado faz o
+`apply` **apagá-lo**, e o Deployment cai para o padrão, **1 réplica** (medido com `--dry-run=server`: 2 → 1). O
+`kubectl apply set-last-applied` troca antes só a anotação `last-applied-configuration`; o `apply` calcula o que
+apagar pelas três versões (anotação, arquivo, objeto vivo) e deixa o campo com o HPA (o dry-run passou a dar 2).
+
+### Manutenção de nó: PDB, espalhamento e o scheduler que decide uma vez (2.5)
+
+- **`topologySpreadConstraints`** (`maxSkew: 1`, `DoNotSchedule`): as réplicas **obrigatoriamente** espalhadas pelos
+  nós. Com 5 réplicas, 3 + 2. Com o padrão `nodeTaintsPolicy: Ignore`, o control-plane (que a API não pode usar)
+  contaria como um nó com 0 pods, e a terceira réplica nunca subiria; `Honor` o tira da conta, e o mesmo vale para um
+  nó em manutenção.
+- **PodDisruptionBudget** (`maxUnavailable: 1`): limita as saídas **voluntárias** (drain, upgrade de nó, autoscaler
+  de nós), não as falhas. `maxUnavailable` e não `minAvailable: 1`: com 5 réplicas, "pelo menos 1" deixaria tirar 4 de
+  uma vez. `unhealthyPodEvictionPolicy: AlwaysAllow`: um pod quebrado não trava o drain para sempre.
+- **O drain medido**, com 2 pods da API no nó: o primeiro despejo passou; o segundo levou `Cannot evict pod as it
+  would violate the pod's disruption budget` e esperou o substituto ficar pronto no outro nó. **0 falhas em 17.609**
+  requisições durante a manutenção.
+- **O scheduler decide uma vez** (visto na 2.1). Com o nó de volta (`uncordon`), os pods **não** voltaram para ele, e
+  o HPA, ao descer de 4 para 2, deixou **as duas réplicas no mesmo nó**: o espalhamento é regra de agendamento, não de
+  permanência. O remédio foi recriar os pods (`rollout restart`); em produção, o **descheduler**, que despeja pods fora
+  das regras para o scheduler realocar.
+
+### O rollout pela borda (2.5)
+
+O teste da 2.3 de novo, com a carga entrando **pelo Envoy** (`k6-rollout-gateway.yaml`, o mesmo script): **0 falhas em
+17.450**. O Envoy recebe a lista de pods com um salto a mais de atraso e mantém um pool de conexões com eles: a
+drenagem de 5 s e o `Connection: close` do Módulo 01 cobrem também essa janela. O salto a mais custa ~0,4 ms de média
+(1,15 ms pela borda × 0,76 ms direto no Service).
+
 ---
 
 ## 📋 Como reproduzir
@@ -555,8 +685,8 @@ kubectl get pods -n taskflow -l app.kubernetes.io/name=postgres --watch     # po
 kubectl get pvc,pv -n taskflow                                              # Bound; o PV criado com o pod
 
 kubectl apply -f k8s/base/migrate-job.yaml
-kubectl wait --for=condition=complete job/taskflow-migrate-aa4d4a0 -n taskflow --timeout=120s
-kubectl logs -n taskflow job/taskflow-migrate-aa4d4a0                       # 20 migrações aplicadas
+kubectl wait --for=condition=complete job/taskflow-migrate-074de6f -n taskflow --timeout=120s
+kubectl logs -n taskflow job/taskflow-migrate-074de6f                       # 20 migrações aplicadas
 
 kubectl apply -f k8s/base/api.yaml
 kubectl rollout status deployment/taskflow-api -n taskflow --timeout=120s
@@ -615,9 +745,9 @@ kubectl diff -f k8s/base/namespace.yaml -f k8s/base/config.yaml -f k8s/base/post
 kubectl apply -f k8s/base/namespace.yaml                          # a regra de segurança antes dos pods novos
 kubectl apply -f k8s/base/config.yaml -f k8s/base/postgres.yaml   # Warning: o Postgres viola o "restricted"
 kubectl -n taskflow rollout status statefulset/postgres
-kubectl -n taskflow delete job taskflow-migrate-aa4d4a0           # Job imutável: recriar (as migrações são idempotentes)
+kubectl -n taskflow delete job taskflow-migrate-074de6f           # Job imutável: recriar (as migrações são idempotentes)
 kubectl apply -f k8s/base/migrate-job.yaml
-kubectl -n taskflow wait --for=condition=complete job/taskflow-migrate-aa4d4a0 --timeout=120s
+kubectl -n taskflow wait --for=condition=complete job/taskflow-migrate-074de6f --timeout=120s
 kubectl apply -f k8s/base/api.yaml
 kubectl -n taskflow rollout status deployment/taskflow-api
 kubectl -n taskflow exec deploy/taskflow-api -- id                # uid=1000
@@ -699,6 +829,105 @@ kubectl -n taskflow rollout restart deployment/taskflow-notifications deployment
 sleep 30; count                                                                          # efeitos = eventos
 ```
 
+### 15. A plataforma da entrada: cloud-provider-kind, Gateway API e Envoy Gateway (2.5)
+
+Três instalações de terceiros, fora do repositório, cada uma por versão e checksum, **nesta ordem**:
+
+```bash
+cd /tmp
+curl -LO "https://github.com/kubernetes-sigs/cloud-provider-kind/releases/download/v0.12.0/cloud-provider-kind_0.12.0_linux_amd64.tar.gz"
+curl -LO "https://github.com/kubernetes-sigs/cloud-provider-kind/releases/download/v0.12.0/cloud-provider-kind_0.12.0_checksums.txt"
+sha256sum --check --ignore-missing cloud-provider-kind_0.12.0_checksums.txt
+tar -xzf cloud-provider-kind_0.12.0_linux_amd64.tar.gz cloud-provider-kind
+sudo install -o root -g root -m 0755 cloud-provider-kind /usr/local/bin/cloud-provider-kind
+
+# Os CRDs oficiais da Gateway API, canal standard (digest do arquivo na release, lido pela API do GitHub)
+curl -LO "https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.6.3/standard-install.yaml"
+echo "356c2b8e286a964dc20995435659ad1095386329974793af10bbfe3eff977fe5  standard-install.yaml" | sha256sum --check
+kubectl apply --server-side -f standard-install.yaml
+
+# O Envoy Gateway. Os 10 "denied request" nos CRDs da Gateway API são a política safe-upgrades recusando o canal
+# experimental do install.yaml por cima do standard: esperado; o resto é aplicado
+curl -LO "https://github.com/envoyproxy/gateway/releases/download/v1.10.0/install.yaml"
+echo "f87f4d59b983aa760da52a2a0002c612028106fe69beefdf3d30cfb03905944e  install.yaml" | sha256sum --check
+kubectl apply --server-side -f install.yaml
+kubectl -n envoy-gateway-system wait --for=condition=Available deployment/envoy-gateway --timeout=180s
+rm -f cloud-provider-kind* standard-install.yaml install.yaml; cd -
+```
+
+Numa aba própria (fica em pé), só com o papel de LoadBalancer:
+
+```bash
+cloud-provider-kind --gateway-channel disabled --enable-default-ingress=false
+```
+
+O kind divide o kernel com a máquina; com muitos pods, o `kubectl logs -f` pode falhar com `too many open files`
+(limite de instâncias de inotify, 128 por padrão):
+
+```bash
+echo 'fs.inotify.max_user_instances = 512' | sudo tee /etc/sysctl.d/99-kind.conf && sudo sysctl --system
+```
+
+### 16. A entrada no ar (2.5)
+
+```bash
+kubectl apply -f k8s/base/gateway.yaml
+kubectl -n taskflow get gateway taskflow                       # PROGRAMMED True, ADDRESS = IP do LoadBalancer
+GW=$(kubectl -n taskflow get gateway taskflow -o jsonpath='{.status.addresses[0].value}')
+curl -s -i http://$GW/health/ready -H 'Host: taskflow.local' | head -1                    # 200
+curl -s -o /dev/null -w '%{http_code}\n' http://$GW/health/ready -H 'Host: outro.local'    # 404, do próprio Envoy
+```
+
+### 17. A rede fechada, provada (2.5)
+
+```bash
+probe() {  # probe <deployment> <host> <porta>: abre uma conexão TCP com o node da imagem e diz o que aconteceu
+  kubectl -n taskflow exec deploy/$1 -- node -e "
+    const s = require('net').connect({ host: '$2', port: $3, timeout: 3000 });
+    s.on('connect', () => { console.log('$1 -> $2:$3 ABERTA'); process.exit(0); });
+    s.on('timeout', () => { console.log('$1 -> $2:$3 BLOQUEADA (timeout)'); process.exit(1); });
+    s.on('error', (e) => { console.log('$1 -> $2:$3 ERRO ' + e.code); process.exit(1); });"
+}
+probe taskflow-relay taskflow-api 80; probe taskflow-api kafka 9092; probe taskflow-relay postgres 5432   # antes: 3 ABERTA
+kubectl apply -f k8s/base/network-policies.yaml
+probe taskflow-relay taskflow-api 80; probe taskflow-api kafka 9092; probe taskflow-relay postgres 5432   # BLOQ, BLOQ, ABERTA
+```
+
+### 18. metrics-server, HPA e a escala sob carga (2.5)
+
+```bash
+cd /tmp && curl -LO "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.1/components.yaml"
+echo "3c7f57cdbee0f57fb0259a150e8f6d6cb4f29d72d1aa5dce8803151dd6d4c2a1  components.yaml" | sha256sum --check
+kubectl apply -f components.yaml && rm components.yaml; cd -
+kubectl -n kube-system patch deployment metrics-server --type=json \
+  -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'   # só no kind
+kubectl -n taskflow top pods
+
+# O api.yaml deixou de declarar `replicas`: troque a anotação ANTES, senão o apply derruba a API para 1 réplica
+kubectl apply set-last-applied -f k8s/base/api.yaml
+kubectl apply --dry-run=server -f k8s/base/api.yaml -o json | jq '.items[0].spec.replicas'   # 2 (sem o passo acima: 1)
+kubectl apply -f k8s/base/api.yaml -f k8s/base/autoscaling.yaml
+
+kubectl -n taskflow get hpa taskflow-api -w                       # num terminal
+kubectl apply -f k8s/load/k6-hpa.yaml                             # noutro: rampa até 1.200 req/s (~5 min)
+kubectl -n taskflow describe hpa taskflow-api | sed -n '/Events:/,$p'   # cada decisão, com o motivo
+```
+
+### 19. O drain com o PDB, e o rollout pela borda (2.5)
+
+```bash
+kubectl -n taskflow patch hpa taskflow-api --type merge -p '{"spec":{"minReplicas":4}}'   # 2 pods por nó (drift)
+kubectl drain taskflow-worker --pod-selector app.kubernetes.io/name=taskflow-api --ignore-daemonsets   # o PDB segura o 2º
+kubectl uncordon taskflow-worker && kubectl apply -f k8s/base/autoscaling.yaml
+kubectl -n taskflow rollout restart deployment/taskflow-api       # reespalha: o scheduler não realoca sozinho
+
+kubectl apply -f k8s/load/k6-rollout.yaml -f k8s/load/k6-rollout-gateway.yaml   # a carga pelo Envoy
+kubectl -n taskflow rollout restart deployment/taskflow-api                       # no meio dela
+```
+
+`--pod-selector` limita o drain aos pods da API: o `kafka-0` e o `postgres-0` usam volume local-path, preso ao nó, e
+ficariam `Pending` até o nó voltar.
+
 Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Secrets precisam ser criados de novo
 (não estão no Git).
 
@@ -728,6 +957,16 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 | 18 | **(2.4)** O loop de tarefas devolveu `000` em todas | As variáveis (`API`, `TOKEN_A`, `PROJ`) foram definidas noutro terminal; variável de shell não atravessa terminais. `000` é o `curl` sem resposta HTTP | Definir as variáveis no terminal que vai usá-las (o passo 13 junta tudo num bloco) |
 | 19 | **(2.4)** Contar `"duplicate"` nos logs não media nada | O resultado de cada mensagem vai para uma **métrica** (label `result`), não para o log; as métricas estão desligadas no cluster, e `logs -l` só lê os pods atuais | A prova válida é **efeitos = eventos** no banco. A falta de métricas no cluster é limitação registrada (ADR-0014) |
 | 20 | **(2.4)** O teste de tópicos passava com a retenção diferente no cluster | Ao unir as linhas `\`, sobrava o espaço antes da barra (dois espaços), e o `--config` deixava de casar: a retenção não era comparada nos dois lados | Unir com `\s*` dos dois lados da barra. Pego pelo **teste de mutação** (retenção e `cleanup.policy` mudadas só no cluster): sem ele, a guarda entraria sem proteger a retenção |
+| 21 | **(2.5)** O `apply --server-side` do Envoy Gateway falhou: `Apply failed with conflicts ... "cloud-provider-kind"` | O cloud-provider-kind v0.12 implementa Gateway API por padrão: instalou os CRDs dela (ficando **dono** dos campos), criou uma `GatewayClass` e virou `IngressClass` padrão | Cada ferramenta num papel só: `--gateway-channel disabled --enable-default-ingress=false`, e a `GatewayClass`/`IngressClass` dele apagadas |
+| 22 | **(2.5)** Com `--force-conflicts`, os CRDs foram recusados: `Installing experimental CRDs on top of standard channel CRDs is prohibited` | O `install.yaml` do Envoy Gateway traz o canal **experimental**, e a `ValidatingAdmissionPolicy` `safe-upgrades` (do projeto Gateway API) o recusa por cima do standard | Os CRDs oficiais **v1.6.3 standard**, à parte. Reaplicar o `install.yaml` mostra os 10 `denied request` de novo: esperado (ADR-0015) |
+| 23 | **(2.5)** A primeira tentativa de provar o IP compartilhado não deu nenhum `429` | O rate limit é em memória, **por réplica**: o Envoy espalhou as 4 chamadas entre 2 pods | Volume suficiente para estourar os dois contadores; o limite efetivo medido foi **6/min** (3 × 2 réplicas) |
+| 24 | **(2.5)** Atrás do Envoy, um cliente recebia `429` pelo limite que outro gastou | Sem `trust proxy`, o `req.ip` era o do Envoy para todos | `TRUST_PROXY_HOPS` (PR próprio, Módulo 06), deploy da imagem `074de6f` e `TRUST_PROXY_HOPS: '1'` no ConfigMap |
+| 25 | **(2.5)** Com a correção, um pod falando direto com a API forjou o IP e nunca chegou ao `429` (10 × `400`) | A API passa a acreditar no `X-Forwarded-For`; sem rede fechada, qualquer pod manda o que quiser | NetworkPolicy: só o Envoy (e as cargas) chegam à API. A mesma tentativa virou `download timed out`; e o teste de manifesto exige a política sempre que `TRUST_PROXY_HOPS > 0` |
+| 26 | **(2.5)** Tirar `replicas` do `api.yaml` faria o `apply` derrubar a API para **1** réplica | O `apply` apaga o campo que estava na anotação `last-applied-configuration` e saiu do arquivo; o Deployment cai para o padrão | `kubectl apply set-last-applied` antes. Medido com `--dry-run=server`: 1 antes, 2 depois |
+| 27 | **(2.5)** `kubectl logs -f` falhou com `failed to create fsnotify watcher: too many open files` | Os nós do kind dividem o kernel da máquina; o limite de instâncias de inotify (128) se esgota | `fs.inotify.max_user_instances = 512` em `/etc/sysctl.d/99-kind.conf` + `sysctl --system` (recomendação do próprio kind). Sem `-f`, o log já gravado sai normalmente |
+| 28 | **(2.5)** O HPA começou com `FailedGetResourceMetric` (`no metrics returned`) | Pods recém-criados ainda sem a primeira coleta do metrics-server | Transitório: sem métrica, o HPA **não age** (nem sobe nem desce), o comportamento seguro |
+| 29 | **(2.5)** Depois do drain e da descida do HPA, as duas réplicas ficaram no mesmo nó | O scheduler decide uma vez; o espalhamento vale no agendamento, não depois; o ReplicaSet escolhe **quais** pods apagar, não onde os restantes ficam | `rollout restart` para reagendar (1 + 1). Em produção, o descheduler |
+| 30 | **(2.5)** `kubectl top` sem dados logo depois de instalar o metrics-server no kind | O kubelet do kind usa certificado autoassinado, sem o IP do nó | `--kubelet-insecure-tls`, só num cluster local |
 
 ---
 
@@ -791,6 +1030,22 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 | Memória (`memory.peak`) | Kafka: 332 MiB ocioso, 494 MiB de pico → request 512Mi, limit 1Gi. Workers: 115–124 MiB → request 128Mi, limit 256Mi |
 | Testes | `k8s-workers-manifest.spec.ts` (4) e o `test-images.spec.ts` vigiando o Kafka do cluster. **Mutações:** partições, retenção e `cleanup.policy` só no cluster; `KAFKA_BROKERS` inválido; entrypoint inexistente; grace de 15 s; `apache/kafka:4.3.0`; todas reprovando |
 
+**2.5 — entrada, escala, manutenção e rede**
+
+| Experimento | Resultado |
+|---|---|
+| Plataforma | CRDs da Gateway API v1.6.3 standard (após os problemas 21 e 22); Envoy Gateway v1.10.0; cloud-provider-kind v0.12.0 só como LoadBalancer; metrics-server v0.9.1 |
+| Gateway | `GatewayClass envoy` `ACCEPTED`; `Gateway taskflow` `PROGRAMMED`, IP `172.19.0.5`; `200` em `taskflow.local`, `404` do Envoy em `outro.local` |
+| IP compartilhado (antes da correção) | Sua máquina gastou o limite (6 × `400`, 3 por réplica); o relay, **pelo Envoy**, recebeu `429` nas três; direto na API, `400` |
+| Depois da imagem `074de6f` + `TRUST_PROXY_HOPS=1` | O relay pelo Envoy: `400` nas três (balde próprio). Direto na API com IPs inventados: 10 × `400`, a brecha |
+| NetworkPolicy | Antes: relay → API, API → Kafka, notifications → API **ABERTA**. Depois: as três **BLOQUEADA (timeout)**; relay → Postgres ABERTA; Gateway → API `200`; a falsificação direta: `download timed out` |
+| Fluxo inteiro com as políticas | Uma tarefa pelo Gateway: 82 no `project_stats` e 82 notificações (eram 81) |
+| HPA (rampa até 1.200 req/s) | 2 → **4** (CPU 149%) → **5**, e de volta a 2 um pod por minuto depois da janela de 2 min; **0 falhas em 271.499** (~1.005 req/s em média); 5 réplicas em 3 + 2 nós |
+| Drain com o PDB (2 pods da API no nó) | 1º despejo imediato; 2º com `would violate the pod's disruption budget`, esperou o substituto; **0 falhas em 17.609** |
+| Rollout pela borda (carga entrando no Envoy) | **0 falhas em 17.450**; latência média 1,15 ms (direto no Service: 0,76 ms) |
+| `kubectl top` | API com 84–86 Mi de *working set* (o cgroup da 2.3 mostrava ~110 MiB com o cache de arquivos) |
+| Testes | `k8s-api-manifest.spec.ts` com 4 guardas novas. **Mutações:** `replicas` de volta, `minReplicas: 1`, sem `nodeTaintsPolicy`, sem o `default-deny`, API aberta ao namespace: todas reprovando |
+
 ---
 
 ## 🔄 Como este módulo evoluiu com o projeto
@@ -804,6 +1059,8 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 | Sem `resources` nem `securityContext` | **(2.3)** Recursos a partir do cgroup medido; não-root, disco somente leitura, sem capabilities; Pod Security no namespace | O scheduler só decide bem com requests reais; o perfil `restricted` é verificado pelo API server, não pela boa vontade |
 | O fluxo de eventos só no compose | **(2.4)** Kafka num StatefulSet, tópicos como Job, relay e consumers como Deployments da mesma imagem, sem probes (ADR-0014) | A outbox provada onde ela importa: broker fora, escrita aceita, nenhum evento perdido |
 | A versão do Kafka e os tópicos só no compose | **(2.4)** Também no cluster, com os testes vigiando a imagem (tag + digest) e o contrato dos tópicos (partições, retenção) | Tópico é contrato: dois lugares com a mesma definição precisam de quem os compare |
+| Acesso só por `port-forward`; rede plana; 2 réplicas fixas | **(2.5)** Gateway API com IP de LoadBalancer; NetworkPolicy negando por padrão; HPA de 2 a 5; PDB e espalhamento obrigatório | A entrada, a escala e a manutenção de um cluster real, cada uma medida com carga e sem erro |
+| O rate limit "por IP" sem considerar proxy | **(2.5)** `TRUST_PROXY_HOPS` na app + NetworkPolicy na rede, com a falha e a brecha medidas antes de cada correção | Confiar num header é decisão de aplicação **e** rede; uma sem a outra é um buraco |
 | Módulo planejado "para um ambiente Linux dedicado" | Feito no Linux de desenvolvimento, com kind | O kind roda o Kubernetes oficial em containers: não precisa de máquina dedicada |
 
 ---
@@ -821,8 +1078,19 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
   real vem das métricas de produção (ou de um VPA em modo recomendação), não de um teste local.
 - **Readiness depende do banco:** com o Postgres fora, todas as réplicas saem do Service ao mesmo tempo, e o cliente
   recebe `connection refused` em vez de um 503 com mensagem (decisão consciente; ver "Três probes").
-- **Sem PodDisruptionBudget nem espalhamento garantido:** o scheduler distribuiu as réplicas pelos dois workers, mas
-  nada o obriga (`topologySpreadConstraints`), e um `kubectl drain` de nó pode tirar as duas de uma vez (2.5).
+- **O espalhamento vale só no agendamento:** depois de um drain ou de uma descida do HPA, as réplicas podem ficar no
+  mesmo nó até um rollout (medido). Em produção, o descheduler.
+- **StatefulSets presos ao nó:** o volume local-path do `kafka-0` e do `postgres-0` é uma pasta de um nó; um drain
+  desse nó os deixa `Pending` até ele voltar. Num cluster real, discos de rede (EBS, PD) acompanham o pod para outro nó
+  da mesma zona.
+- **Rate limit por réplica:** o limite real é o configurado vezes o número de réplicas (6/min com 2), e cresce com o
+  HPA. Em produção, *storage* compartilhado (Redis).
+- **Sem regra de saída (Egress):** as NetworkPolicies controlam só quem **entra**; um pod comprometido ainda abre
+  conexão para fora. Restringir a saída exige liberar o DNS e cada destino.
+- **Sem TLS na borda:** o listener do Gateway é HTTP. Certificado (cert-manager + listener HTTPS) fica para depois.
+- **Consumers sem escala automática:** o sinal deles é o lag, não a CPU (KEDA), e o teto é o número de partições.
+- **O nome do Service do Envoy no `k6-rollout-gateway.yaml`** é gerado pelo Envoy Gateway (hash de `namespace/nome` do
+  Gateway): estável enquanto o Gateway não for renomeado.
 - **A ordem banco → migração → API é manual** (`kubectl wait`); automatizá-la é a 2.6.
 - **Telemetria desligada no cluster** (`OTEL_SDK_DISABLED`): ainda não há coletor lá dentro. Com isso, ninguém vê
   no cluster o backlog da outbox, o lag dos consumers nem as reentregas: os alertas `OutboxStalled` e
@@ -835,8 +1103,6 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 - **A ordem Kafka → tópicos → workers é manual** (`kubectl wait`), como a do banco; automatizar é a 2.6.
 - **Os três Deployments dos workers repetem o mesmo bloco** (segurança, configuração, segredo); tirar a repetição
   (Kustomize) é a 2.6.
-- **Acesso só por `port-forward`:** um túnel de depuração, que fixa um pod e não balanceia; o acesso de verdade é o
-  Ingress (2.5).
 - **Erro de boot fora do JSON:** o que acontece antes de o pino assumir sai em texto.
 - **O digest no manifesto é atualizado à mão:** a cada imagem nova, alguém precisa trocar o `sha256`. Automatizar
   (a segunda metade do CD) é a 2.6.
@@ -867,7 +1133,11 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
 - [x] Relay e consumers como Deployments da mesma imagem; sem probes, com o porquê no ADR-0014 (2.4)
 - [x] Kafka fora do ar: escrita aceita, outbox acumulando e nenhum evento perdido (21 → 21) (2.4)
 - [x] Partições × réplicas e rollout de consumer sem efeito duplicado (81 → 81) (2.4)
-- [ ] Ingress, HPA e NetworkPolicy (2.5)
+- [x] A entrada pela Gateway API (Envoy Gateway), com IP de LoadBalancer e cada ferramenta num papel só (2.5)
+- [x] O IP do cliente atrás do proxy corrigido (`TRUST_PROXY_HOPS`) e a brecha que ele abre fechada pela rede (2.5)
+- [x] NetworkPolicy negando por padrão, com o bloqueio provado antes e depois (2.5)
+- [x] HPA de 2 a 5 sob rampa de carga, sem erro, com subida rápida e descida lenta (2.5)
+- [x] PDB e espalhamento obrigatório, com um drain sob carga sem erro (2.5)
 - [ ] Ambientes com Kustomize e GitOps (2.6)
 
 ### Perguntas de entrevista (2.1)
@@ -932,6 +1202,26 @@ Para apagar tudo: `kind delete cluster --name taskflow`. Num cluster novo, os Se
   Uma liveness que só prova que o event loop responde diria "vivo" com a fila parada (ADR-0014).
 - **"Por que não um Deployment para o Kafka?"** Identidade estável (o endereço anunciado) e um disco por broker que
   sobrevive ao pod; em produção, um operador (Strimzi) ou um serviço gerenciado.
+
+### Perguntas de entrevista (2.5)
+
+- **"Ingress ou Gateway API?"** Gateway API: o `Ingress` está congelado (o que falta vira anotação de cada controller)
+  e o ingress-nginx foi aposentado. A Gateway API separa papéis em objetos (`GatewayClass`, `Gateway`, `HTTPRoute`),
+  validados e portáveis entre implementações.
+- **"Como o cliente tem IP num cluster?"** Um Service `LoadBalancer`; numa nuvem, o *cloud controller manager* cria o
+  balanceador; no kind, o cloud-provider-kind faz esse papel.
+- **"Seu rate limit é por IP. Atrás de um proxy, que IP é esse?"** O do proxy, para todo mundo, se a app não confiar
+  no `X-Forwarded-For`. Confiar com **número** de saltos (nunca `true`, que deixaria o cliente forjar), e só com a rede
+  garantindo que apenas o proxy chega à app. Medido aqui: os dois lados do problema.
+- **"Como funciona NetworkPolicy?"** Quem aplica é o CNI; as políticas se somam; `default-deny` + liberações por
+  label. Bloqueio aparece como timeout. Um CNI sem suporte aceita e ignora: prove o bloqueio.
+- **"Como o HPA decide?"** CPU média em porcentagem do **request** (sem request, não funciona), com `behavior`
+  assimétrico: sobe rápido, desce devagar, para não oscilar. E o `replicas` sai do manifesto, senão o deploy briga com
+  o HPA.
+- **"O que é PodDisruptionBudget?"** Um limite para interrupções **voluntárias** (drain, upgrade), respeitado pela
+  Eviction API: o drain espera o substituto em vez de derrubar o serviço. Não protege de falha de nó.
+- **"Por que meus pods ficaram todos num nó?"** O scheduler decide uma vez; espalhamento e afinidade valem no
+  agendamento. Reagendar (rollout) ou descheduler.
 
 ---
 

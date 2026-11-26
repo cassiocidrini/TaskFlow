@@ -65,8 +65,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: relay
-          # A imagem da API (commit aa4d4a0), por digest
-          image: ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e083495cc2f09778ba0b111b2c7fd2ec24da241abaaf2c387d91398397
+          # A imagem da API (commit 074de6f), por digest
+          image: ghcr.io/cassiocidrini/taskflow@sha256:1343e88ccbf7a3700eef838613c6a43a116adaf6a4fc5c3f4ba5748f7708f37a
           command: ['node', 'dist/relay']
           envFrom:
             - configMapRef:
@@ -127,7 +127,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: notifications
-          image: ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e083495cc2f09778ba0b111b2c7fd2ec24da241abaaf2c387d91398397
+          image: ghcr.io/cassiocidrini/taskflow@sha256:1343e88ccbf7a3700eef838613c6a43a116adaf6a4fc5c3f4ba5748f7708f37a
           command: ['node', 'dist/notifications-consumer']
           envFrom:
             - configMapRef:
@@ -183,7 +183,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: reports
-          image: ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e083495cc2f09778ba0b111b2c7fd2ec24da241abaaf2c387d91398397
+          image: ghcr.io/cassiocidrini/taskflow@sha256:1343e88ccbf7a3700eef838613c6a43a116adaf6a4fc5c3f4ba5748f7708f37a
           command: ['node', 'dist/reports-consumer']
           envFrom:
             - configMapRef:

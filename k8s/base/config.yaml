@@ -28,3 +28,8 @@ data:
   SHUTDOWN_DRAIN_MS: '5000'
   # Watchdog: se um hook travar, a app sai sozinha, com log, antes do SIGKILL dos 30 s (terminationGracePeriodSeconds)
   SHUTDOWN_TIMEOUT_MS: '20000'
+  # Um proxy confiável na frente da API: o Envoy do Gateway (2.5). O IP do cliente, chave do rate limit, vem do último
+  # salto do X-Forwarded-For, escrito pelo Envoy. Sem isto, todo cliente teria o IP do Envoy e dividiria um limite só
+  # (medido). Seguro porque a NetworkPolicy `taskflow-api` só deixa o Envoy (e o k6) chegar à API: quem falasse direto
+  # com ela poderia mandar o header que quisesse (Módulo 06, "Por IP atrás de um proxy")
+  TRUST_PROXY_HOPS: '1'

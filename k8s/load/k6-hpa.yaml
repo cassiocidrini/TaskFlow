@@ -1,0 +1,102 @@
+# Carga em rampa para ver o HPA escalar a API (Módulo 02, etapa 2.5). Ferramenta de medição, fora de k8s/base.
+#
+#   kubectl apply -f k8s/load/k6-hpa.yaml                        inicia (~7 min)
+#   kubectl -n taskflow get hpa taskflow-api -w                  a CPU média e as réplicas, ao vivo
+#   kubectl -n taskflow logs -f job/k6-hpa                       o resultado
+#   kubectl -n taskflow delete -f k8s/load/k6-hpa.yaml           para rodar de novo (o template do Job é imutável)
+#
+# Taxa CONSTANTE de chegada (`ramping-arrival-rate`), e não um número fixo de usuários: com usuários fixos, a API mais
+# lenta recebe MENOS requisições (cada usuário espera a resposta), e a carga se ajusta à capacidade em vez de testá-la.
+# Aqui a taxa é imposta, como a de clientes reais.
+#
+# Alvo `/health/live`, como na 2.3: sem throttler e sem banco. Medido na 2.3: ~97 req/s custam ~0,04 núcleo por pod,
+# então ~170 req/s por pod chegam aos 70% de 100m do alvo do HPA. O pico de 1.200 req/s pede ~5 pods (o teto).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: k6-hpa
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: k6-hpa
+    app.kubernetes.io/part-of: taskflow
+data:
+  hpa.js: |
+    // Rampa: sobe a 1.200 req/s, segura (o HPA sobe), e zera (o HPA desce, mais devagar).
+    import http from 'k6/http';
+
+    export const options = {
+      scenarios: {
+        rampa: {
+          executor: 'ramping-arrival-rate',
+          startRate: 50,
+          timeUnit: '1s',
+          // Usuários virtuais disponíveis para sustentar a taxa (cada um faz uma requisição por vez)
+          preAllocatedVUs: 50,
+          maxVUs: 200,
+          stages: [
+            { target: 1200, duration: '1m' },  // sobe
+            { target: 1200, duration: '3m' },  // segura: o HPA reage aqui
+            { target: 0, duration: '30s' },    // para
+          ],
+        },
+      },
+      // Escalar não pode custar erro: novos pods só entram no Service quando a readiness passa (2.3)
+      thresholds: { http_req_failed: ['rate==0'] },
+    };
+
+    export default function () {
+      const res = http.get('http://taskflow-api/health/live', { timeout: '5s' });
+      if (res.status !== 200) {
+        console.warn(`${new Date().toISOString()} status=${res.status} erro=${res.error_code} ${res.error}`);
+      }
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-hpa
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: k6-hpa
+    app.kubernetes.io/part-of: taskflow
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k6-hpa
+        # O papel que a NetworkPolicy da API libera
+        app.kubernetes.io/component: load-test
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 12345
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: k6
+          image: grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276
+          args: ['run', '/scripts/hpa.js']
+          # O gerador de carga também precisa de CPU: sem request, ele disputaria o nó com a API que está medindo
+          resources:
+            requests:
+              cpu: 500m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: k6-hpa

@@ -20,6 +20,7 @@ funciona; os ADRs registram **por que** ela é assim e **quando** a decisão dei
 | [0012](0012-versionamento-da-api-e-janela-de-suporte.md) | Versionamento da API (sem versão na URL por padrão) e janela de suporte (6 meses, 90 dias de aviso) | Aceito | 14.8 |
 | [0013](0013-recursos-medidos-sem-limit-de-cpu.md) | Recursos dos pods: requests medidos, limit de memória e sem limit de CPU | Aceito | 02 (2.3) |
 | [0014](0014-workers-sem-probes.md) | Workers (relay e consumers) sem probes no Kubernetes: a saúde de um worker é o resultado (backlog e lag) | Aceito | 02 (2.4) |
+| [0015](0015-gateway-api-com-envoy-gateway.md) | A entrada do cluster pela Gateway API (Envoy Gateway, canal standard), e não Ingress | Aceito | 02 (2.5) |
 
 ## Formato
 
