@@ -30,7 +30,8 @@ genérica `senior-code-docs` — se ela estiver disponível, os princípios gera
    throttler em memória; state do Terraform sem lock; Jaeger v1 descontinuado; a API no cluster local sem
    deploy automatizado (digest trocado à mão), os Secrets criados à mão e o Postgres do cluster como root, com o
    namespace em `enforce: baseline`; no cluster, Kafka de um nó, push desligado (sem SQS) e workers sem probes nem
-   observabilidade (backlog e lag invisíveis lá dentro, ADR-0014) (Módulo 02 em construção). Ao corrigir uma, tire-a daqui no MESMO PR.
+   observabilidade (backlog e lag invisíveis lá dentro, ADR-0014); sem TLS na borda, sem regra de saída (Egress) e rate
+   limit por réplica (o limite real é o configurado × réplicas, e cresce com o HPA) (Módulo 02 em construção). Ao corrigir uma, tire-a daqui no MESMO PR.
 
 ## Swagger — como está montado
 

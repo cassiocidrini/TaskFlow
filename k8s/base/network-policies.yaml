@@ -1,0 +1,112 @@
+# Regras de rede do namespace `taskflow` (Módulo 02, etapa 2.5): quem pode abrir conexão com quem.
+#
+# Sem NetworkPolicy, a rede de pods do Kubernetes é PLANA: qualquer pod de qualquer namespace abre conexão com
+# qualquer outro (medido: o relay abria conexão com a API, a API com o Kafka, um consumer com a API; depois destas
+# políticas, os três dão timeout). Aqui a entrada é NEGADA por padrão, e cada liberação é explícita, por label do pod
+# de origem e porta de destino:
+#
+#   Envoy do Gateway (envoy-gateway-system) ─┐
+#   cargas de medição (k8s/load) ────────────┴─► API :3000
+#   API, migração, relay, consumers ─────────────► Postgres :5432
+#   relay, consumers, Job de tópicos ────────────► Kafka :9092
+#
+# A da API é a metade de REDE do TRUST_PROXY_HOPS (Módulo 06): a API acredita no X-Forwarded-For porque só o Envoy
+# consegue chegar até ela. Sem esta regra, um pod falando direto com a API forjava o IP e escapava do rate limit (medido).
+#
+# Quem aplica é o CNI. O do kind (kindnet) aplica, com o controller `kube-network-policies` (nftables). Um CNI sem
+# suporte aceita estes objetos e os IGNORA em silêncio: por isso a 2.5 prova o bloqueio, não só a criação.
+#
+# As probes do kubelet não passam por aqui: o tráfego do próprio nó para os seus pods é sempre permitido.
+# Só ENTRADA (Ingress). Restringir a saída (Egress) exige liberar o DNS (kube-dns) e cada destino externo; fica como
+# limitação do Módulo 02.
+---
+# A base: nenhum pod do namespace aceita conexão de entrada, a menos que outra política libere. NetworkPolicies se
+# SOMAM (união): cada uma abaixo abre um caminho; nenhuma fecha o que outra abriu
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/part-of: taskflow
+spec:
+  podSelector: {}
+  policyTypes: ['Ingress']
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: taskflow-api
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-api
+    app.kubernetes.io/part-of: taskflow
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: taskflow-api
+  policyTypes: ['Ingress']
+  ingress:
+    - from:
+        # namespaceSelector E podSelector no MESMO item: os pods do Envoy DESTE Gateway, no namespace do Envoy Gateway.
+        # Em itens separados, seria "qualquer pod daquele namespace" OU "pods com este label em qualquer namespace"
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: envoy-gateway-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: envoy
+              gateway.envoyproxy.io/owning-gateway-name: taskflow
+        # As cargas de medição (k8s/load: rollout da 2.3, escala da 2.5) chamam o Service direto, de dentro do
+        # namespace. Um label de PAPEL, e não o nome de cada ferramenta: carga nova não exige mexer nesta regra
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: load-test
+      ports:
+        - port: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: taskflow
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  policyTypes: ['Ingress']
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [taskflow-api, taskflow-migrate, taskflow-relay, taskflow-notifications, taskflow-reports]
+      ports:
+        - port: postgres
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/part-of: taskflow
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  policyTypes: ['Ingress']
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [taskflow-relay, taskflow-notifications, taskflow-reports, kafka-topics]
+      ports:
+        - port: kafka

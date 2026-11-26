@@ -1,0 +1,62 @@
+# O teste de rollout da 2.3, agora PELA BORDA: a carga entra no Envoy do Gateway, como um cliente de fora (Módulo 02,
+# etapa 2.5). Usa o MESMO script (ConfigMap `k6-rollout`, de k6-rollout.yaml, que precisa estar aplicado), mudando só
+# o alvo, para os números serem comparáveis com os da 2.3.
+#
+#   kubectl apply -f k8s/load/k6-rollout.yaml -f k8s/load/k6-rollout-gateway.yaml    (o primeiro traz o script)
+#   kubectl -n taskflow delete job k6-rollout                                          (só a borda importa aqui)
+#   kubectl -n taskflow rollout restart deployment/taskflow-api                        (no meio da carga)
+#   kubectl -n taskflow logs -f job/k6-rollout-gateway
+#
+# Por que medir de novo: o Envoy não usa o IP virtual do Service. Ele recebe a lista de pods prontos do controller do
+# Envoy Gateway (que observa os EndpointSlices) e mantém um POOL de conexões keep-alive com cada pod. Um pod saindo
+# chega ao Envoy com mais um salto de atraso, e uma conexão do pool pode estar apontando para ele: é a janela que a
+# drenagem (5 s) e o `Connection: close` (Módulo 01) precisam cobrir.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: k6-rollout-gateway
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: k6-rollout-gateway
+    app.kubernetes.io/part-of: taskflow
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k6-rollout-gateway
+        app.kubernetes.io/component: load-test
+        app.kubernetes.io/part-of: taskflow
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 12345
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: k6
+          image: grafana/k6:2.4.0@sha256:d41bb79cd8de5a7ad619b53570e3712633e8bff0937010a5c6c57a4747e7a276
+          args: ['run', '/scripts/rollout.js']
+          env:
+            # O Service que o Envoy Gateway cria para o Gateway `taskflow`. O sufixo é um hash de `namespace/nome` do
+            # Gateway: estável enquanto o Gateway não for renomeado (conferir com
+            # `kubectl -n envoy-gateway-system get svc -l gateway.envoyproxy.io/owning-gateway-name=taskflow`)
+            - name: TARGET
+              value: http://envoy-taskflow-taskflow-80ddb272.envoy-gateway-system
+            # O listener só aceita este host (gateway.yaml): sem o header, o Envoy responde 404
+            - name: HOST_HEADER
+              value: taskflow.local
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: k6-rollout

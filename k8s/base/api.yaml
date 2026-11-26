@@ -19,8 +19,10 @@ metadata:
     app.kubernetes.io/name: taskflow-api
     app.kubernetes.io/part-of: taskflow
 spec:
-  # Duas réplicas para ver o scheduler espalhar os pods pelos dois workers
-  replicas: 2
+  # SEM `replicas` desde a 2.5: quem decide o número é o HPA (autoscaling.yaml, de 2 a 5). Com o campo aqui, cada
+  # `kubectl apply` devolveria a API a 2 réplicas no meio de um pico, brigando com o HPA (dois donos do mesmo campo).
+  # Ao remover o campo de um objeto já aplicado, o `apply` o apagaria e o Deployment cairia para o padrão, 1 réplica:
+  # por isso a troca é feita com `kubectl apply set-last-applied` antes (Módulo 02, "Como reproduzir")
   # Como o Deployment reconhece os pods que são dele: pelos labels. Precisa bater com o template abaixo
   selector:
     matchLabels:
@@ -51,6 +53,23 @@ spec:
       #   20 s  watchdog: a app se derruba sozinha, com log, se algum hook travar (SHUTDOWN_TIMEOUT_MS)
       #   30 s  SIGKILL do kubelet: o último recurso, que não deveria acontecer nunca
       terminationGracePeriodSeconds: 30
+      # Réplicas OBRIGATORIAMENTE espalhadas pelos nós: no máximo 1 de diferença entre o nó com mais e o com menos
+      # pods da API. Sem isto, o scheduler costuma espalhar, mas pode pôr as duas no mesmo nó, e a queda desse nó
+      # derrubaria a API inteira
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          # Sem lugar que respeite o espalhamento, o pod fica Pending (e não vai para o nó lotado)
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: taskflow-api
+          # Nós com taint que o pod não tolera NÃO contam no cálculo. Sem isto (o padrão é Ignore), o control-plane
+          # (taint NoSchedule) contaria como um nó com 0 pods da API: com 3 réplicas (2 + 1 + 0), a diferença seria 2,
+          # e a terceira nunca subiria. O mesmo vale para um nó em `kubectl drain` (cordon = taint unschedulable)
+          nodeTaintsPolicy: Honor
+          # Só os pods da MESMA versão contam: durante um rolling update, os pods velhos não distorcem o cálculo
+          matchLabelKeys: ['pod-template-hash']
       securityContext:
         # O kubelet recusa iniciar o container se a imagem rodar como root. A imagem já declara `USER 1000:1000`
         # (numérico de propósito, Módulo 03 E.1), e aqui a regra vira garantia do cluster, não só da imagem
@@ -64,8 +83,8 @@ spec:
       containers:
         - name: api
           # Por DIGEST, nunca por tag (Módulo 03, E.3): é exatamente a imagem que o smoke e o Trivy testaram, com
-          # proveniência atestada (commit aa4d4a0). Uma tag pode passar a apontar para outra imagem; o digest não
-          image: ghcr.io/cassiocidrini/taskflow@sha256:41e6c0e083495cc2f09778ba0b111b2c7fd2ec24da241abaaf2c387d91398397
+          # proveniência atestada (commit 074de6f). Uma tag pode passar a apontar para outra imagem; o digest não
+          image: ghcr.io/cassiocidrini/taskflow@sha256:1343e88ccbf7a3700eef838613c6a43a116adaf6a4fc5c3f4ba5748f7708f37a
           ports:
             - name: http
               containerPort: 3000
@@ -149,7 +168,7 @@ spec:
 # O endereço ESTÁVEL da API dentro do cluster: o IP de um pod muda a cada recriação (visto na 2.1), o do Service não.
 # ClusterIP: um IP virtual, alcançável só de dentro do cluster, que o kube-proxy de cada nó distribui entre os pods
 # com o label abaixo. O DNS `taskflow-api.taskflow` (ou só `taskflow-api`, no mesmo namespace) resolve para ele.
-# De fora, por enquanto: `kubectl port-forward` (o acesso de verdade, Ingress, é a 2.5)
+# De fora, por enquanto: `kubectl port-forward` (o acesso de verdade, pela Gateway API, é a 2.5)
 apiVersion: v1
 kind: Service
 metadata:

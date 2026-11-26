@@ -10,7 +10,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: taskflow-migrate-aa4d4a0
+  name: taskflow-migrate-074de6f
   namespace: taskflow
   labels:
     app.kubernetes.io/name: taskflow-migrate
@@ -38,8 +38,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: migrate
-          # A imagem de migração do MESMO commit da API (aa4d4a0), por digest, publicada pelo publish-image.yml
-          image: ghcr.io/cassiocidrini/taskflow-migrate@sha256:6ac28dc62e8d08378098f3b12625cbbf96b9700cdbb094cdb726254cd22445eb
+          # A imagem de migração do MESMO commit da API (074de6f), por digest, publicada pelo publish-image.yml
+          image: ghcr.io/cassiocidrini/taskflow-migrate@sha256:40837ed73333c4a3f77be84d5dd44b6b4954ea568f8c8daa8550ae2e92728a77
           env:
             - name: POSTGRES_PASSWORD
               valueFrom:

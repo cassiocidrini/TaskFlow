@@ -1,0 +1,70 @@
+# Escala automática e orçamento de interrupção da API (Módulo 02, etapa 2.5).
+#
+# HPA (HorizontalPodAutoscaler): ajusta o número de réplicas pela CPU que o metrics-server mede. A utilização é relativa
+# ao REQUEST do container (100m, ADR-0013): 70% = 70m por pod em média. Sem request, o HPA não tem com o que comparar.
+#
+# PDB (PodDisruptionBudget): limita quantos pods podem sair POR VONTADE de alguém (um `kubectl drain` de manutenção, um
+# upgrade de nó, o autoscaler de nós), e não por falha. O drain espera em vez de derrubar a API.
+#
+# Os consumers NÃO têm HPA: CPU não é o sinal deles (é o lag, que exige KEDA), e o teto é o número de partições (3,
+# medido na 2.4).
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: taskflow-api
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-api
+    app.kubernetes.io/part-of: taskflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: taskflow-api
+  # Nunca abaixo de 2: uma réplica só não sobrevive à queda de um nó nem a um rollout sem degradar
+  minReplicas: 2
+  # O teto protege o banco: cada réplica abre o seu pool de conexões com o Postgres
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    # Subir rápido: até dobrar a cada 30 s, sem janela de estabilização (pico de tráfego não espera)
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    # Descer devagar: só depois de 2 min abaixo do alvo, e 1 pod por minuto. Evita o "sobe-desce" (flapping) quando a
+    # carga oscila. O padrão do Kubernetes é 5 min; 2 min aqui para o experimento caber numa sessão
+    scaleDown:
+      stabilizationWindowSeconds: 120
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: taskflow-api
+  namespace: taskflow
+  labels:
+    app.kubernetes.io/name: taskflow-api
+    app.kubernetes.io/part-of: taskflow
+spec:
+  # No máximo 1 pod da API fora por interrupção voluntária, com qualquer número de réplicas. `maxUnavailable`, e não
+  # `minAvailable: 1`: com o HPA em 5, "pelo menos 1" deixaria um drain tirar 4 de uma vez
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: taskflow-api
+  # Pod que não está pronto (travado no boot, em CrashLoopBackOff) pode ser despejado mesmo com o orçamento esgotado:
+  # sem isto, um pod quebrado travaria o drain do nó para sempre
+  unhealthyPodEvictionPolicy: AlwaysAllow
